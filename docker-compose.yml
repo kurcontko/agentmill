@@ -1,4 +1,5 @@
 services:
+  # Headless mode — runs Claude in pipe mode (no TUI), logs to ./logs/
   agent:
     build: .
     environment:
@@ -15,3 +16,24 @@ services:
       - ./repo:/upstream          # optional: mount a local repo
       - ~/.claude:/root/.claude   # optional: mount subscription auth
     restart: unless-stopped
+
+  # TUI dashboard — forwards Claude Code's interactive UI to your terminal.
+  # Run with: docker compose run dashboard
+  dashboard:
+    build: .
+    entrypoint: ["/entrypoint-tui.sh"]
+    tty: true
+    stdin_open: true
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - REPO_URL=${REPO_URL:-}
+      - MODEL=${MODEL:-sonnet}
+      - MAX_ITERATIONS=${MAX_ITERATIONS:-1}
+      - LOOP_DELAY=${LOOP_DELAY:-5}
+      - GIT_USER=${GIT_USER:-agentmill}
+      - GIT_EMAIL=${GIT_EMAIL:-agent@agentmill}
+    volumes:
+      - ./prompts:/prompts
+      - ./logs:/workspace/logs
+      - ./repo:/upstream
+      - ~/.claude:/root/.claude
