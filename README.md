@@ -49,16 +49,38 @@ claude login
 ```
 Leave `ANTHROPIC_API_KEY` blank in `.env` when using this method.
 
+## TUI Dashboard Mode
+
+Want to **see** what the agent is doing? Run the dashboard service — it forwards Claude Code's full interactive TUI to your terminal. Same UI as running `claude` locally, but autonomous (all tool calls auto-approved).
+
+```bash
+# Launch with TUI — you see the full Claude Code interface
+docker compose run dashboard
+
+# Same env vars apply:
+MODEL=opus MAX_ITERATIONS=3 docker compose run dashboard
+```
+
+The TUI is purely a **monitoring window** — Claude works autonomously while you watch tool calls, file edits, and reasoning in real time. You can scroll, review output, or just let it run.
+
+For headless/background operation, use the default `agent` service instead:
+```bash
+docker compose up       # headless, logs to ./logs/
+```
+
 ## How It Works
 
 Each iteration of the loop:
 
 1. `git pull --rebase` to get latest changes
-2. Run `claude -p "$(cat PROMPT.md)"` with full autonomy
+2. Run Claude with full autonomy (`--dangerously-skip-permissions`)
 3. Commit all changes with a timestamp
 4. Push to origin (retries on conflict)
 5. Log the session to `./logs/`
 6. Repeat
+
+**Headless mode** (`agent` service): uses `-p` pipe mode, no UI, output goes to logs.
+**TUI mode** (`dashboard` service): forwards Claude's interactive terminal UI to your terminal.
 
 The container restarts automatically on crash (`restart: unless-stopped`).
 

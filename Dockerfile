@@ -11,7 +11,10 @@ RUN npm install -g @anthropic-ai/claude-code
 
 WORKDIR /workspace
 
+# Entrypoints
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+COPY entrypoint-tui.sh /entrypoint-tui.sh
+RUN chmod +x /entrypoint.sh /entrypoint-tui.sh
 
+# Default: headless pipe mode. Use entrypoint-tui.sh for TUI dashboard.
 ENTRYPOINT ["/entrypoint.sh"]
