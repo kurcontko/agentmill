@@ -1,6 +1,14 @@
-# AgentMill
+<p align="center">
+  <img src="assets/agentmill.png" alt="AgentMill" width="200">
+</p>
 
-A Docker container that runs Claude CLI in a respawning loop. Give it a git repo and a prompt — it clones, works, commits, pushes, and repeats. Tasks go in, code comes out.
+<h1 align="center">AgentMill</h1>
+
+<p align="center">
+  A Docker container that runs Claude CLI in a respawning loop.<br>
+  Give it a git repo and a prompt — it clones, works, commits, pushes, and repeats.<br>
+  <strong>Tasks go in, code comes out.</strong>
+</p>
 
 ## Quick Start
 
