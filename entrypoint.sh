@@ -10,6 +10,7 @@ MAX_ITERATIONS="${MAX_ITERATIONS:-0}" # 0 = infinite
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
 LOOP_DELAY="${LOOP_DELAY:-5}" # seconds between iterations
+UPSTREAM_PATH="${REPO_PATH:-/upstream}" # path to repo inside /upstream mount
 
 # ── State ──────────────────────────────────────────────────────
 ITERATION=0
@@ -32,14 +33,16 @@ log() {
 }
 
 # ── Auth check ─────────────────────────────────────────────────
+CLAUDE_HOME="$HOME/.claude"
+
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     log "Auth: using ANTHROPIC_API_KEY"
-elif [ -d "/root/.claude" ] && [ "$(ls -A /root/.claude 2>/dev/null)" ]; then
-    log "Auth: using mounted ~/.claude (subscription login)"
+elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
 else
     log "ERROR: No auth configured."
-    log "  Option 1: Set ANTHROPIC_API_KEY env var"
-    log "  Option 2: Mount your ~/.claude directory (from 'claude login' on host)"
+    log "  Option 1: Set ANTHROPIC_API_KEY env var (API key)"
+    log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (run 'claude setup-token' on host)"
     exit 1
 fi
 
@@ -55,9 +58,9 @@ setup_repo() {
         return
     fi
 
-    if [ -d "/upstream/.git" ]; then
-        log "Cloning from mounted /upstream volume..."
-        git clone /upstream "$REPO_DIR"
+    if [ -d "$UPSTREAM_PATH/.git" ]; then
+        log "Cloning from mounted volume: $UPSTREAM_PATH"
+        git clone "$UPSTREAM_PATH" "$REPO_DIR"
     elif [ -n "${REPO_URL:-}" ]; then
         log "Cloning from REPO_URL: $REPO_URL"
         git clone "$REPO_URL" "$REPO_DIR"
@@ -123,7 +126,7 @@ while true; do
     claude --dangerously-skip-permissions \
         -p "$PROMPT_CONTENT" \
         --model "$MODEL" \
-        2>&1 | tee "$SESSION_LOG"
+        2>&1 | stdbuf -oL tee "$SESSION_LOG"
     CLAUDE_EXIT=$?
     set -e
 
