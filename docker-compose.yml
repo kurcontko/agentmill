@@ -1,8 +1,12 @@
 services:
+  # Headless mode - runs Claude in pipe mode (no TUI), logs to ./logs/
   agent:
     build: .
     environment:
+      - ENGINE=${ENGINE:-claude}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
       - REPO_URL=${REPO_URL:-}
       - MODEL=${MODEL:-sonnet}
@@ -10,10 +14,40 @@ services:
       - LOOP_DELAY=${LOOP_DELAY:-5}
       - GIT_USER=${GIT_USER:-agentmill}
       - GIT_EMAIL=${GIT_EMAIL:-agent@agentmill}
-      - REPO_PATH=${REPO_PATH:-/upstream}
     volumes:
       - ./prompts:/prompts
       - ./logs:/workspace/logs
-      - ./repo:/upstream          # optional: mount a local repo
-    tty: true
+      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
+      # Host Claude config
+      - ~/.claude.json:/home/agent/.host-claude.json:ro
+      - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
+      - ~/.claude/plugins:/home/agent/.host-plugins:ro
+      - ~/.claude/commands:/home/agent/.claude/commands:ro
     restart: unless-stopped
+
+  # TUI dashboard - forwards interactive UI to your terminal.
+  # Run with: docker compose run dashboard
+  dashboard:
+    build: .
+    entrypoint: ["/entrypoint-tui.sh"]
+    tty: true
+    stdin_open: true
+    environment:
+      - ENGINE=${ENGINE:-claude}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN:-}
+      - MODEL=${MODEL:-sonnet}
+      - AUTO_RALPH=${AUTO_RALPH:-false}
+      - GIT_USER=${GIT_USER:-agentmill}
+      - GIT_EMAIL=${GIT_EMAIL:-agent@agentmill}
+    volumes:
+      - ./prompts:/prompts
+      - ./logs:/workspace/logs
+      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
+      # Host Claude config
+      - ~/.claude.json:/home/agent/.host-claude.json:ro
+      - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
+      - ~/.claude/plugins:/home/agent/.host-plugins:ro
+      - ~/.claude/commands:/home/agent/.claude/commands:ro
