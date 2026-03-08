@@ -23,6 +23,9 @@ jobs:
         with:
           scandir: "."
           format: gcc
+          severity: warning
+          additional_files: ""
+          check_together: "yes"
 
   hadolint:
     name: Hadolint (Dockerfile)

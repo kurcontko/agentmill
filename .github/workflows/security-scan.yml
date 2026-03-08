@@ -22,13 +22,14 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Run Trivy (filesystem)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
           scan-type: fs
           scan-ref: "."
           format: sarif
           output: trivy-fs.sarif
           severity: CRITICAL,HIGH
+          trivy-config: ""
 
       - name: Upload Trivy results
         uses: github/codeql-action/upload-sarif@v3
@@ -47,12 +48,13 @@ jobs:
         run: docker build -t agentmill:scan .
 
       - name: Run Trivy (image)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@master
         with:
           image-ref: agentmill:scan
           format: sarif
           output: trivy-image.sarif
           severity: CRITICAL,HIGH
+          trivy-config: ""
 
       - name: Upload Trivy results
         uses: github/codeql-action/upload-sarif@v3
