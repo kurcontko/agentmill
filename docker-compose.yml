@@ -1,39 +1,130 @@
+x-common-env: &common-env
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+  MODEL: ${MODEL:-sonnet}
+  GIT_USER: ${GIT_USER:-agentmill}
+  GIT_EMAIL: ${GIT_EMAIL:-agent@agentmill}
+  AUTO_SETUP: ${AUTO_SETUP:-true}
+  REPO_SETUP_COMMAND: ${REPO_SETUP_COMMAND:-}
+  EXTRA_PYTHON_TOOLS: ${EXTRA_PYTHON_TOOLS:-}
+  AUTO_RALPH_MAX_ITERATIONS: ${AUTO_RALPH_MAX_ITERATIONS:-10}
+  AUTO_RALPH_COMPLETION_PROMISE: ${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}
+
+x-agent-base: &agent-base
+  build: .
+  restart: unless-stopped
+  volumes: &shared-volumes
+    - ./prompts:/prompts
+    - ./logs:/workspace/logs
+    - ~/.claude.json:/home/agent/.host-claude.json:ro
+    - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
+    - ~/.claude/plugins:/home/agent/.host-plugins:ro
+    - ~/.claude/commands:/home/agent/.claude/commands:ro
+
 services:
-  # Headless mode — runs Claude in pipe mode (no TUI), logs to ./logs/
+# --- Single agent (default) -----------------------------------
+# Mounts repo directly. Simple, no sync overhead.
+# Usage: docker compose up agent
   agent:
-    build: .
+    <<: *agent-base
     environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - REPO_URL=${REPO_URL:-}
-      - MODEL=${MODEL:-sonnet}
-      - MAX_ITERATIONS=${MAX_ITERATIONS:-0}
-      - LOOP_DELAY=${LOOP_DELAY:-5}
-      - GIT_USER=${GIT_USER:-agentmill}
-      - GIT_EMAIL=${GIT_EMAIL:-agent@agentmill}
+      <<: *common-env
+      AGENT_ID: "1"
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
+      LOOP_DELAY: ${LOOP_DELAY:-5}
     volumes:
       - ./prompts:/prompts
       - ./logs:/workspace/logs
-      - ./repo:/upstream          # optional: mount a local repo
-      - ~/.claude:/root/.claude   # optional: mount subscription auth
-    restart: unless-stopped
+      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
+      - ~/.claude.json:/home/agent/.host-claude.json:ro
+      - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
+      - ~/.claude/plugins:/home/agent/.host-plugins:ro
+      - ~/.claude/commands:/home/agent/.claude/commands:ro
 
-  # TUI dashboard — forwards Claude Code's interactive UI to your terminal.
-  # Run with: docker compose run dashboard
+# --- Multi-agent: independent clones --------------------------
+# Mounts repo as upstream. Each agent clones into its own
+# workspace and syncs via git push/pull. No race conditions.
+#
+# Usage:
+#   docker compose up agent-1 agent-2 agent-3
+#
+# Different prompts/roles per agent:
+#   PROMPT_FILE_1=/prompts/core.md PROMPT_FILE_2=/prompts/tests.md \
+#     docker compose up agent-1 agent-2
+#
+# All agents on same branch (they'll rebase on conflict):
+#   AGENT_BRANCH=main docker compose up agent-1 agent-2
+  agent-1:
+    <<: *agent-base
+    environment:
+      <<: *common-env
+      AGENT_ID: "1"
+      AGENT_BRANCH: ${AGENT_BRANCH:-}
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
+      LOOP_DELAY: ${LOOP_DELAY:-5}
+      PROMPT_FILE: ${PROMPT_FILE_1:-/prompts/PROMPT.md}
+    volumes:
+      - ./prompts:/prompts
+      - ./logs:/workspace/logs
+      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/upstream
+      - ~/.claude.json:/home/agent/.host-claude.json:ro
+      - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
+      - ~/.claude/plugins:/home/agent/.host-plugins:ro
+      - ~/.claude/commands:/home/agent/.claude/commands:ro
+
+  agent-2:
+    <<: *agent-base
+    environment:
+      <<: *common-env
+      AGENT_ID: "2"
+      AGENT_BRANCH: ${AGENT_BRANCH:-}
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
+      LOOP_DELAY: ${LOOP_DELAY:-5}
+      PROMPT_FILE: ${PROMPT_FILE_2:-/prompts/PROMPT.md}
+    volumes:
+      - ./prompts:/prompts
+      - ./logs:/workspace/logs
+      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/upstream
+      - ~/.claude.json:/home/agent/.host-claude.json:ro
+      - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
+      - ~/.claude/plugins:/home/agent/.host-plugins:ro
+      - ~/.claude/commands:/home/agent/.claude/commands:ro
+
+  agent-3:
+    <<: *agent-base
+    environment:
+      <<: *common-env
+      AGENT_ID: "3"
+      AGENT_BRANCH: ${AGENT_BRANCH:-}
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
+      LOOP_DELAY: ${LOOP_DELAY:-5}
+      PROMPT_FILE: ${PROMPT_FILE_3:-/prompts/PROMPT.md}
+    volumes:
+      - ./prompts:/prompts
+      - ./logs:/workspace/logs
+      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/upstream
+      - ~/.claude.json:/home/agent/.host-claude.json:ro
+      - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
+      - ~/.claude/plugins:/home/agent/.host-plugins:ro
+      - ~/.claude/commands:/home/agent/.claude/commands:ro
+
+# --- TUI dashboard --------------------------------------------
+# Forwards Claude Code's interactive UI to your terminal.
+# Usage: docker compose run dashboard
   dashboard:
-    build: .
+    <<: *agent-base
     entrypoint: ["/entrypoint-tui.sh"]
     tty: true
     stdin_open: true
+    restart: "no"
     environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - REPO_URL=${REPO_URL:-}
-      - MODEL=${MODEL:-sonnet}
-      - MAX_ITERATIONS=${MAX_ITERATIONS:-1}
-      - LOOP_DELAY=${LOOP_DELAY:-5}
-      - GIT_USER=${GIT_USER:-agentmill}
-      - GIT_EMAIL=${GIT_EMAIL:-agent@agentmill}
+      <<: *common-env
+      AUTO_RALPH: ${AUTO_RALPH:-false}
     volumes:
       - ./prompts:/prompts
       - ./logs:/workspace/logs
-      - ./repo:/upstream
-      - ~/.claude:/root/.claude
+      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
+      - ~/.claude.json:/home/agent/.host-claude.json:ro
+      - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
+      - ~/.claude/plugins:/home/agent/.host-plugins:ro
+      - ~/.claude/commands:/home/agent/.claude/commands:ro

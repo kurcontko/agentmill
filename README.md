@@ -10,6 +10,15 @@
   <strong>Tasks go in, code comes out.</strong>
 </p>
 
+<p align="center">
+  <a href="https://github.com/kurcontko/agentmill/actions/workflows/ci.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/kurcontko/agentmill/actions/workflows/security-scan.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/security-scan.yml/badge.svg" alt="Security Scan"></a>
+  <a href="https://github.com/kurcontko/agentmill/actions/workflows/codeql.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/codeql.yml/badge.svg" alt="CodeQL"></a>
+  <a href="https://sonarcloud.io/summary/overall?id=kurcontko_agentmill"><img src="https://sonarcloud.io/api/project_badges/measure?project=kurcontko_agentmill&metric=security_rating" alt="Security Rating"></a>
+  <a href="https://sonarcloud.io/summary/overall?id=kurcontko_agentmill"><img src="https://sonarcloud.io/api/project_badges/measure?project=kurcontko_agentmill&metric=reliability_rating" alt="Reliability Rating"></a>
+  <a href="https://github.com/ossf/scorecard"><img src="https://api.scorecard.dev/projects/github.com/kurcontko/agentmill/badge" alt="OpenSSF Scorecard"></a>
+</p>
+
 ## Quick Start
 
 ```bash
@@ -96,6 +105,63 @@ The container restarts automatically on crash (`restart: unless-stopped`).
 | `GIT_USER` | `agentmill` | Git commit author name |
 | `GIT_EMAIL` | `agent@agentmill` | Git commit author email |
 | `PROMPT_FILE` | `/prompts/PROMPT.md` | Path to prompt file inside container |
+| `AUTO_SETUP` | `true` | Auto-bootstrap repo-local dev environment on container start |
+| `REPO_SETUP_COMMAND` | — | Custom repo bootstrap command, run in repo root before Claude starts |
+| `EXTRA_PYTHON_TOOLS` | — | Extra Python CLI tools to install into repo `.venv` (for example `ruff pytest`) |
+| `AUTO_RALPH_MAX_ITERATIONS` | `10` | Ralph loop cap for dashboard auto-start |
+| `AUTO_RALPH_COMPLETION_PROMISE` | `TASK_COMPLETE` | Exact `<promise>...</promise>` token Ralph watches for |
+
+## Repo Setup Contract
+
+For consistency across repositories, AgentMill now uses this setup order when a container starts:
+
+1. If `REPO_SETUP_COMMAND` is set, run that in the repo root.
+2. Else if `pyproject.toml` and `uv.lock` exist, run `uv sync --frozen` and include the `dev` extra and `dev` dependency group when present.
+3. Else if `pyproject.toml` exists, create `.venv` and install the project with `pip`, including `.[dev]` when present.
+4. Else if `requirements.txt` exists, create `.venv` and install it.
+
+After setup, AgentMill prepends `./.venv/bin` to `PATH`, so repo-local tools like `pytest`, `ruff`, and project CLIs are available to Claude.
+
+Recommended standard for repos:
+
+- Python repos: declare dev tools in `pyproject.toml` and commit `uv.lock`
+- Non-standard repos: set `REPO_SETUP_COMMAND`
+- Missing one-off Python tools: use `EXTRA_PYTHON_TOOLS`
+
+Example:
+
+```bash
+REPO_PATH=/path/to/repo \
+REPO_SETUP_COMMAND='uv sync --frozen --extra dev --group dev' \
+EXTRA_PYTHON_TOOLS='ruff pytest' \
+docker-compose run --rm dashboard
+```
+
+Dashboard with Ralph auto-start and bounded looping:
+
+```bash
+REPO_PATH=/path/to/repo \
+EXTRA_PYTHON_TOOLS='ruff' \
+AUTO_RALPH=true \
+AUTO_RALPH_MAX_ITERATIONS=10 \
+AUTO_RALPH_COMPLETION_PROMISE=TASK_COMPLETE \
+docker-compose run --rm \
+  -e PROMPT_FILE=/prompts/PROMPT_V5_WORK.md \
+  dashboard
+```
+
+## Apple Silicon
+
+On a MacBook with Colima, containers usually run as Linux `arm64`, not macOS ARM. That is fine for most Python tooling, including `pytest`, `uv`, and `ruff`, as long as Linux `arm64` wheels exist.
+
+If a dependency has no Linux `arm64` wheel or fails to build natively, force x86_64 emulation for that run:
+
+```bash
+DOCKER_DEFAULT_PLATFORM=linux/amd64 docker-compose build dashboard
+DOCKER_DEFAULT_PLATFORM=linux/amd64 docker-compose run --rm dashboard
+```
+
+Use that only when needed because it is slower than native `arm64`.
 
 ## Volumes
 

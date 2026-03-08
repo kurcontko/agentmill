@@ -1,0 +1,35 @@
+#!/usr/bin/expect -f
+
+set timeout 15
+
+set model [expr {[info exists env(MODEL)] ? $env(MODEL) : "sonnet"}]
+set prompt [expr {[info exists env(CLAUDE_INITIAL_PROMPT)] ? $env(CLAUDE_INITIAL_PROMPT) : ""}]
+
+set cmd [list claude --model $model]
+if {$prompt ne ""} {
+    lappend cmd $prompt
+}
+
+eval spawn $cmd
+
+while {1} {
+    expect {
+        -re {Is this a project you created or one you trust\?} {
+            send "\r"
+            exp_continue
+        }
+        -re {WARNING: Claude Code running in Bypass Permissions mode} {
+            send "\033\[B\r"
+            exp_continue
+        }
+        timeout {
+            break
+        }
+        eof {
+            set result [wait]
+            exit [lindex $result 3]
+        }
+    }
+}
+
+interact
