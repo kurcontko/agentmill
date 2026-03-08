@@ -1,6 +1,9 @@
 x-common-env: &common-env
+  ENGINE: ${ENGINE:-claude}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
   MODEL: ${MODEL:-sonnet}
   GIT_USER: ${GIT_USER:-agentmill}
   GIT_EMAIL: ${GIT_EMAIL:-agent@agentmill}

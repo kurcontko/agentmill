@@ -11,6 +11,7 @@ MAX_ITERATIONS="${MAX_ITERATIONS:-0}"  # 0 = infinite
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
 LOOP_DELAY="${LOOP_DELAY:-5}"  # seconds between iterations
+ENGINE="${ENGINE:-claude}"  # claude or opencode
 
 # — State ————————————————————————————————————————
 ITERATION=0
@@ -34,22 +35,36 @@ log() {
 }
 
 # — Auth check ———————————————————————————————————
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-    log "Auth: using ANTHROPIC_API_KEY"
-elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-    log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
-    if [[ ! -f "$HOME/.claude.json" ]]; then
-        echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
+if [[ "$ENGINE" = "opencode" ]]; then
+    if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+        log "Auth: using OPENAI_API_KEY (OpenCode)"
+    elif [[ -n "${GEMINI_API_KEY:-}" ]]; then
+        log "Auth: using GEMINI_API_KEY (OpenCode)"
+    elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        log "Auth: using ANTHROPIC_API_KEY (OpenCode)"
+    else
+        log "ERROR: No auth configured for OpenCode."
+        log "  Set OPENAI_API_KEY, GEMINI_API_KEY, or ANTHROPIC_API_KEY."
+        exit 1
     fi
 else
-    log "ERROR: No auth configured."
-    log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
-    log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (subscription, from 'claude setup-token')"
-    exit 1
-fi
+    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        log "Auth: using ANTHROPIC_API_KEY"
+    elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+        log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
+        if [[ ! -f "$HOME/.claude.json" ]]; then
+            echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
+        fi
+    else
+        log "ERROR: No auth configured."
+        log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
+        log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (subscription, from 'claude setup-token')"
+        exit 1
+    fi
 
-# — Merge host Claude config (MCP, plugins, settings) ———
-/setup-claude-config.sh
+    # — Merge host Claude config (MCP, plugins, settings) ———
+    /setup-claude-config.sh
+fi
 
 # — Git configuration ————————————————————————————
 git config --global user.name "${GIT_USER}-${AGENT_ID}"
@@ -127,31 +142,38 @@ log "Preparing repo environment..."
 log "Repo environment ready."
 
 # — Override project settings for autonomous mode ————————
-SETTINGS_LOCAL=".claude/settings.local.json"
-SETTINGS_BACKUP=""
-mkdir -p .claude
+if [[ "$ENGINE" = "opencode" ]]; then
+    # Generate opencode.json config in the repo root
+    /setup-opencode-config.sh
+    restore_settings() { return 0; }
+    trap 'restore_settings' EXIT
+else
+    SETTINGS_LOCAL=".claude/settings.local.json"
+    SETTINGS_BACKUP=""
+    mkdir -p .claude
 
-if [[ -f "$SETTINGS_LOCAL" ]]; then
-    SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
+    if [[ -f "$SETTINGS_LOCAL" ]]; then
+        SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
+    fi
+
+    # NOSONAR — autonomous agent container requires full tool permissions
+    echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit","mcp__*"],"defaultMode":"bypassPermissions"}}' \
+        > "$SETTINGS_LOCAL"
+
+    restore_settings() {
+        if [[ -n "$SETTINGS_BACKUP" ]]; then
+            echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
+        else
+            rm -f "$SETTINGS_LOCAL"
+        fi
+        return 0
+    }
+
+    trap 'restore_settings' EXIT
 fi
 
-# NOSONAR — autonomous agent container requires full tool permissions
-echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit","mcp__*"],"defaultMode":"bypassPermissions"}}' \
-    > "$SETTINGS_LOCAL"
-
-restore_settings() {
-    if [[ -n "$SETTINGS_BACKUP" ]]; then
-        echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
-    else
-        rm -f "$SETTINGS_LOCAL"
-    fi
-    return 0
-}
-
-trap 'restore_settings' EXIT
-
 # — Main loop ————————————————————————————————————
-log "Starting agent loop (model=$MODEL, max_iterations=$MAX_ITERATIONS)"
+log "Starting agent loop (engine=$ENGINE, model=$MODEL, max_iterations=$MAX_ITERATIONS)"
 
 while true; do
     if [[ "$SHUTTING_DOWN" = true ]]; then
@@ -171,20 +193,27 @@ while true; do
         exit 1
     fi
 
-    # Run Claude
-    log "Running Claude (session log: $SESSION_LOG)..."
+    # Run engine
     PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
 
-    # NOSONAR — dangerously-skip-permissions is required for headless autonomous operation
     set +e
-    claude --dangerously-skip-permissions \
-        -p "$PROMPT_CONTENT" \
-        --model "$MODEL" \
-        2>&1 | tee "$SESSION_LOG"
-    CLAUDE_EXIT=$?
+    if [[ "$ENGINE" = "opencode" ]]; then
+        log "Running OpenCode (session log: $SESSION_LOG)..."
+        opencode run "$PROMPT_CONTENT" \
+            2>&1 | tee "$SESSION_LOG"
+        ENGINE_EXIT=$?
+    else
+        log "Running Claude (session log: $SESSION_LOG)..."
+        # NOSONAR — dangerously-skip-permissions is required for headless autonomous operation
+        claude --dangerously-skip-permissions \
+            -p "$PROMPT_CONTENT" \
+            --model "$MODEL" \
+            2>&1 | tee "$SESSION_LOG"
+        ENGINE_EXIT=$?
+    fi
     set -e
 
-    log "Claude exited with code $CLAUDE_EXIT"
+    log "Engine exited with code $ENGINE_EXIT"
 
     # Commit any changes
     if [[ -n "$(git status --porcelain)" ]]; then

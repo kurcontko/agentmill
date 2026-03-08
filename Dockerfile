@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
     python3-venv \
     ripgrep \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g @anthropic-ai/claude-code \
+    && npm install -g @anthropic-ai/claude-code opencode-ai \
     && useradd -m -s /bin/bash agent
 WORKDIR /workspace
 RUN chown agent:agent /workspace
@@ -24,8 +24,9 @@ COPY entrypoint.sh /entrypoint.sh
 COPY entrypoint-tui.sh /entrypoint-tui.sh
 COPY setup-claude-config.sh /setup-claude-config.sh
 COPY setup-repo-env.sh /setup-repo-env.sh
+COPY setup-opencode-config.sh /setup-opencode-config.sh
 COPY auto-trust.exp /auto-trust.exp
-RUN chmod +x /entrypoint.sh /entrypoint-tui.sh /setup-claude-config.sh /setup-repo-env.sh /auto-trust.exp
+RUN chmod +x /entrypoint.sh /entrypoint-tui.sh /setup-claude-config.sh /setup-repo-env.sh /setup-opencode-config.sh /auto-trust.exp
 
 USER agent
 

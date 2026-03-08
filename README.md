@@ -5,7 +5,8 @@
 <h1 align="center">AgentMill</h1>
 
 <p align="center">
-  A Docker container that runs Claude CLI in a respawning loop.<br>
+  A Docker container that runs AI coding agents in a respawning loop.<br>
+  Supports <strong>Claude Code</strong> and <strong>OpenCode</strong> engines.<br>
   Give it a git repo and a prompt — it clones, works, commits, pushes, and repeats.<br>
   <strong>Tasks go in, code comes out.</strong>
 </p>
@@ -43,7 +44,26 @@ tail -f logs/agent.log
 docker compose down
 ```
 
+## Engine Selection
+
+AgentMill supports two AI coding engines. Set `ENGINE` in your `.env`:
+
+| Engine | Value | Description |
+|--------|-------|-------------|
+| Claude Code | `claude` (default) | Anthropic's Claude CLI agent |
+| OpenCode | `opencode` | Multi-provider agent (OpenAI, Google, Anthropic) |
+
+```bash
+# Use OpenCode with GPT-4o
+ENGINE=opencode OPENAI_API_KEY=sk-... docker compose up
+
+# Use OpenCode with Gemini
+ENGINE=opencode GEMINI_API_KEY=... MODEL=gemini-2.5-pro docker compose up
+```
+
 ## Authentication
+
+### Claude Code (default)
 
 Two options — use whichever you prefer:
 
@@ -57,6 +77,13 @@ claude login
 # The docker-compose.yml already mounts ~/.claude into the container
 ```
 Leave `ANTHROPIC_API_KEY` blank in `.env` when using this method.
+
+### OpenCode
+
+Set one of these API keys in your `.env`:
+- `OPENAI_API_KEY` — for OpenAI models (gpt-4o, o3, o4-mini, etc.)
+- `GEMINI_API_KEY` — for Google models (gemini-2.5-pro, gemini-2.5-flash, etc.)
+- `ANTHROPIC_API_KEY` — for Anthropic models via OpenCode
 
 ## TUI Dashboard Mode
 
@@ -97,9 +124,12 @@ The container restarts automatically on crash (`restart: unless-stopped`).
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
-| `ANTHROPIC_API_KEY` | — | API key (or use subscription auth via `~/.claude` mount) |
+| `ENGINE` | `claude` | Engine to use: `claude` or `opencode` |
+| `ANTHROPIC_API_KEY` | — | API key for Claude or OpenCode with Anthropic provider |
+| `OPENAI_API_KEY` | — | API key for OpenCode with OpenAI provider |
+| `GEMINI_API_KEY` | — | API key for OpenCode with Google provider |
 | `REPO_URL` | — | Git repo URL to clone |
-| `MODEL` | `sonnet` | Claude model to use |
+| `MODEL` | `sonnet` | Model to use (engine-specific) |
 | `MAX_ITERATIONS` | `0` (infinite) | Stop after N iterations |
 | `LOOP_DELAY` | `5` | Seconds between iterations |
 | `GIT_USER` | `agentmill` | Git commit author name |

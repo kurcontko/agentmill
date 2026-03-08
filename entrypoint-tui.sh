@@ -13,6 +13,7 @@ REPO_DIR="/workspace/repo"
 LOG_DIR="/workspace/logs"
 PROMPT_FILE="${PROMPT_FILE:-/prompts/PROMPT.md}"
 MODEL="${MODEL:-sonnet}"
+ENGINE="${ENGINE:-claude}"
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
 AUTO_RALPH_MAX_ITERATIONS="${AUTO_RALPH_MAX_ITERATIONS:-${MAX_ITERATIONS:-10}}"
@@ -28,22 +29,36 @@ log() {
 }
 
 # --- Auth -----------------------------------------------------
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-    log "Auth: using ANTHROPIC_API_KEY"
-elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-    log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
-    if [[ ! -f "$HOME/.claude.json" ]]; then
-        echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
+if [[ "$ENGINE" = "opencode" ]]; then
+    if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+        log "Auth: using OPENAI_API_KEY (OpenCode)"
+    elif [[ -n "${GEMINI_API_KEY:-}" ]]; then
+        log "Auth: using GEMINI_API_KEY (OpenCode)"
+    elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        log "Auth: using ANTHROPIC_API_KEY (OpenCode)"
+    else
+        log "ERROR: No auth configured for OpenCode."
+        log "  Set OPENAI_API_KEY, GEMINI_API_KEY, or ANTHROPIC_API_KEY."
+        exit 1
     fi
 else
-    log "ERROR: No auth configured."
-    log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
-    log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (subscription, from 'claude setup-token')"
-    exit 1
-fi
+    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        log "Auth: using ANTHROPIC_API_KEY"
+    elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+        log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
+        if [[ ! -f "$HOME/.claude.json" ]]; then
+            echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
+        fi
+    else
+        log "ERROR: No auth configured."
+        log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
+        log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (subscription, from 'claude setup-token')"
+        exit 1
+    fi
 
-# --- Merge host Claude config (MCP, plugins, settings) --------
-/setup-claude-config.sh
+    # --- Merge host Claude config (MCP, plugins, settings) --------
+    /setup-claude-config.sh
+fi
 
 # --- Git config -----------------------------------------------
 git config --global user.name "$GIT_USER"
@@ -63,28 +78,39 @@ log "Preparing repo environment..."
 log "Repo environment ready."
 
 # --- Override project settings for autonomous mode ------------
-# The host repo may have restrictive .claude/settings.local.json
-# Back up original and restore on exit
-SETTINGS_LOCAL=".claude/settings.local.json"
-SETTINGS_BACKUP=""
 RALPH_RULE_FILE=".claude/rules/agentmill-ralph-task.md"
-mkdir -p .claude
-if [[ -f "$SETTINGS_LOCAL" ]]; then
-    SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
-fi
-# NOSONAR — autonomous agent container requires full tool permissions
-echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"}}' > "$SETTINGS_LOCAL"
 
-restore_settings() {
-    if [[ -n "$SETTINGS_BACKUP" ]]; then
-        echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
-    else
-        rm -f "$SETTINGS_LOCAL"
+if [[ "$ENGINE" = "opencode" ]]; then
+    /setup-opencode-config.sh
+    SETTINGS_BACKUP=""
+    restore_settings() {
+        rm -f "$RALPH_RULE_FILE"
+        return 0
+    }
+    trap restore_settings EXIT
+else
+    # The host repo may have restrictive .claude/settings.local.json
+    # Back up original and restore on exit
+    SETTINGS_LOCAL=".claude/settings.local.json"
+    SETTINGS_BACKUP=""
+    mkdir -p .claude
+    if [[ -f "$SETTINGS_LOCAL" ]]; then
+        SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
     fi
-    rm -f "$RALPH_RULE_FILE"
-    return 0
-}
-trap restore_settings EXIT
+    # NOSONAR — autonomous agent container requires full tool permissions
+    echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"}}' > "$SETTINGS_LOCAL"
+
+    restore_settings() {
+        if [[ -n "$SETTINGS_BACKUP" ]]; then
+            echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
+        else
+            rm -f "$SETTINGS_LOCAL"
+        fi
+        rm -f "$RALPH_RULE_FILE"
+        return 0
+    }
+    trap restore_settings EXIT
+fi
 
 # --- Build initial prompt -------------------------------------
 INITIAL_PROMPT=""
@@ -111,12 +137,17 @@ EOF
     log "Ralph Loop limits: max_iterations=$AUTO_RALPH_MAX_ITERATIONS completion_promise=$AUTO_RALPH_COMPLETION_PROMISE"
 fi
 
-# --- Launch Claude Code TUI -----------------------------------
-log "Launching Claude TUI (model=$MODEL)"
-if [[ -n "$INITIAL_PROMPT" ]]; then
-    log "Starting interactive session with prompt from $PROMPT_FILE."
-    export CLAUDE_INITIAL_PROMPT="$INITIAL_PROMPT"
+# --- Launch TUI -----------------------------------------------
+if [[ "$ENGINE" = "opencode" ]]; then
+    log "Launching OpenCode TUI"
+    exec opencode
 else
-    unset CLAUDE_INITIAL_PROMPT
+    log "Launching Claude TUI (model=$MODEL)"
+    if [[ -n "$INITIAL_PROMPT" ]]; then
+        log "Starting interactive session with prompt from $PROMPT_FILE."
+        export CLAUDE_INITIAL_PROMPT="$INITIAL_PROMPT"
+    else
+        unset CLAUDE_INITIAL_PROMPT
+    fi
+    exec /auto-trust.exp
 fi
-exec /auto-trust.exp
