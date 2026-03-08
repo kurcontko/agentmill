@@ -15,6 +15,8 @@ PROMPT_FILE="${PROMPT_FILE:-/prompts/PROMPT.md}"
 MODEL="${MODEL:-sonnet}"
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
+AUTO_RALPH_MAX_ITERATIONS="${AUTO_RALPH_MAX_ITERATIONS:-${MAX_ITERATIONS:-10}}"
+AUTO_RALPH_COMPLETION_PROMISE="${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}"
 
 mkdir -p "$LOG_DIR"
 
@@ -96,10 +98,14 @@ if [ "${AUTO_RALPH:-false}" = "true" ] && [ -n "$INITIAL_PROMPT" ]; then
 This file is generated at container startup from \`$PROMPT_FILE\`.
 Treat it as the authoritative Ralph loop task for this session.
 
+When the task is genuinely complete, output this exact tag on its own line:
+<promise>$AUTO_RALPH_COMPLETION_PROMISE</promise>
+
 $INITIAL_PROMPT
 EOF
-    INITIAL_PROMPT="/ralph-loop:ralph-loop Read .claude/rules/agentmill-ralph-task.md and execute that task exactly. Use the completion criteria defined there."
+    INITIAL_PROMPT="/ralph-loop:ralph-loop Read .claude/rules/agentmill-ralph-task.md and execute that task exactly. Use the completion criteria defined there. --max-iterations $AUTO_RALPH_MAX_ITERATIONS --completion-promise $AUTO_RALPH_COMPLETION_PROMISE"
     log "Ralph Loop enabled - using $RALPH_RULE_FILE for task context"
+    log "Ralph Loop limits: max_iterations=$AUTO_RALPH_MAX_ITERATIONS completion_promise=$AUTO_RALPH_COMPLETION_PROMISE"
 fi
 
 # --- Launch Claude Code TUI -----------------------------------
