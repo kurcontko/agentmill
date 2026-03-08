@@ -13,10 +13,12 @@ repo_log() {
 
 has_pyproject_dev_extra() {
     [[ -f pyproject.toml ]] && rg -q '^\[project\.optional-dependencies\]' pyproject.toml && rg -q '^\s*dev\s*=' pyproject.toml
+    return $?
 }
 
 has_pyproject_dev_group() {
     [[ -f pyproject.toml ]] && rg -q '^\[dependency-groups\]' pyproject.toml && rg -q '^\s*dev\s*=' pyproject.toml
+    return $?
 }
 
 activate_venv() {
@@ -24,6 +26,7 @@ activate_venv() {
         export PATH="$REPO_DIR/.venv/bin:$PATH"
         repo_log "Using virtualenv at $REPO_DIR/.venv"
     fi
+    return 0
 }
 
 install_extra_python_tools() {
