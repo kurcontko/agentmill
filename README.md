@@ -89,13 +89,16 @@ The container restarts automatically on crash (`restart: unless-stopped`).
 | Env Var | Default | Description |
 |---------|---------|-------------|
 | `ANTHROPIC_API_KEY` | — | API key (or use subscription auth via `~/.claude` mount) |
+| `OPENAI_API_KEY` | — | API key for Codex services |
 | `REPO_URL` | — | Git repo URL to clone |
 | `MODEL` | `sonnet` | Claude model to use |
+| `CODEX_MODEL` | — | Optional Codex model override |
 | `MAX_ITERATIONS` | `0` (infinite) | Stop after N iterations |
 | `LOOP_DELAY` | `5` | Seconds between iterations |
 | `GIT_USER` | `agentmill` | Git commit author name |
 | `GIT_EMAIL` | `agent@agentmill` | Git commit author email |
 | `PROMPT_FILE` | `/prompts/PROMPT.md` | Path to prompt file inside container |
+| `CODEX_APPROVAL_MODE` | `suggest` | Codex approval mode: `suggest`, `auto-edit`, or `full-auto` |
 | `AUTO_SETUP` | `true` | Auto-bootstrap repo-local dev environment on container start |
 | `REPO_SETUP_COMMAND` | — | Custom repo bootstrap command, run in repo root before Claude starts |
 | `EXTRA_PYTHON_TOOLS` | — | Extra Python CLI tools to install into repo `.venv` (for example `ruff pytest`) |
@@ -140,6 +143,59 @@ docker-compose run --rm \
   -e PROMPT_FILE=/prompts/PROMPT_V5_WORK.md \
   dashboard
 ```
+
+## Engines
+
+AgentMill now supports two separate interactive engines:
+
+- `dashboard`: Claude Code TUI, with optional Ralph Loop automation
+- `codex-dashboard`: OpenAI Codex interactive terminal session
+- `codex-agent`: OpenAI Codex headless loop using `codex exec --full-auto`
+
+Keep them separate. Claude services use `.claude` state, plugins, and Ralph-specific behavior. Codex services use `OPENAI_API_KEY` or mounted `~/.codex` state and do not rely on Claude plugins or trust automation.
+
+### Run Codex Dashboard
+
+API-key auth:
+
+```bash
+REPO_PATH=/path/to/repo \
+OPENAI_API_KEY=your_key_here \
+docker-compose run --rm codex-dashboard
+```
+
+With repo-local setup helpers and a prompt file available in the container:
+
+```bash
+REPO_PATH=/path/to/repo \
+OPENAI_API_KEY=your_key_here \
+EXTRA_PYTHON_TOOLS='ruff pytest' \
+PROMPT_FILE=/prompts/PROMPT_V5_WORK.md \
+CODEX_APPROVAL_MODE=auto-edit \
+docker-compose run --rm codex-dashboard
+```
+
+If you previously authenticated on the host with `codex --login`, the service also mounts `~/.codex` to reuse that state.
+
+Current limitation:
+
+- `codex-dashboard` now passes the prompt file contents as the initial interactive prompt.
+
+### Run Codex Agent
+
+```bash
+REPO_PATH=/path/to/repo \
+OPENAI_API_KEY=your_key_here \
+PROMPT_FILE=/prompts/PROMPT_V5_WORK.md \
+MAX_ITERATIONS=3 \
+docker-compose up codex-agent
+```
+
+Notes:
+
+- `codex-agent` currently uses `codex exec --full-auto`.
+- The prompt is read from `PROMPT_FILE` via stdin.
+- Set `CODEX_JSON=true` if you want JSONL event output in the session log.
 
 ## Apple Silicon
 

@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y \
     expect \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code
+RUN npm install -g @anthropic-ai/claude-code @openai/codex
 
 # Non-root user (Claude Code refuses --dangerously-skip-permissions as root)
 RUN useradd -m -s /bin/bash agent
@@ -25,10 +25,12 @@ RUN chown agent:agent /workspace
 # Entrypoints
 COPY entrypoint.sh /entrypoint.sh
 COPY entrypoint-tui.sh /entrypoint-tui.sh
+COPY entrypoint-codex.sh /entrypoint-codex.sh
+COPY entrypoint-codex-tui.sh /entrypoint-codex-tui.sh
 COPY setup-claude-config.sh /setup-claude-config.sh
 COPY setup-repo-env.sh /setup-repo-env.sh
 COPY auto-trust.exp /auto-trust.exp
-RUN chmod +x /entrypoint.sh /entrypoint-tui.sh /setup-claude-config.sh /setup-repo-env.sh /auto-trust.exp
+RUN chmod +x /entrypoint.sh /entrypoint-tui.sh /entrypoint-codex.sh /entrypoint-codex-tui.sh /setup-claude-config.sh /setup-repo-env.sh /auto-trust.exp
 
 USER agent
 
