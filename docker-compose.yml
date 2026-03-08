@@ -13,6 +13,14 @@ x-common-env: &common-env
 x-agent-base: &agent-base
   build: .
   restart: unless-stopped
+  deploy:
+    resources:
+      limits:
+        memory: 4g
+        cpus: "2.0"
+      reservations:
+        memory: 1g
+        cpus: "0.5"
   volumes: &shared-volumes
     - ./prompts:/prompts
     - ./logs:/workspace/logs

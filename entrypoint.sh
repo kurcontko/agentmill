@@ -15,45 +15,91 @@ LOOP_DELAY="${LOOP_DELAY:-5}"  # seconds between iterations
 # — State ————————————————————————————————————————
 ITERATION=0
 SHUTTING_DOWN=false
+MULTI_AGENT=false
+REPO_DIR="/workspace/repo"
+SETTINGS_LOCAL=""
+SETTINGS_BACKUP=""
+
+# — Logging helper ———————————————————————————————
+LOG_FORMAT="${LOG_FORMAT:-text}"  # text or json
+LOG_MAX_SIZE="${LOG_MAX_SIZE:-10485760}"  # 10MB default
+LOG_MAX_FILES="${LOG_MAX_FILES:-5}"  # keep 5 rotated logs
+mkdir -p "$LOG_DIR"
+
+rotate_log() {
+    local logfile="$LOG_DIR/agent-${AGENT_ID}.log"
+    if [[ ! -f "$logfile" ]]; then
+        return
+    fi
+    local size
+    size="$(stat -c%s "$logfile" 2>/dev/null || stat -f%z "$logfile" 2>/dev/null || echo 0)"
+    if [[ "$size" -ge "$LOG_MAX_SIZE" ]]; then
+        # Rotate: remove oldest, shift others
+        local i=$((LOG_MAX_FILES - 1))
+        while [[ "$i" -gt 0 ]]; do
+            local prev=$((i - 1))
+            [[ -f "${logfile}.${prev}" ]] && mv "${logfile}.${prev}" "${logfile}.${i}"
+            i=$((i - 1))
+        done
+        mv "$logfile" "${logfile}.0"
+    fi
+}
+
+log() {
+    local timestamp level msg logfile
+    timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    logfile="$LOG_DIR/agent-${AGENT_ID}.log"
+
+    # Parse optional log level: log "WARN: message" or log "message" (defaults to INFO)
+    local all_args="$*"
+    if [[ "$all_args" =~ ^(ERROR|WARN|INFO|DEBUG):[[:space:]]*(.*) ]]; then
+        level="${BASH_REMATCH[1]}"
+        msg="${BASH_REMATCH[2]}"
+    else
+        level="INFO"
+        msg="$all_args"
+    fi
+
+    if [[ "$LOG_FORMAT" = "json" ]]; then
+        local json_msg
+        json_msg="$(jq -nc \
+            --arg ts "$timestamp" \
+            --arg level "$level" \
+            --arg agent "$AGENT_ID" \
+            --arg msg "$msg" \
+            '{"timestamp":$ts,"level":$level,"agent":$agent,"message":$msg}')"
+        echo "$json_msg"
+        echo "$json_msg" >> "$logfile"
+    else
+        msg="[agentmill:agent-${AGENT_ID} ${timestamp}] ${level}: $msg"
+        echo "$msg"
+        echo "$msg" >> "$logfile"
+    fi
+
+    rotate_log
+}
 
 # — Graceful shutdown ————————————————————————————
 cleanup() {
-    echo "[agentmill] Received shutdown signal. Finishing current session..."
+    log "Received shutdown signal. Finishing current session..."
     SHUTTING_DOWN=true
 }
 trap cleanup SIGTERM SIGINT
 
-# — Logging helper ———————————————————————————————
-mkdir -p "$LOG_DIR"
-
-log() {
-    local msg
-    msg="[agentmill:agent-${AGENT_ID} $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
-    echo "$msg"
-    echo "$msg" >> "$LOG_DIR/agent-${AGENT_ID}.log"
-}
-
 # — Auth check ———————————————————————————————————
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-    log "Auth: using ANTHROPIC_API_KEY"
-elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-    log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
-    if [[ ! -f "$HOME/.claude.json" ]]; then
-        echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
+check_auth() {
+    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        log "Auth: using ANTHROPIC_API_KEY"
+    elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+        log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
+        if [[ ! -f "$HOME/.claude.json" ]]; then
+            echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
+        fi
+    else
+        log "ERROR: No auth configured. Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN."
+        exit 1
     fi
-else
-    log "ERROR: No auth configured."
-    log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
-    log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (subscription, from 'claude setup-token')"
-    exit 1
-fi
-
-# — Merge host Claude config (MCP, plugins, settings) ———
-/setup-claude-config.sh
-
-# — Git configuration ————————————————————————————
-git config --global user.name "${GIT_USER}-${AGENT_ID}"
-git config --global user.email "$GIT_EMAIL"
+}
 
 # — Workspace setup ——————————————————————————————
 # Three modes, auto-detected:
@@ -72,99 +118,117 @@ git config --global user.email "$GIT_EMAIL"
 #      Host creates worktrees beforehand; each agent gets its own mount.
 #      From the agent's perspective, this looks like mode 1.
 
-UPSTREAM_DIR="/workspace/upstream"
-REPO_DIR="/workspace/repo"
+setup_workspace() {
+    local upstream_dir="/workspace/upstream"
 
-if [[ -d "$UPSTREAM_DIR/.git" || -f "$UPSTREAM_DIR/HEAD" ]]; then
-    # Mode 2: upstream mounted — clone into isolated workspace
-    # Each agent gets its own clone. Sync via git push/pull.
-    # Default branch: agent-$AGENT_ID (safe to push to non-bare upstream
-    # as long as the branch isn't checked out on the host).
-    REPO_DIR="/workspace/repo-${AGENT_ID}"
-    : "${AGENT_BRANCH:=agent-${AGENT_ID}}"
-    MULTI_AGENT=true
+    if [[ -d "$upstream_dir/.git" || -f "$upstream_dir/HEAD" ]]; then
+        # Mode 2: upstream mounted — clone into isolated workspace
+        REPO_DIR="/workspace/repo-${AGENT_ID}"
+        : "${AGENT_BRANCH:=agent-${AGENT_ID}}"
+        MULTI_AGENT=true
 
-    log "Multi-agent mode: agent-${AGENT_ID} on branch ${AGENT_BRANCH}"
+        log "Multi-agent mode: agent-${AGENT_ID} on branch ${AGENT_BRANCH}"
 
-    # Allow pushing to non-bare upstream (agents push to their own branches,
-    # not the checked-out branch, so this is safe).
-    git -C "$UPSTREAM_DIR" config receive.denyCurrentBranch updateInstead 2>/dev/null || true
+        # Allow pushing to non-bare upstream (agents push to their own branches,
+        # not the checked-out branch, so this is safe).
+        if ! git -C "$upstream_dir" config receive.denyCurrentBranch updateInstead 2>/dev/null; then
+            log "WARN: Could not set receive.denyCurrentBranch on upstream (may be read-only)"
+        fi
 
-    if [[ ! -d "$REPO_DIR/.git" ]]; then
-        git clone "$UPSTREAM_DIR" "$REPO_DIR"
+        if [[ ! -d "$REPO_DIR/.git" ]]; then
+            git clone "$upstream_dir" "$REPO_DIR"
+            cd "$REPO_DIR"
+            git remote set-url origin "$upstream_dir"
+        else
+            cd "$REPO_DIR"
+            git fetch origin
+        fi
+
+        # Create or checkout agent branch from upstream's HEAD
+        local upstream_head
+        upstream_head="$(git -C "$upstream_dir" rev-parse HEAD)"
+        if git show-ref --verify --quiet "refs/heads/$AGENT_BRANCH"; then
+            git checkout "$AGENT_BRANCH"
+            if ! git rebase "$upstream_head" 2>/dev/null; then
+                log "WARN: Rebase onto upstream HEAD failed, aborting rebase"
+                git rebase --abort
+            fi
+        else
+            git checkout -b "$AGENT_BRANCH" "$upstream_head"
+        fi
+
+        log "Repo ready at $REPO_DIR (branch: $(git branch --show-current))"
+
+    elif [[ -d "$REPO_DIR/.git" ]]; then
+        # Mode 1 or 3: direct mount (single agent or pre-created worktree)
+        MULTI_AGENT=false
+        : "${AGENT_BRANCH:=main}"
         cd "$REPO_DIR"
-        git remote set-url origin "$UPSTREAM_DIR"
+        log "Repo ready at $REPO_DIR (direct mount)"
     else
-        cd "$REPO_DIR"
-        git fetch origin
+        log "ERROR: No repo found. Mount to /workspace/repo (single) or /workspace/upstream (multi)."
+        exit 1
+    fi
+}
+
+# — Settings management —————————————————————————
+setup_autonomous_settings() {
+    SETTINGS_LOCAL=".claude/settings.local.json"
+    SETTINGS_BACKUP=""
+    mkdir -p .claude
+
+    if [[ -f "$SETTINGS_LOCAL" ]]; then
+        SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
     fi
 
-    # Create or checkout agent branch from upstream's HEAD
-    UPSTREAM_HEAD="$(git -C "$UPSTREAM_DIR" rev-parse HEAD)"
-    if git show-ref --verify --quiet "refs/heads/$AGENT_BRANCH"; then
-        git checkout "$AGENT_BRANCH"
-        # Fast-forward to upstream if behind
-        git rebase "$UPSTREAM_HEAD" 2>/dev/null || git rebase --abort
-    else
-        git checkout -b "$AGENT_BRANCH" "$UPSTREAM_HEAD"
-    fi
-
-    log "Repo ready at $REPO_DIR (branch: $(git branch --show-current))"
-
-elif [[ -d "$REPO_DIR/.git" ]]; then
-    # Mode 1 or 3: direct mount (single agent or pre-created worktree)
-    MULTI_AGENT=false
-    : "${AGENT_BRANCH:=main}"
-    cd "$REPO_DIR"
-    log "Repo ready at $REPO_DIR (direct mount)"
-else
-    log "ERROR: No repo found. Mount to /workspace/repo (single) or /workspace/upstream (multi)."
-    exit 1
-fi
-
-log "Preparing repo environment..."
-. /setup-repo-env.sh "$REPO_DIR"
-log "Repo environment ready."
-
-# — Override project settings for autonomous mode ————————
-SETTINGS_LOCAL=".claude/settings.local.json"
-SETTINGS_BACKUP=""
-mkdir -p .claude
-
-if [[ -f "$SETTINGS_LOCAL" ]]; then
-    SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
-fi
-
-# NOSONAR — autonomous agent container requires full tool permissions
-echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit","mcp__*"],"defaultMode":"bypassPermissions"}}' \
-    > "$SETTINGS_LOCAL"
+    # NOSONAR — autonomous agent container requires full tool permissions
+    echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit","mcp__*"],"defaultMode":"bypassPermissions"}}' \
+        > "$SETTINGS_LOCAL"
+}
 
 restore_settings() {
     if [[ -n "$SETTINGS_BACKUP" ]]; then
-        echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
+        if ! echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"; then
+            log "WARN: Failed to restore settings.local.json"
+        fi
     else
         rm -f "$SETTINGS_LOCAL"
     fi
-    return 0
 }
-
 trap 'restore_settings' EXIT
 
-# — Main loop ————————————————————————————————————
-log "Starting agent loop (model=$MODEL, max_iterations=$MAX_ITERATIONS)"
+# — Push with retry ———————————————————————————————
+push_with_retry() {
+    local max_attempts=3
+    local attempt=0
 
-while true; do
-    if [[ "$SHUTTING_DOWN" = true ]]; then
-        log "Shutdown requested. Exiting loop."
-        break
-    fi
+    while [[ "$attempt" -lt "$max_attempts" ]]; do
+        attempt=$((attempt + 1))
+        if git push origin "$AGENT_BRANCH" 2>/dev/null; then
+            log "Push succeeded"
+            return 0
+        fi
+        log "Push attempt $attempt/$max_attempts failed, fetching and rebasing..."
+        git fetch origin
+        if git rebase "origin/$AGENT_BRANCH" 2>/dev/null; then
+            continue  # retry push
+        else
+            git rebase --abort
+            log "WARN: Rebase conflict on attempt $attempt, will retry next iteration"
+            return 1
+        fi
+    done
+    log "WARN: Push failed after $max_attempts attempts, will retry next iteration"
+    return 1
+}
 
-    ITERATION=$((ITERATION + 1))
-    SESSION_LOG="$LOG_DIR/session_$(date -u '+%Y%m%d_%H%M%S')_iter${ITERATION}.log"
+# — Run single iteration —————————————————————————
+run_iteration() {
+    local session_log
+    session_log="$LOG_DIR/session_$(date -u '+%Y%m%d_%H%M%S')_iter${ITERATION}.log"
 
     log "==== Iteration $ITERATION ===="
 
-    # Check for prompt file
     if [[ ! -f "$PROMPT_FILE" ]]; then
         log "ERROR: Prompt file not found at $PROMPT_FILE"
         log "Mount your prompt file or set PROMPT_FILE env var."
@@ -172,19 +236,25 @@ while true; do
     fi
 
     # Run Claude
-    log "Running Claude (session log: $SESSION_LOG)..."
-    PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
+    log "Running Claude (session log: $session_log)..."
+    local prompt_content
+    prompt_content="$(cat "$PROMPT_FILE")"
 
+    local claude_exit
     # NOSONAR — dangerously-skip-permissions is required for headless autonomous operation
     set +e
     claude --dangerously-skip-permissions \
-        -p "$PROMPT_CONTENT" \
+        -p "$prompt_content" \
         --model "$MODEL" \
-        2>&1 | tee "$SESSION_LOG"
-    CLAUDE_EXIT=$?
+        2>&1 | tee "$session_log"
+    claude_exit=$?
     set -e
 
-    log "Claude exited with code $CLAUDE_EXIT"
+    if [[ "$claude_exit" -ne 0 ]]; then
+        log "WARN: Claude exited with code $claude_exit"
+    else
+        log "Claude completed successfully"
+    fi
 
     # Commit any changes
     if [[ -n "$(git status --porcelain)" ]]; then
@@ -193,33 +263,52 @@ while true; do
         git commit -m "agent-${AGENT_ID}: iteration $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))"
         log "Changes committed."
 
-        # Multi-agent: push agent branch to upstream
         if [[ "$MULTI_AGENT" = true ]]; then
             log "Pushing to upstream (branch: $AGENT_BRANCH)..."
-            if ! git push origin "$AGENT_BRANCH" 2>/dev/null; then
-                log "Push failed, rebasing and retrying..."
-                git fetch origin
-                if git rebase "origin/$AGENT_BRANCH" 2>/dev/null; then
-                    git push origin "$AGENT_BRANCH" || log "WARN: Push failed, will retry next iteration"
-                else
-                    git rebase --abort
-                    log "WARN: Rebase conflict, will retry next iteration"
-                fi
-            fi
+            push_with_retry || true
         fi
     else
         log "No changes to commit."
     fi
+}
 
-    # Check iteration limit
-    if [[ "$MAX_ITERATIONS" -gt 0 && "$ITERATION" -ge "$MAX_ITERATIONS" ]]; then
-        log "Reached max iterations ($MAX_ITERATIONS). Stopping."
-        break
-    fi
+# — Main ——————————————————————————————————————————
+main() {
+    check_auth
+    /setup-claude-config.sh
 
-    # Brief pause before next iteration
-    log "Sleeping ${LOOP_DELAY}s before next iteration..."
-    sleep "$LOOP_DELAY"
-done
+    git config --global user.name "${GIT_USER}-${AGENT_ID}"
+    git config --global user.email "$GIT_EMAIL"
 
-log "Agent loop finished after $ITERATION iterations."
+    setup_workspace
+
+    log "Preparing repo environment..."
+    . /setup-repo-env.sh "$REPO_DIR"
+    log "Repo environment ready."
+
+    setup_autonomous_settings
+
+    log "Starting agent loop (model=$MODEL, max_iterations=$MAX_ITERATIONS)"
+
+    while true; do
+        if [[ "$SHUTTING_DOWN" = true ]]; then
+            log "Shutdown requested. Exiting loop."
+            break
+        fi
+
+        ITERATION=$((ITERATION + 1))
+        run_iteration
+
+        if [[ "$MAX_ITERATIONS" -gt 0 && "$ITERATION" -ge "$MAX_ITERATIONS" ]]; then
+            log "Reached max iterations ($MAX_ITERATIONS). Stopping."
+            break
+        fi
+
+        log "Sleeping ${LOOP_DELAY}s before next iteration..."
+        sleep "$LOOP_DELAY"
+    done
+
+    log "Agent loop finished after $ITERATION iterations."
+}
+
+main "$@"

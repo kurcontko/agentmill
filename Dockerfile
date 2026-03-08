@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
     python3-venv \
     ripgrep \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g @anthropic-ai/claude-code \
+    && npm install -g @anthropic-ai/claude-code@2.1.71 \
     && useradd -m -s /bin/bash agent
 WORKDIR /workspace
 RUN chown agent:agent /workspace
@@ -35,6 +35,9 @@ RUN mkdir -p /home/agent/.claude && \
     echo '{"hasCompletedOnboarding":true}' > /home/agent/.claude.json && \
     echo '{"hasCompletedOnboarding":true,"hasTrustDialogAccepted":true,"hasTrustDialogHooksAccepted":true}' > /home/agent/.claude/claude.json && \
     echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep"],"defaultMode":"bypassPermissions"}}' > /home/agent/.claude/settings.json
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+    CMD pgrep -f "node.*claude" > /dev/null || exit 1
 
 # Default: headless pipe mode. Use entrypoint-tui.sh for TUI dashboard.
 ENTRYPOINT ["/entrypoint.sh"]

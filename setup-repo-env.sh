@@ -52,8 +52,8 @@ if [[ "$AUTO_SETUP" != "true" ]]; then
 fi
 
 if [[ -n "$REPO_SETUP_COMMAND" ]]; then
-    repo_log "Running custom setup command"
-    eval "$REPO_SETUP_COMMAND"
+    repo_log "Running custom setup command: $REPO_SETUP_COMMAND"
+    bash -c "$REPO_SETUP_COMMAND"
     activate_venv
     install_extra_python_tools
     activate_venv
