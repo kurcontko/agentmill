@@ -99,6 +99,8 @@ The container restarts automatically on crash (`restart: unless-stopped`).
 | `AUTO_SETUP` | `true` | Auto-bootstrap repo-local dev environment on container start |
 | `REPO_SETUP_COMMAND` | — | Custom repo bootstrap command, run in repo root before Claude starts |
 | `EXTRA_PYTHON_TOOLS` | — | Extra Python CLI tools to install into repo `.venv` (for example `ruff pytest`) |
+| `AUTO_RALPH_MAX_ITERATIONS` | `10` | Ralph loop cap for dashboard auto-start |
+| `AUTO_RALPH_COMPLETION_PROMISE` | `TASK_COMPLETE` | Exact `<promise>...</promise>` token Ralph watches for |
 
 ## Repo Setup Contract
 
@@ -124,6 +126,19 @@ REPO_PATH=/path/to/repo \
 REPO_SETUP_COMMAND='uv sync --frozen --extra dev --group dev' \
 EXTRA_PYTHON_TOOLS='ruff pytest' \
 docker-compose run --rm dashboard
+```
+
+Dashboard with Ralph auto-start and bounded looping:
+
+```bash
+REPO_PATH=/path/to/repo \
+EXTRA_PYTHON_TOOLS='ruff' \
+AUTO_RALPH=true \
+AUTO_RALPH_MAX_ITERATIONS=10 \
+AUTO_RALPH_COMPLETION_PROMISE=TASK_COMPLETE \
+docker-compose run --rm \
+  -e PROMPT_FILE=/prompts/PROMPT_V5_WORK.md \
+  dashboard
 ```
 
 ## Apple Silicon
