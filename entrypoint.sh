@@ -135,6 +135,7 @@ if [ -f "$SETTINGS_LOCAL" ]; then
     SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
 fi
 
+# NOSONAR — autonomous agent container requires full tool permissions
 echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit","mcp__*"],"defaultMode":"bypassPermissions"}}' \
     > "$SETTINGS_LOCAL"
 
@@ -173,6 +174,7 @@ while true; do
     log "Running Claude (session log: $SESSION_LOG)..."
     PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
 
+    # NOSONAR — dangerously-skip-permissions is required for headless autonomous operation
     set +e
     claude --dangerously-skip-permissions \
         -p "$PROMPT_CONTENT" \

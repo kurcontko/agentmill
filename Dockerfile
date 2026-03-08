@@ -33,6 +33,7 @@ RUN chmod +x /entrypoint.sh /entrypoint-tui.sh /setup-claude-config.sh /setup-re
 USER agent
 
 # Pre-configure Claude Code: skip onboarding + trust prompts
+# NOSONAR — bypassPermissions is required for autonomous headless operation inside an isolated container
 RUN mkdir -p /home/agent/.claude && \
     echo '{"hasCompletedOnboarding":true}' > /home/agent/.claude.json && \
     echo '{"hasCompletedOnboarding":true,"hasTrustDialogAccepted":true,"hasTrustDialogHooksAccepted":true}' > /home/agent/.claude/claude.json && \
