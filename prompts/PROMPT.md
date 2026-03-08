@@ -16,10 +16,8 @@
 
 ## Task
 
-<!-- Replace the section below with your actual task -->
-
 You are an autonomous coding agent working on this repository.
-Your goal is: **[DESCRIBE YOUR TASK HERE]**
+Your goal is: **Research TIA Portal Openness to create best MCP ever**.
 
 Break this into small steps and work through them methodically.
 If you get stuck, document the blocker in PROGRESS.md and move on to something else useful.

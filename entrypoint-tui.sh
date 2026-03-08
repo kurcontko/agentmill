@@ -1,31 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# ── AgentMill TUI Mode ───────────────────────────────────────────────
-# Runs Claude Code in interactive TUI mode (not pipe mode).
-# The full Claude Code terminal UI is forwarded to your terminal.
-# --dangerously-skip-permissions makes it autonomous: you watch, it works.
+# --- AgentMill TUI Mode ---------------------------------------
+# Launches Claude Code in interactive TUI mode.
+# Use Ralph Loop plugin (/ralph-loop) for autonomous iteration,
+# or interact manually - your choice.
 #
 # Usage: docker compose run dashboard
-# ─────────────────────────────────────────────────────────────────────
+# --------------------------------------------------------------
 
 REPO_DIR="/workspace/repo"
 LOG_DIR="/workspace/logs"
 PROMPT_FILE="${PROMPT_FILE:-/prompts/PROMPT.md}"
 MODEL="${MODEL:-sonnet}"
-MAX_ITERATIONS="${MAX_ITERATIONS:-0}"
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
-LOOP_DELAY="${LOOP_DELAY:-5}"
-
-ITERATION=0
-SHUTTING_DOWN=false
-
-cleanup() {
-    echo "[agentmill] Shutdown signal received."
-    SHUTTING_DOWN=true
-}
-trap cleanup SIGTERM SIGINT
 
 mkdir -p "$LOG_DIR"
 
@@ -35,100 +24,90 @@ log() {
     echo "$msg" >> "$LOG_DIR/agent.log"
 }
 
-# ── Auth ──────────────────────────────────────────────────────────────
+# --- Auth -----------------------------------------------------
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     log "Auth: using ANTHROPIC_API_KEY"
-elif [ -d "/root/.claude" ] && [ "$(ls -A /root/.claude 2>/dev/null)" ]; then
-    log "Auth: using mounted ~/.claude (subscription login)"
+elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
+    if [ ! -f "$HOME/.claude.json" ]; then
+        echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
+    fi
 else
     log "ERROR: No auth configured."
-    log "  Set ANTHROPIC_API_KEY or mount ~/.claude"
+    log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
+    log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (subscription, from 'claude setup-token')"
     exit 1
 fi
 
-# ── Git config ────────────────────────────────────────────────────────
+# --- Merge host Claude config (MCP, plugins, settings) --------
+/setup-claude-config.sh
+
+# --- Git config -----------------------------------------------
 git config --global user.name "$GIT_USER"
 git config --global user.email "$GIT_EMAIL"
-git config --global push.autoSetupRemote true
 
-# ── Repo setup ────────────────────────────────────────────────────────
+# --- Repo check -----------------------------------------------
 if [ ! -d "$REPO_DIR/.git" ]; then
-    if [ -d "/upstream/.git" ]; then
-        log "Cloning from mounted /upstream..."
-        git clone /upstream "$REPO_DIR"
-    elif [ -n "${REPO_URL:-}" ]; then
-        log "Cloning from REPO_URL: $REPO_URL"
-        git clone "$REPO_URL" "$REPO_DIR"
-    else
-        log "ERROR: No repo source. Mount /upstream or set REPO_URL."
-        exit 1
-    fi
+    log "ERROR: No repo found at $REPO_DIR. Set REPO_PATH in .env."
+    exit 1
 fi
 
 cd "$REPO_DIR"
 log "Repo ready at $REPO_DIR"
 
-# ── Main loop ─────────────────────────────────────────────────────────
-log "Starting TUI mode (model=$MODEL, max_iterations=${MAX_ITERATIONS:-∞})"
+log "Preparing repo environment..."
+. /setup-repo-env.sh "$REPO_DIR"
+log "Repo environment ready."
 
-while true; do
-    [ "$SHUTTING_DOWN" = true ] && break
+# --- Override project settings for autonomous mode ------------
+# The host repo may have restrictive .claude/settings.local.json
+# Back up original and restore on exit
+SETTINGS_LOCAL=".claude/settings.local.json"
+SETTINGS_BACKUP=""
+RALPH_RULE_FILE=".claude/rules/agentmill-ralph-task.md"
+mkdir -p .claude
+if [ -f "$SETTINGS_LOCAL" ]; then
+    SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
+fi
+echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"}}' > "$SETTINGS_LOCAL"
 
-    ITERATION=$((ITERATION + 1))
-    log "═══ Iteration $ITERATION (TUI) ═══"
-
-    # Sync
-    git pull --rebase 2>/dev/null || true
-
-    # Read prompt
-    if [ ! -f "$PROMPT_FILE" ]; then
-        log "ERROR: Prompt file not found at $PROMPT_FILE"
-        exit 1
-    fi
-    PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
-
-    # Launch Claude Code in interactive TUI mode.
-    # The prompt is passed as a positional argument = first message.
-    # --dangerously-skip-permissions = all tool calls auto-approved.
-    # The TUI renders in your terminal — you see everything Claude does.
-    set +e
-    claude --dangerously-skip-permissions \
-        --model "$MODEL" \
-        "$PROMPT_CONTENT"
-    CLAUDE_EXIT=$?
-    set -e
-
-    log "Claude session exited ($CLAUDE_EXIT)"
-
-    # Commit and push any changes
-    if [ -n "$(git status --porcelain)" ]; then
-        log "Changes detected. Committing..."
-        git add -A
-        git commit -m "agent: iteration $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))"
-
-        # Push with retry
-        git push 2>/dev/null || {
-            git pull --rebase 2>/dev/null || true
-            git push 2>/dev/null || {
-                git pull --rebase 2>/dev/null || true
-                git push 2>/dev/null || log "WARNING: Push failed after retries."
-            }
-        }
-        log "Changes committed and pushed."
+restore_settings() {
+    if [ -n "$SETTINGS_BACKUP" ]; then
+        echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
     else
-        log "No changes to commit."
+        rm -f "$SETTINGS_LOCAL"
     fi
+    rm -f "$RALPH_RULE_FILE"
+}
+trap restore_settings EXIT
 
-    # Iteration limit
-    if [ "$MAX_ITERATIONS" -gt 0 ] && [ "$ITERATION" -ge "$MAX_ITERATIONS" ]; then
-        log "Reached max iterations ($MAX_ITERATIONS). Stopping."
-        break
-    fi
+# --- Build initial prompt -------------------------------------
+INITIAL_PROMPT=""
+if [ -f "$PROMPT_FILE" ]; then
+    INITIAL_PROMPT="$(cat "$PROMPT_FILE")"
+    log "Loaded prompt from $PROMPT_FILE"
+fi
 
-    [ "$SHUTTING_DOWN" = true ] && break
+if [ "${AUTO_RALPH:-false}" = "true" ] && [ -n "$INITIAL_PROMPT" ]; then
+    mkdir -p "$(dirname "$RALPH_RULE_FILE")"
+    cat > "$RALPH_RULE_FILE" <<EOF
+# AgentMill Ralph Task
 
-    log "Next iteration in ${LOOP_DELAY}s..."
-    sleep "$LOOP_DELAY"
-done
+This file is generated at container startup from \`$PROMPT_FILE\`.
+Treat it as the authoritative Ralph loop task for this session.
 
-log "Agent finished after $ITERATION iterations."
+$INITIAL_PROMPT
+EOF
+    INITIAL_PROMPT="/ralph-loop:ralph-loop Read .claude/rules/agentmill-ralph-task.md and execute that task exactly. Use the completion criteria defined there."
+    log "Ralph Loop enabled - using $RALPH_RULE_FILE for task context"
+fi
+
+# --- Launch Claude Code TUI -----------------------------------
+log "Launching Claude TUI (model=$MODEL)"
+if [ -n "$INITIAL_PROMPT" ]; then
+    log "Starting interactive session with prompt from $PROMPT_FILE."
+    export CLAUDE_INITIAL_PROMPT="$INITIAL_PROMPT"
+else
+    unset CLAUDE_INITIAL_PROMPT
+fi
+exec /auto-trust.exp

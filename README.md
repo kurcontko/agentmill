@@ -96,6 +96,48 @@ The container restarts automatically on crash (`restart: unless-stopped`).
 | `GIT_USER` | `agentmill` | Git commit author name |
 | `GIT_EMAIL` | `agent@agentmill` | Git commit author email |
 | `PROMPT_FILE` | `/prompts/PROMPT.md` | Path to prompt file inside container |
+| `AUTO_SETUP` | `true` | Auto-bootstrap repo-local dev environment on container start |
+| `REPO_SETUP_COMMAND` | — | Custom repo bootstrap command, run in repo root before Claude starts |
+| `EXTRA_PYTHON_TOOLS` | — | Extra Python CLI tools to install into repo `.venv` (for example `ruff pytest`) |
+
+## Repo Setup Contract
+
+For consistency across repositories, AgentMill now uses this setup order when a container starts:
+
+1. If `REPO_SETUP_COMMAND` is set, run that in the repo root.
+2. Else if `pyproject.toml` and `uv.lock` exist, run `uv sync --frozen` and include the `dev` extra and `dev` dependency group when present.
+3. Else if `pyproject.toml` exists, create `.venv` and install the project with `pip`, including `.[dev]` when present.
+4. Else if `requirements.txt` exists, create `.venv` and install it.
+
+After setup, AgentMill prepends `./.venv/bin` to `PATH`, so repo-local tools like `pytest`, `ruff`, and project CLIs are available to Claude.
+
+Recommended standard for repos:
+
+- Python repos: declare dev tools in `pyproject.toml` and commit `uv.lock`
+- Non-standard repos: set `REPO_SETUP_COMMAND`
+- Missing one-off Python tools: use `EXTRA_PYTHON_TOOLS`
+
+Example:
+
+```bash
+REPO_PATH=/path/to/repo \
+REPO_SETUP_COMMAND='uv sync --frozen --extra dev --group dev' \
+EXTRA_PYTHON_TOOLS='ruff pytest' \
+docker-compose run --rm dashboard
+```
+
+## Apple Silicon
+
+On a MacBook with Colima, containers usually run as Linux `arm64`, not macOS ARM. That is fine for most Python tooling, including `pytest`, `uv`, and `ruff`, as long as Linux `arm64` wheels exist.
+
+If a dependency has no Linux `arm64` wheel or fails to build natively, force x86_64 emulation for that run:
+
+```bash
+DOCKER_DEFAULT_PLATFORM=linux/amd64 docker-compose build dashboard
+DOCKER_DEFAULT_PLATFORM=linux/amd64 docker-compose run --rm dashboard
+```
+
+Use that only when needed because it is slower than native `arm64`.
 
 ## Volumes
 
