@@ -1,0 +1,5 @@
+ignored:
+  - DL3008  # pin apt versions — impractical for tool container
+  - DL3015  # --no-install-recommends — we need full packages
+  - DL3016  # pin npm versions — we want latest CLI tools
+  - DL3059  # consecutive RUN — intentional for layer caching
