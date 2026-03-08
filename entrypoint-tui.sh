@@ -28,11 +28,11 @@ log() {
 }
 
 # --- Auth -----------------------------------------------------
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
     log "Auth: using ANTHROPIC_API_KEY"
-elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
     log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
-    if [ ! -f "$HOME/.claude.json" ]; then
+    if [[ ! -f "$HOME/.claude.json" ]]; then
         echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
     fi
 else
@@ -50,7 +50,7 @@ git config --global user.name "$GIT_USER"
 git config --global user.email "$GIT_EMAIL"
 
 # --- Repo check -----------------------------------------------
-if [ ! -d "$REPO_DIR/.git" ]; then
+if [[ ! -d "$REPO_DIR/.git" ]]; then
     log "ERROR: No repo found at $REPO_DIR. Set REPO_PATH in .env."
     exit 1
 fi
@@ -69,30 +69,31 @@ SETTINGS_LOCAL=".claude/settings.local.json"
 SETTINGS_BACKUP=""
 RALPH_RULE_FILE=".claude/rules/agentmill-ralph-task.md"
 mkdir -p .claude
-if [ -f "$SETTINGS_LOCAL" ]; then
+if [[ -f "$SETTINGS_LOCAL" ]]; then
     SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
 fi
 # NOSONAR — autonomous agent container requires full tool permissions
 echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"}}' > "$SETTINGS_LOCAL"
 
 restore_settings() {
-    if [ -n "$SETTINGS_BACKUP" ]; then
+    if [[ -n "$SETTINGS_BACKUP" ]]; then
         echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
     else
         rm -f "$SETTINGS_LOCAL"
     fi
     rm -f "$RALPH_RULE_FILE"
+    return 0
 }
 trap restore_settings EXIT
 
 # --- Build initial prompt -------------------------------------
 INITIAL_PROMPT=""
-if [ -f "$PROMPT_FILE" ]; then
+if [[ -f "$PROMPT_FILE" ]]; then
     INITIAL_PROMPT="$(cat "$PROMPT_FILE")"
     log "Loaded prompt from $PROMPT_FILE"
 fi
 
-if [ "${AUTO_RALPH:-false}" = "true" ] && [ -n "$INITIAL_PROMPT" ]; then
+if [[ "${AUTO_RALPH:-false}" = "true" && -n "$INITIAL_PROMPT" ]]; then
     mkdir -p "$(dirname "$RALPH_RULE_FILE")"
     cat > "$RALPH_RULE_FILE" <<EOF
 # AgentMill Ralph Task
@@ -112,7 +113,7 @@ fi
 
 # --- Launch Claude Code TUI -----------------------------------
 log "Launching Claude TUI (model=$MODEL)"
-if [ -n "$INITIAL_PROMPT" ]; then
+if [[ -n "$INITIAL_PROMPT" ]]; then
     log "Starting interactive session with prompt from $PROMPT_FILE."
     export CLAUDE_INITIAL_PROMPT="$INITIAL_PROMPT"
 else

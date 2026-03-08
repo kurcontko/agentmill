@@ -2,23 +2,20 @@ FROM node:20-slim
 COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /uvx /usr/local/bin/
 
 RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    git \
     bash \
+    ca-certificates \
     curl \
+    expect \
+    git \
     jq \
-    ripgrep \
     openssh-client \
     python3 \
     python3-pip \
     python3-venv \
-    expect \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN npm install -g @anthropic-ai/claude-code
-
-# Non-root user (Claude Code refuses --dangerously-skip-permissions as root)
-RUN useradd -m -s /bin/bash agent
+    ripgrep \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g @anthropic-ai/claude-code \
+    && useradd -m -s /bin/bash agent
 WORKDIR /workspace
 RUN chown agent:agent /workspace
 

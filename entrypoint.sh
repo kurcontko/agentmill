@@ -34,11 +34,11 @@ log() {
 }
 
 # — Auth check ———————————————————————————————————
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
     log "Auth: using ANTHROPIC_API_KEY"
-elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
     log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
-    if [ ! -f "$HOME/.claude.json" ]; then
+    if [[ ! -f "$HOME/.claude.json" ]]; then
         echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
     fi
 else
@@ -75,7 +75,7 @@ git config --global user.email "$GIT_EMAIL"
 UPSTREAM_DIR="/workspace/upstream"
 REPO_DIR="/workspace/repo"
 
-if [ -d "$UPSTREAM_DIR/.git" ] || [ -f "$UPSTREAM_DIR/HEAD" ]; then
+if [[ -d "$UPSTREAM_DIR/.git" || -f "$UPSTREAM_DIR/HEAD" ]]; then
     # Mode 2: upstream mounted — clone into isolated workspace
     # Each agent gets its own clone. Sync via git push/pull.
     # Default branch: agent-$AGENT_ID (safe to push to non-bare upstream
@@ -90,7 +90,7 @@ if [ -d "$UPSTREAM_DIR/.git" ] || [ -f "$UPSTREAM_DIR/HEAD" ]; then
     # not the checked-out branch, so this is safe).
     git -C "$UPSTREAM_DIR" config receive.denyCurrentBranch updateInstead 2>/dev/null || true
 
-    if [ ! -d "$REPO_DIR/.git" ]; then
+    if [[ ! -d "$REPO_DIR/.git" ]]; then
         git clone "$UPSTREAM_DIR" "$REPO_DIR"
         cd "$REPO_DIR"
         git remote set-url origin "$UPSTREAM_DIR"
@@ -111,7 +111,7 @@ if [ -d "$UPSTREAM_DIR/.git" ] || [ -f "$UPSTREAM_DIR/HEAD" ]; then
 
     log "Repo ready at $REPO_DIR (branch: $(git branch --show-current))"
 
-elif [ -d "$REPO_DIR/.git" ]; then
+elif [[ -d "$REPO_DIR/.git" ]]; then
     # Mode 1 or 3: direct mount (single agent or pre-created worktree)
     MULTI_AGENT=false
     : "${AGENT_BRANCH:=main}"
@@ -131,7 +131,7 @@ SETTINGS_LOCAL=".claude/settings.local.json"
 SETTINGS_BACKUP=""
 mkdir -p .claude
 
-if [ -f "$SETTINGS_LOCAL" ]; then
+if [[ -f "$SETTINGS_LOCAL" ]]; then
     SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
 fi
 
@@ -140,11 +140,12 @@ echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent
     > "$SETTINGS_LOCAL"
 
 restore_settings() {
-    if [ -n "$SETTINGS_BACKUP" ]; then
+    if [[ -n "$SETTINGS_BACKUP" ]]; then
         echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
     else
         rm -f "$SETTINGS_LOCAL"
     fi
+    return 0
 }
 
 trap 'restore_settings' EXIT
@@ -153,7 +154,7 @@ trap 'restore_settings' EXIT
 log "Starting agent loop (model=$MODEL, max_iterations=$MAX_ITERATIONS)"
 
 while true; do
-    if [ "$SHUTTING_DOWN" = true ]; then
+    if [[ "$SHUTTING_DOWN" = true ]]; then
         log "Shutdown requested. Exiting loop."
         break
     fi
@@ -164,7 +165,7 @@ while true; do
     log "==== Iteration $ITERATION ===="
 
     # Check for prompt file
-    if [ ! -f "$PROMPT_FILE" ]; then
+    if [[ ! -f "$PROMPT_FILE" ]]; then
         log "ERROR: Prompt file not found at $PROMPT_FILE"
         log "Mount your prompt file or set PROMPT_FILE env var."
         exit 1
@@ -186,14 +187,14 @@ while true; do
     log "Claude exited with code $CLAUDE_EXIT"
 
     # Commit any changes
-    if [ -n "$(git status --porcelain)" ]; then
+    if [[ -n "$(git status --porcelain)" ]]; then
         log "Committing changes..."
         git add -A
         git commit -m "agent-${AGENT_ID}: iteration $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))"
         log "Changes committed."
 
         # Multi-agent: push agent branch to upstream
-        if [ "$MULTI_AGENT" = true ]; then
+        if [[ "$MULTI_AGENT" = true ]]; then
             log "Pushing to upstream (branch: $AGENT_BRANCH)..."
             if ! git push origin "$AGENT_BRANCH" 2>/dev/null; then
                 log "Push failed, rebasing and retrying..."
@@ -211,7 +212,7 @@ while true; do
     fi
 
     # Check iteration limit
-    if [ "$MAX_ITERATIONS" -gt 0 ] && [ "$ITERATION" -ge "$MAX_ITERATIONS" ]; then
+    if [[ "$MAX_ITERATIONS" -gt 0 && "$ITERATION" -ge "$MAX_ITERATIONS" ]]; then
         log "Reached max iterations ($MAX_ITERATIONS). Stopping."
         break
     fi

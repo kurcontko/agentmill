@@ -9,20 +9,19 @@ on:
     - cron: "0 3 * * 1" # weekly Monday 03:00 UTC
   workflow_dispatch:
 
-permissions:
-  contents: read
-  security-events: write
-
 jobs:
   trivy-fs:
     name: Trivy Filesystem Scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Run Trivy (filesystem)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           scan-type: fs
           scan-ref: "."
@@ -40,6 +39,9 @@ jobs:
   trivy-image:
     name: Trivy Container Scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -48,7 +50,7 @@ jobs:
         run: docker build -t agentmill:scan .
 
       - name: Run Trivy (image)
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           image-ref: agentmill:scan
           format: sarif
