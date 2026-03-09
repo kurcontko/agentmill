@@ -128,7 +128,8 @@ INDEX_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Codex Engine Dashboard</title>
-<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>">
+<script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js" defer></script>
 <style>
 :root {
   --bg:       #0a0a0a;
@@ -211,6 +212,7 @@ html,body{
   transition:all .3s ease;
 }
 .conn-dot.off{background:var(--red);box-shadow:0 0 6px rgba(247,118,142,.4)}
+.conn-dot.stale{background:var(--amber);box-shadow:0 0 6px rgba(224,175,104,.4)}
 
 .agent-count{
   font-size:10px;
@@ -1897,8 +1899,17 @@ function renderDiff(agentName){
 
 /* ── Top bar ───────────────────────────────────────────── */
 function renderTopBar(){
-  $("conn-dot").className=S.connected?"conn-dot":"conn-dot off";
-  $("conn-txt").textContent=S.connected?"live":"reconnecting";
+  const dot=$("conn-dot"), txt=$("conn-txt");
+  if(S.connected){
+    // Check if data is stale (>15s since last event while agents are running)
+    const anyRunning=S.agents.some(a=>S.status[a]&&S.status[a].state==="running");
+    const stale=anyRunning&&lastDataAt>0&&(Date.now()-lastDataAt)>15000;
+    dot.className=stale?"conn-dot stale":"conn-dot";
+    txt.textContent=stale?"stale":"live";
+  } else {
+    dot.className="conn-dot off";
+    txt.textContent="reconnecting";
+  }
   // Update document title with agent status
   const n=S.agents.length;
   const running=S.agents.filter(a=>S.status[a]&&S.status[a].state==="running").length;
@@ -1933,43 +1944,37 @@ function connect(){
     },5000);
   };
 
-  es.addEventListener("agents",e=>{
-    onSseData();
-    const d=JSON.parse(e.data);
+  function safeParse(handler){
+    return e=>{onSseData();try{handler(JSON.parse(e.data))}catch{}};
+  }
+
+  es.addEventListener("agents",safeParse(d=>{
     const prev=S.agents.join(",");
     S.agents=d.agents;
     if(S.agents.join(",")!==prev) rebuildGrid();
     renderTopBar();
-  });
+  }));
 
-  es.addEventListener("status",e=>{
-    onSseData();
-    const d=JSON.parse(e.data);
+  es.addEventListener("status",safeParse(d=>{
     S.status[d.agent]=d.data;
     if(!S.agents.includes(d.agent)){S.agents.push(d.agent);rebuildGrid()}
     renderPaneStatus(d.agent);
-  });
+  }));
 
-  es.addEventListener("events",e=>{
-    onSseData();
-    const d=JSON.parse(e.data);
+  es.addEventListener("events",safeParse(d=>{
     S.events[d.agent]=d.data;
     if(!S.panes[d.agent]){S.agents.push(d.agent);rebuildGrid()}
     renderFeed(d.agent);
-  });
+  }));
 
-  es.addEventListener("diff",e=>{
-    onSseData();
-    const d=JSON.parse(e.data);
+  es.addEventListener("diff",safeParse(d=>{
     S.diff[d.agent]=d.data;
     renderDiff(d.agent);
-  });
+  }));
 
-  es.addEventListener("history",e=>{
-    onSseData();
-    const d=JSON.parse(e.data);
+  es.addEventListener("history",safeParse(d=>{
     S.history[d.agent]=d.data;
-  });
+  }));
 }
 
 /* ── Poll fallback ─────────────────────────────────────── */
@@ -1996,7 +2001,10 @@ async function poll(){
       renderFeed(a);
       renderDiff(a);
     }
-  }catch{}
+  }catch{
+    S.connected=false;
+    renderTopBar();
+  }
 }
 
 /* ── Stale SSE watchdog ────────────────────────────────── */
