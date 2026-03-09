@@ -6,7 +6,6 @@ import json
 import selectors
 import subprocess
 import sys
-from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -197,7 +196,7 @@ def main() -> int:
 
     prompt_summary = read_prompt_summary(prompt_file)
     git_snapshot = current_git_snapshot(repo_dir)
-    recent_events: deque[dict] = deque(maxlen=50)
+    recent_events: list[dict] = []
 
     status = {
         "state": "running",

@@ -1367,7 +1367,24 @@ function renderFeed(agentName){
   if(raw.length===0) return;
 
   const events=dedup(raw);
-  const cur=S.cursor[agentName]||0;
+  let cur=S.cursor[agentName]||0;
+
+  // Detect if the source array was replaced or shrunk (new iteration, etc.)
+  // Compare a fingerprint of the first event to catch resets
+  const fp=events.length>0?JSON.stringify(events[0]):"";
+  const prevFp=S.feedFingerprint&&S.feedFingerprint[agentName];
+  if(cur>events.length || (cur>0 && fp!==prevFp)){
+    // Source changed underneath us — full reset
+    cur=0;
+    S.cursor[agentName]=0;
+    S.tailGroup[agentName]=null;
+    S.tailGroupBody[agentName]=null;
+    S.tailGroupCount[agentName]=0;
+    p.feed.innerHTML="";
+  }
+  if(!S.feedFingerprint) S.feedFingerprint={};
+  S.feedFingerprint[agentName]=fp;
+
   if(cur>=events.length) return;
 
   const feed=p.feed;
