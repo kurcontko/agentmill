@@ -104,7 +104,6 @@ The container restarts automatically on crash (`restart: unless-stopped`).
 | `EXTRA_PYTHON_TOOLS` | — | Extra Python CLI tools to install into repo `.venv` (for example `ruff pytest`) |
 | `AUTO_RALPH_MAX_ITERATIONS` | `10` | Ralph loop cap for dashboard auto-start |
 | `AUTO_RALPH_COMPLETION_PROMISE` | `TASK_COMPLETE` | Exact `<promise>...</promise>` token Ralph watches for |
-| `CODEX_COMPLETION_PROMISE` | — | Optional string to detect in Codex final messages for preview/supervision |
 | `PREVIEW_APP_URL` | — | Optional app URL to embed in the Codex preview page |
 | `CODEX_PREVIEW_PORT` | `3001` | Host port for the Codex preview UI |
 
@@ -260,7 +259,6 @@ Suggested `status.json` fields:
   "last_exit_code": 0,
   "files_changed": 4,
   "commit": "abc1234",
-  "completion_promise_seen": false,
   "stall_count": 0
 }
 ```
@@ -269,7 +267,7 @@ That gives you three low-effort UI options without reading JSONL directly:
 
 1. Terminal status view
 
-   Use `watch -n 2 cat logs/codex-preview/agent-1/summary.md` or a tiny shell script that prints `status.json` in a readable format.
+   Use `watch -n 2 cat logs/codex-preview/agent-1/status.json | python3 -m json.tool` or a tiny shell script that prints it in a readable format.
 
 2. Static browser page
 
