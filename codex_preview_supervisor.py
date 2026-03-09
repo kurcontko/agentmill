@@ -60,106 +60,99 @@ def append_event(events_path: Path, event: dict) -> None:
         handle.write(json.dumps(event) + "\n")
 
 
-def render_summary(status: dict, recent_events: list[dict], diff_stat: str) -> str:
-    lines = [
-        "# Codex Agent Preview",
-        "",
-        f"- State: {status['state']}",
-        f"- Iteration: {status['iteration']} / {status['max_iterations_display']}",
-        f"- Last event: {status['last_event'] or 'n/a'}",
-        f"- Current task: {status['current_task'] or 'n/a'}",
-        f"- Last message: {status['last_message'] or 'n/a'}",
-        f"- Files changed: {status['files_changed']}",
-        f"- Branch: {status['branch'] or 'n/a'}",
-        f"- Commit: {status['commit'] or 'n/a'}",
-        f"- Completion promise seen: {'yes' if status['completion_promise_seen'] else 'no'}",
-        f"- Updated at: {status['updated_at']}",
-        "",
-        "## Recent Events",
-        "",
-    ]
+# ---------------------------------------------------------------------------
+# normalize_event – dispatch-based approach
+# ---------------------------------------------------------------------------
 
-    if recent_events:
-        for event in recent_events[-8:]:
-            lines.append(f"- [{event['at']}] {event['label']}")
-    else:
-        lines.append("- No recent events yet.")
+_SYSTEM_EVENTS = frozenset({
+    "thread.started", "turn.started", "turn.completed", "turn.failed", "error",
+})
 
-    lines.extend(["", "## Diff Stat", "", "```text", diff_stat or "No diff.", "```", ""])
-    return "\n".join(lines)
+
+def _normalize_agent_message(event_type: str, item_id: str, item_status: str, item: dict) -> dict:
+    full_text = (item.get("text") or "").strip()
+    short = full_text.replace("\n", " ")[:160]
+    return {
+        "type": event_type,
+        "kind": "message",
+        "id": item_id,
+        "label": f"agent_message: {short}",
+        "text": full_text,
+    }
+
+
+def _normalize_reasoning(event_type: str, item_id: str, item_status: str, item: dict) -> dict:
+    summary_parts = item.get("summary") or []
+    summary_text = ""
+    if isinstance(summary_parts, list):
+        summary_text = "\n".join(
+            part.get("text", "") for part in summary_parts
+            if isinstance(part, dict) and part.get("text")
+        ).strip()
+    content_parts = item.get("content") or []
+    content_text = ""
+    if isinstance(content_parts, list):
+        content_text = "\n".join(
+            part.get("text", "") for part in content_parts
+            if isinstance(part, dict) and part.get("text")
+        ).strip()
+    display_text = summary_text or content_text
+    short = display_text.replace("\n", " ")[:160] if display_text else "thinking..."
+    return {
+        "type": event_type,
+        "kind": "reasoning",
+        "id": item_id,
+        "label": f"reasoning: {short}",
+        "text": display_text,
+        "status": item_status,
+    }
+
+
+def _normalize_command_execution(event_type: str, item_id: str, item_status: str, item: dict) -> dict:
+    command = (item.get("command") or "").strip()
+    output = (item.get("aggregated_output") or "").strip()
+    exit_code = item.get("exit_code")
+    short_cmd = command.replace("\n", " ")[:160]
+    return {
+        "type": event_type,
+        "kind": "command",
+        "id": item_id,
+        "label": f"command ({item_status}): {short_cmd}",
+        "command": command,
+        "output": output[:8000] if output else "",
+        "exit_code": exit_code,
+        "status": item_status,
+    }
+
+
+_ITEM_NORMALIZERS: dict[str, callable] = {
+    "agent_message": _normalize_agent_message,
+    "reasoning": _normalize_reasoning,
+    "command_execution": _normalize_command_execution,
+}
 
 
 def normalize_event(payload: dict) -> dict | None:
     event_type = payload.get("type", "")
     item = payload.get("item") or {}
 
-    if event_type in {"thread.started", "turn.started", "turn.completed", "turn.failed", "error"}:
+    # System-level events
+    if event_type in _SYSTEM_EVENTS:
         return {"type": event_type, "kind": "system", "label": event_type}
 
+    # Item events
     if event_type.startswith("item."):
         item_id = item.get("id", "")
         item_type = item.get("type", "unknown")
         item_status = item.get("status", "")
 
-        if item_type == "agent_message":
-            full_text = (item.get("text") or "").strip()
-            short = full_text.replace("\n", " ")[:160]
-            return {
-                "type": event_type,
-                "kind": "message",
-                "id": item_id,
-                "label": f"agent_message: {short}",
-                "text": full_text,
-            }
-
-        if item_type == "reasoning":
-            summary_parts = item.get("summary") or []
-            summary_text = ""
-            if isinstance(summary_parts, list):
-                summary_text = "\n".join(
-                    part.get("text", "") for part in summary_parts
-                    if isinstance(part, dict) and part.get("text")
-                ).strip()
-            content_parts = item.get("content") or []
-            content_text = ""
-            if isinstance(content_parts, list):
-                content_text = "\n".join(
-                    part.get("text", "") for part in content_parts
-                    if isinstance(part, dict) and part.get("text")
-                ).strip()
-            display_text = summary_text or content_text
-            short = display_text.replace("\n", " ")[:160] if display_text else "thinking..."
-            return {
-                "type": event_type,
-                "kind": "reasoning",
-                "id": item_id,
-                "label": f"reasoning: {short}",
-                "text": display_text,
-                "status": item_status,
-            }
-
-        if item_type == "command_execution":
-            command = (item.get("command") or "").strip()
-            output = (item.get("aggregated_output") or "").strip()
-            exit_code = item.get("exit_code")
-            short_cmd = command.replace("\n", " ")[:160]
-            return {
-                "type": event_type,
-                "kind": "command",
-                "id": item_id,
-                "label": f"command ({item_status}): {short_cmd}",
-                "command": command,
-                "output": output[:8000] if output else "",
-                "exit_code": exit_code,
-                "status": item_status,
-            }
+        normalizer = _ITEM_NORMALIZERS.get(item_type)
+        if normalizer:
+            return normalizer(event_type, item_id, item_status, item)
 
         return {
-            "type": event_type,
-            "kind": "tool",
-            "id": item_id,
-            "label": f"{item_type}: {item_status or 'n/a'}",
-            "status": item_status,
+            "type": event_type, "kind": "tool", "id": item_id,
+            "label": f"{item_type}: {item_status or 'n/a'}", "status": item_status,
         }
 
     return None
@@ -174,7 +167,6 @@ def main() -> int:
     parser.add_argument("--iteration", type=int, required=True)
     parser.add_argument("--max-iterations", type=int, default=0)
     parser.add_argument("--model", default="")
-    parser.add_argument("--completion-promise", default="")
     parser.add_argument("--preview-app-url", default="")
     args = parser.parse_args()
 
@@ -191,13 +183,18 @@ def main() -> int:
     events_path = state_dir / "events.ndjson"
     recent_events_path = state_dir / "recent-events.json"
     status_path = state_dir / "status.json"
-    summary_path = state_dir / "summary.md"
     diff_stat_path = state_dir / "diff-stat.txt"
     last_message_path = state_dir / "last-message.txt"
 
     prompt_summary = read_prompt_summary(prompt_file)
     git_snapshot = current_git_snapshot(repo_dir)
+    # Load existing events from previous iterations to preserve dashboard state
     recent_events: list[dict] = []
+    if recent_events_path.exists():
+        try:
+            recent_events = json.loads(recent_events_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            recent_events = []
 
     status = {
         "state": "running",
@@ -213,7 +210,6 @@ def main() -> int:
         "files_changed": git_snapshot["files_changed"],
         "branch": git_snapshot["branch"],
         "commit": git_snapshot["commit"],
-        "completion_promise_seen": False,
         "preview_app_url": args.preview_app_url,
         "raw_jsonl_path": str(raw_jsonl_path.relative_to(Path(args.log_dir))),
         "stderr_log_path": str(stderr_log_path.relative_to(Path(args.log_dir))),
@@ -221,7 +217,6 @@ def main() -> int:
 
     write_json(status_path, status)
     diff_stat_path.write_text(git_snapshot["diff_stat"] + ("\n" if git_snapshot["diff_stat"] else ""), encoding="utf-8")
-    summary_path.write_text(render_summary(status, list(recent_events), git_snapshot["diff_stat"]), encoding="utf-8")
 
     command = ["codex", "exec", "--full-auto", "--json", "-C", str(repo_dir)]
     if args.model:
@@ -264,7 +259,6 @@ def main() -> int:
                 status["state"] = "stopped"
                 status["updated_at"] = now_iso()
                 write_json(status_path, status)
-                summary_path.write_text(render_summary(status, list(recent_events), git_snapshot["diff_stat"]), encoding="utf-8")
                 return 130  # conventional SIGINT exit code
 
             for key, _ in stream_selector.select(timeout=0.5):
@@ -294,6 +288,9 @@ def main() -> int:
                 if normalized is not None:
                     normalized["at"] = status["updated_at"]
                     recent_events.append(normalized)
+                    # Keep only the last 200 events to bound memory and file size
+                    if len(recent_events) > 200:
+                        recent_events = recent_events[-200:]
                     append_event(events_path, normalized)
                     recent_events_path.write_text(json.dumps(recent_events) + "\n", encoding="utf-8")
 
@@ -303,8 +300,6 @@ def main() -> int:
                     if message_text:
                         status["last_message"] = message_text
                         last_message_path.write_text(message_text + "\n", encoding="utf-8")
-                        if args.completion_promise and args.completion_promise in message_text:
-                            status["completion_promise_seen"] = True
 
                 # Throttle git snapshot to avoid spawning 3 git processes per event
                 now_mono = time.monotonic()
@@ -316,7 +311,6 @@ def main() -> int:
                     status["commit"] = git_snapshot["commit"]
                     diff_stat_path.write_text(git_snapshot["diff_stat"] + ("\n" if git_snapshot["diff_stat"] else ""), encoding="utf-8")
                 write_json(status_path, status)
-                summary_path.write_text(render_summary(status, list(recent_events), git_snapshot["diff_stat"]), encoding="utf-8")
 
         process.wait()
 
@@ -329,7 +323,6 @@ def main() -> int:
     status["commit"] = git_snapshot["commit"]
     diff_stat_path.write_text(git_snapshot["diff_stat"] + ("\n" if git_snapshot["diff_stat"] else ""), encoding="utf-8")
     write_json(status_path, status)
-    summary_path.write_text(render_summary(status, list(recent_events), git_snapshot["diff_stat"]), encoding="utf-8")
 
     return process.returncode
 
