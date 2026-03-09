@@ -60,6 +60,17 @@ def append_event(events_path: Path, event: dict) -> None:
         handle.write(json.dumps(event) + "\n")
 
 
+def wait_for_process_exit(process: subprocess.Popen[str], timeout: float) -> bool:
+    try:
+        process.wait(timeout=timeout)
+        return False
+    except subprocess.TimeoutExpired:
+        print(f"ERROR: codex subprocess exceeded wait timeout ({timeout}s); killing process", file=sys.stderr)
+        process.kill()
+        process.wait()
+        return True
+
+
 # ---------------------------------------------------------------------------
 # normalize_event – dispatch-based approach
 # ---------------------------------------------------------------------------
@@ -318,7 +329,7 @@ def main() -> int:
                     diff_stat_path.write_text(git_snapshot["diff_stat"] + ("\n" if git_snapshot["diff_stat"] else ""), encoding="utf-8")
                 write_json(status_path, status)
 
-        process.wait()
+        wait_for_process_exit(process, timeout=300)
 
     git_snapshot = current_git_snapshot(repo_dir)
     status["updated_at"] = now_iso()
