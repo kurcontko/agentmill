@@ -110,7 +110,7 @@ if [ -d "$UPSTREAM_DIR/.git" ] || [ -f "$UPSTREAM_DIR/HEAD" ]; then
 
     log "Repo ready at $REPO_DIR (branch: $(git branch --show-current))"
 
-elif [ -d "$REPO_DIR/.git" ]; then
+elif [ -d "$REPO_DIR/.git" ] || [ -f "$REPO_DIR/.git" ]; then
     # Mode 1 or 3: direct mount (single agent or pre-created worktree)
     MULTI_AGENT=false
     : "${AGENT_BRANCH:=main}"

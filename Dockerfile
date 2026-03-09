@@ -29,6 +29,7 @@ COPY entrypoint-codex.sh /entrypoint-codex.sh
 COPY entrypoint-codex-tui.sh /entrypoint-codex-tui.sh
 COPY codex_preview_supervisor.py /codex_preview_supervisor.py
 COPY codex_preview_server.py /codex_preview_server.py
+COPY static/ /static/
 COPY setup-claude-config.sh /setup-claude-config.sh
 COPY setup-repo-env.sh /setup-repo-env.sh
 COPY auto-trust.exp /auto-trust.exp

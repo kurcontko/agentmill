@@ -49,7 +49,7 @@ git config --global user.name "$GIT_USER"
 git config --global user.email "$GIT_EMAIL"
 
 # --- Repo check -----------------------------------------------
-if [ ! -d "$REPO_DIR/.git" ]; then
+if [ ! -d "$REPO_DIR/.git" ] && [ ! -f "$REPO_DIR/.git" ]; then
     log "ERROR: No repo found at $REPO_DIR. Set REPO_PATH in .env."
     exit 1
 fi

@@ -10,7 +10,6 @@ MAX_ITERATIONS="${MAX_ITERATIONS:-0}"
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
 LOOP_DELAY="${LOOP_DELAY:-5}"
-CODEX_COMPLETION_PROMISE="${CODEX_COMPLETION_PROMISE:-}"
 PREVIEW_APP_URL="${PREVIEW_APP_URL:-}"
 ITERATION=0
 SHUTTING_DOWN=false
@@ -95,7 +94,7 @@ if [ -d "$UPSTREAM_DIR/.git" ] || [ -f "$UPSTREAM_DIR/HEAD" ]; then
     fi
 
     log "Repo ready at $REPO_DIR (branch: $(git branch --show-current))"
-elif [ -d "$REPO_DIR/.git" ]; then
+elif [ -d "$REPO_DIR/.git" ] || [ -f "$REPO_DIR/.git" ]; then
     MULTI_AGENT=false
     : "${AGENT_BRANCH:=main}"
     cd "$REPO_DIR"
@@ -139,9 +138,6 @@ while true; do
     if [ -n "$CODEX_MODEL" ]; then
         supervisor_args+=(--model "$CODEX_MODEL")
     fi
-    if [ -n "$CODEX_COMPLETION_PROMISE" ]; then
-        supervisor_args+=(--completion-promise "$CODEX_COMPLETION_PROMISE")
-    fi
     if [ -n "$PREVIEW_APP_URL" ]; then
         supervisor_args+=(--preview-app-url "$PREVIEW_APP_URL")
     fi
@@ -173,10 +169,8 @@ while true; do
                 fi
             fi
         fi
-        update_preview_status "committed"
     else
         log "No changes to commit."
-        update_preview_status "idle"
     fi
 
     if [ "$MAX_ITERATIONS" -gt 0 ] && [ "$ITERATION" -ge "$MAX_ITERATIONS" ]; then
@@ -186,7 +180,6 @@ while true; do
     fi
 
     log "Sleeping ${LOOP_DELAY}s before next iteration..."
-    update_preview_status "sleeping"
     sleep "$LOOP_DELAY"
 done
 

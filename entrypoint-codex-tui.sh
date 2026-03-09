@@ -31,7 +31,7 @@ fi
 git config --global user.name "$GIT_USER"
 git config --global user.email "$GIT_EMAIL"
 
-if [ ! -d "$REPO_DIR/.git" ]; then
+if [ ! -d "$REPO_DIR/.git" ] && [ ! -f "$REPO_DIR/.git" ]; then
     log "ERROR: No repo found at $REPO_DIR. Set REPO_PATH in .env."
     exit 1
 fi
@@ -51,14 +51,8 @@ fi
 codex_args=()
 
 case "$CODEX_APPROVAL_MODE" in
-    suggest)
-        codex_args+=(--suggest)
-        ;;
-    auto-edit)
-        codex_args+=(--auto-edit)
-        ;;
-    full-auto)
-        codex_args+=(--full-auto)
+    suggest|auto-edit|full-auto)
+        codex_args+=(--approval-mode "$CODEX_APPROVAL_MODE")
         ;;
     *)
         log "ERROR: Unsupported CODEX_APPROVAL_MODE=$CODEX_APPROVAL_MODE"
