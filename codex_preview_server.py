@@ -127,7 +127,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Codex Engine</title>
+<title>Codex Engine Dashboard</title>
 <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
 <style>
 :root {
@@ -1110,6 +1110,32 @@ html,body{
   animation:empty-pulse 3s ease-in-out infinite;
 }
 
+/* ── Completion promise badge ─────────────────────────────── */
+.pane-promise{
+  display:none;
+  font-size:8px;
+  font-weight:700;
+  padding:1px 6px;
+  border-radius:3px;
+  color:var(--green);
+  background:rgba(158,206,106,.08);
+  border:1px solid rgba(158,206,106,.15);
+  letter-spacing:.03em;
+  text-transform:uppercase;
+  white-space:nowrap;
+  flex-shrink:0;
+}
+
+.pane-promise.visible{display:inline-block}
+
+/* ── Elapsed timer in strip ──────────────────────────────── */
+.ps-elapsed{
+  font-variant-numeric:tabular-nums;
+}
+
+/* ── Stop button hide when not running ───────────────────── */
+.pane-stop.hidden{display:none}
+
 /* ── Focus / keyboard ────────────────────────────────────── */
 :focus-visible{
   outline:1px solid var(--blue);
@@ -1260,6 +1286,7 @@ function createPane(agentName){
     `<span class="pane-name">${esc(agentName)}</span>`+
     `<span class="pane-state" data-r="state">--</span>`+
     `<span class="pane-iter" data-r="iter"></span>`+
+    `<span class="pane-promise" data-r="promise">done</span>`+
     `<span class="pane-spacer"></span>`+
     `<span class="pane-task" data-r="task"></span>`+
     `<span class="pane-files" data-r="files"></span>`+
@@ -1297,6 +1324,7 @@ function createPane(agentName){
   strip.innerHTML=
     `<div class="ps-cell"><div class="ps-label">branch</div><div class="ps-val" data-r="branch">--</div></div>`+
     `<div class="ps-cell"><div class="ps-label">commit</div><div class="ps-val" data-r="commit">--</div></div>`+
+    `<div class="ps-cell"><div class="ps-label">elapsed</div><div class="ps-val ps-elapsed" data-r="elapsed">--</div></div>`+
     `<div class="ps-cell"><div class="ps-label">updated</div><div class="ps-val" data-r="updated">--</div></div>`;
   pane.appendChild(strip);
 
@@ -1407,12 +1435,26 @@ function rebuildGrid(){
   grid.className=`grid cols-${cols}`;
 }
 
+/* ── Format elapsed duration ───────────────────────────── */
+function fmtElapsed(startIso){
+  if(!startIso) return "--";
+  try{
+    const sec=Math.floor((Date.now()-new Date(startIso).getTime())/1000);
+    if(sec<0) return "--";
+    if(sec<60) return `${sec}s`;
+    if(sec<3600) return `${Math.floor(sec/60)}m ${sec%60}s`;
+    const h=Math.floor(sec/3600),m=Math.floor((sec%3600)/60);
+    return `${h}h ${m}m`;
+  }catch{return "--"}
+}
+
 /* ── Render pane header/strip ──────────────────────────── */
 function renderPaneStatus(agentName){
   const p=S.panes[agentName]; if(!p) return;
   const s=S.status[agentName]; if(!s) return;
   const q=p.q;
 
+  const isRunning=s.state==="running";
   const cls=stCls(s.state);
   const spin=q("spinner");
   if(spin) spin.className="pane-spinner"+(cls==="s-ok"?" done":cls==="s-fail"?" fail":"");
@@ -1431,11 +1473,25 @@ function renderPaneStatus(agentName){
   const filesEl=q("files");
   if(filesEl) filesEl.textContent=(s.files_changed??0)>0?`${s.files_changed} files`:"";
 
+  // Completion promise badge
+  const promiseEl=q("promise");
+  if(promiseEl) promiseEl.className="pane-promise"+(s.completion_promise_seen?" visible":"");
+
+  // Hide stop button when not running
+  const stopEl=q("stop");
+  if(stopEl){
+    if(!isRunning&&!stopEl.disabled) stopEl.classList.add("hidden");
+    else stopEl.classList.remove("hidden");
+  }
+
   const branchEl=q("branch");
   if(branchEl) branchEl.textContent=s.branch||"--";
 
   const commitEl=q("commit");
   if(commitEl) commitEl.textContent=s.commit||"--";
+
+  const elapsedEl=q("elapsed");
+  if(elapsedEl) elapsedEl.textContent=fmtElapsed(s.started_at);
 
   const updatedEl=q("updated");
   if(updatedEl) updatedEl.textContent=fmtTime(s.updated_at);
@@ -1749,7 +1805,10 @@ function renderDiff(agentName){
     codeEl.innerHTML=diff.split("\n").map(line=>{
       const t=line.trimStart();
       if(/^\d+ files? changed/.test(t)) return `<span class="df">${esc(line)}</span>`;
-      if(/\|/.test(line)) return `<span class="df">${esc(line)}</span>`;
+      if(/\|/.test(line)){
+        // Colorize the +/- bar in git diff --stat output
+        return esc(line).replace(/(\++)/g,'<span class="da">$1</span>').replace(/(-+)/g,'<span class="dd">$1</span>');
+      }
       return esc(line);
     }).join("\n");
   }
@@ -1759,6 +1818,12 @@ function renderDiff(agentName){
 function renderTopBar(){
   $("conn-dot").className=S.connected?"conn-dot":"conn-dot off";
   $("conn-txt").textContent=S.connected?"live":"reconnecting";
+  // Update document title with agent status
+  const n=S.agents.length;
+  const running=S.agents.filter(a=>S.status[a]&&S.status[a].state==="running").length;
+  if(n===0) document.title="Codex Engine Dashboard";
+  else if(running>0) document.title=`[${running} running] Codex Engine`;
+  else document.title=`[${n} agent${n!==1?"s":""}] Codex Engine`;
 }
 
 /* ── SSE with reconnect + stale detection ──────────────── */
@@ -1871,6 +1936,11 @@ setInterval(()=>{
   if(!S.connected) poll();
 },3000);
 setInterval(poll,10000);
+// Refresh elapsed timers every 5s
+setInterval(()=>{
+  for(const a of S.agents) renderPaneStatus(a);
+  renderTopBar();
+},5000);
 })();
 </script>
 </body>
