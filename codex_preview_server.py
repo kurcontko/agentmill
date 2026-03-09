@@ -1153,17 +1153,51 @@ button:focus-visible{
 ::-webkit-scrollbar-thumb{background:var(--bg-3);border-radius:3px}
 ::-webkit-scrollbar-thumb:hover{background:var(--t3)}
 
+/* ── Latest message highlight ─────────────────────────────── */
+.fi-msg.latest{
+  background:rgba(228,228,228,.02);
+}
+
+/* ── Sealed tool group subtle fade ───────────────────────── */
+.tool-group:not(.active):not(.open){
+  opacity:.85;
+  transition:opacity .3s ease;
+}
+
+.tool-group:not(.active):not(.open):hover{
+  opacity:1;
+}
+
+/* ── Single-pane strip centering ─────────────────────────── */
+.grid.cols-1 .pane-strip{
+  max-width:calc(var(--content-max) + 24px);
+  margin:0 auto;
+  width:100%;
+}
+
 /* ── Responsive adjustments ──────────────────────────────── */
+@media (max-width:900px){
+  .grid.cols-3,.grid.cols-4,.grid.cols-5,.grid.cols-6,.grid.cols-7,.grid.cols-8{
+    grid-template-columns:1fr 1fr;
+  }
+}
+
 @media (max-width:600px){
   :root{--content-max:100%}
+  .grid.cols-2,.grid.cols-3,.grid.cols-4,.grid.cols-5,.grid.cols-6,.grid.cols-7,.grid.cols-8{
+    grid-template-columns:1fr;
+  }
+  .topbar{padding:0 10px;gap:8px}
   .pane-head{gap:4px;padding:4px 8px}
   .pane-task{display:none}
   .pane-files{display:none}
+  .pane-promise{display:none!important}
   .ps-label{font-size:7px}
   .ps-val{font-size:9px}
   .fi-msg{padding:6px 8px}
   .tg-head{padding:3px 8px}
   .trow{padding:2px 8px 2px 20px}
+  .pane-strip{flex-wrap:wrap}
 }
 </style>
 </head>
@@ -1232,6 +1266,10 @@ function shortCmd(cmd){
   if(c.length>80) c=c.substring(0,80)+"...";
   return c;
 }
+function displayName(agentName){
+  // Strip "agent-" prefix for cleaner display
+  return agentName.replace(/^agent-/,"");
+}
 function renderMd(text){
   if(typeof marked!=="undefined"&&marked.parse){
     try{return marked.parse(text,{breaks:true,gfm:true})}catch{}
@@ -1283,7 +1321,7 @@ function createPane(agentName){
   head.className="pane-head";
   head.innerHTML=
     `<span class="pane-spinner" data-r="spinner"></span>`+
-    `<span class="pane-name">${esc(agentName)}</span>`+
+    `<span class="pane-name" title="${esc(agentName)}">${esc(displayName(agentName))}</span>`+
     `<span class="pane-state" data-r="state">--</span>`+
     `<span class="pane-iter" data-r="iter"></span>`+
     `<span class="pane-promise" data-r="promise">done</span>`+
@@ -1353,7 +1391,8 @@ function createPane(agentName){
   diffBar.innerHTML=
     `<div class="pane-diff-toggle">`+
       chevronSvg+
-      `<span>diff</span>`+
+      `<span>diff stat</span>`+
+      `<span data-r="diff-summary" style="font-size:9px;color:var(--t3)"></span>`+
       `<span data-r="diff-files" style="margin-left:auto;font-size:9px;color:var(--t3)"></span>`+
     `</div>`+
     `<div class="pane-diff-body"><div class="diff-code" data-r="diff-code">No diff.</div></div>`;
@@ -1570,7 +1609,10 @@ function dedup(events){
 function onNew(agentName){
   const p=S.panes[agentName]; if(!p) return;
   if(S.pinned[agentName]){
-    requestAnimationFrame(()=>p.feed.scrollTo({top:p.feed.scrollHeight,behavior:"smooth"}));
+    // Double-raf ensures DOM layout is complete before scrolling
+    requestAnimationFrame(()=>requestAnimationFrame(()=>
+      p.feed.scrollTo({top:p.feed.scrollHeight,behavior:"smooth"})
+    ));
   } else {
     S.missed[agentName]=(S.missed[agentName]||0)+1;
     const cnt=p.pill.querySelector(".jp-count");
@@ -1800,6 +1842,13 @@ function renderDiff(agentName){
   const filesEl=p.diffBar.querySelector('[data-r="diff-files"]');
   if(filesEl) filesEl.textContent=`${files} file${files!==1?"s":""}`;
 
+  // Extract summary line for the toggle bar
+  const summaryEl=p.diffBar.querySelector('[data-r="diff-summary"]');
+  if(summaryEl){
+    const summaryMatch=diff.match(/(\d+ insertions?.*?\d+ deletions?)/);
+    summaryEl.textContent=summaryMatch?`(${summaryMatch[1]})`:"";
+  }
+
   const codeEl=p.diffBar.querySelector('[data-r="diff-code"]');
   if(codeEl){
     codeEl.innerHTML=diff.split("\n").map(line=>{
@@ -1928,6 +1977,29 @@ setInterval(()=>{
     poll();
   }
 },5000);
+
+/* ── Keyboard shortcuts ────────────────────────────────── */
+document.addEventListener("keydown",e=>{
+  // End or Cmd+Down: scroll all panes to bottom
+  if(e.key==="End"||(e.metaKey&&e.key==="ArrowDown")){
+    e.preventDefault();
+    for(const a of S.agents){
+      const p=S.panes[a]; if(!p) continue;
+      S.pinned[a]=true;
+      S.missed[a]=0;
+      p.pill.classList.remove("show");
+      p.feed.scrollTo({top:p.feed.scrollHeight,behavior:"smooth"});
+    }
+  }
+  // Home or Cmd+Up: scroll all panes to top
+  if(e.key==="Home"||(e.metaKey&&e.key==="ArrowUp")){
+    e.preventDefault();
+    for(const a of S.agents){
+      const p=S.panes[a]; if(!p) continue;
+      p.feed.scrollTo({top:0,behavior:"smooth"});
+    }
+  }
+});
 
 /* ── Init ──────────────────────────────────────────────── */
 connect();poll();
