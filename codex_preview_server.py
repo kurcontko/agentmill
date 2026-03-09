@@ -51,7 +51,7 @@ class FileWatcher:
         msg = f"event: {event}\ndata: {data}\n\n"
         with self.lock:
             dead: list[queue.Queue] = []
-            for q in self.subscribers:
+            for q in list(self.subscribers):
                 try:
                     q.put_nowait(msg)
                 except queue.Full:
