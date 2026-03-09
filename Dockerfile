@@ -27,10 +27,12 @@ COPY entrypoint.sh /entrypoint.sh
 COPY entrypoint-tui.sh /entrypoint-tui.sh
 COPY entrypoint-codex.sh /entrypoint-codex.sh
 COPY entrypoint-codex-tui.sh /entrypoint-codex-tui.sh
+COPY codex_preview_supervisor.py /codex_preview_supervisor.py
+COPY codex_preview_server.py /codex_preview_server.py
 COPY setup-claude-config.sh /setup-claude-config.sh
 COPY setup-repo-env.sh /setup-repo-env.sh
 COPY auto-trust.exp /auto-trust.exp
-RUN chmod +x /entrypoint.sh /entrypoint-tui.sh /entrypoint-codex.sh /entrypoint-codex-tui.sh /setup-claude-config.sh /setup-repo-env.sh /auto-trust.exp
+RUN chmod +x /entrypoint.sh /entrypoint-tui.sh /entrypoint-codex.sh /entrypoint-codex-tui.sh /codex_preview_supervisor.py /codex_preview_server.py /setup-claude-config.sh /setup-repo-env.sh /auto-trust.exp
 
 USER agent
 

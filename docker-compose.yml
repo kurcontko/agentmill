@@ -11,6 +11,8 @@ x-common-env: &common-env
   EXTRA_PYTHON_TOOLS: ${EXTRA_PYTHON_TOOLS:-}
   AUTO_RALPH_MAX_ITERATIONS: ${AUTO_RALPH_MAX_ITERATIONS:-10}
   AUTO_RALPH_COMPLETION_PROMISE: ${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}
+  CODEX_COMPLETION_PROMISE: ${CODEX_COMPLETION_PROMISE:-}
+  PREVIEW_APP_URL: ${PREVIEW_APP_URL:-}
 
 x-agent-base: &agent-base
   build: .
@@ -163,9 +165,20 @@ services:
       MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
       LOOP_DELAY: ${LOOP_DELAY:-5}
       PROMPT_FILE: ${PROMPT_FILE:-/prompts/PROMPT.md}
-      CODEX_JSON: ${CODEX_JSON:-false}
     volumes:
       - ./prompts:/prompts
       - ./logs:/workspace/logs
       - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
       - ~/.codex:/home/agent/.codex
+
+# --- Codex preview --------------------------------------------
+# Browser UI for the derived codex-agent status surface.
+# Usage: docker compose up codex-preview
+  codex-preview:
+    build: .
+    entrypoint: ["python3", "/codex_preview_server.py", "--root", "/workspace/logs/codex-preview", "--port", "3001"]
+    restart: unless-stopped
+    ports:
+      - "${CODEX_PREVIEW_PORT:-3001}:3001"
+    volumes:
+      - ./logs:/workspace/logs

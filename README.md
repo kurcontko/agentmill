@@ -104,6 +104,9 @@ The container restarts automatically on crash (`restart: unless-stopped`).
 | `EXTRA_PYTHON_TOOLS` | — | Extra Python CLI tools to install into repo `.venv` (for example `ruff pytest`) |
 | `AUTO_RALPH_MAX_ITERATIONS` | `10` | Ralph loop cap for dashboard auto-start |
 | `AUTO_RALPH_COMPLETION_PROMISE` | `TASK_COMPLETE` | Exact `<promise>...</promise>` token Ralph watches for |
+| `CODEX_COMPLETION_PROMISE` | — | Optional string to detect in Codex final messages for preview/supervision |
+| `PREVIEW_APP_URL` | — | Optional app URL to embed in the Codex preview page |
+| `CODEX_PREVIEW_PORT` | `3001` | Host port for the Codex preview UI |
 
 ## Repo Setup Contract
 
@@ -151,6 +154,7 @@ AgentMill now supports two separate interactive engines:
 - `dashboard`: Claude Code TUI, with optional Ralph Loop automation
 - `codex-dashboard`: OpenAI Codex interactive terminal session
 - `codex-agent`: OpenAI Codex headless loop using `codex exec --full-auto`
+- `codex-preview`: Browser UI for live Codex agent status
 
 Keep them separate. Claude services use `.claude` state, plugins, and Ralph-specific behavior. Codex services use `OPENAI_API_KEY` or mounted `~/.codex` state and do not rely on Claude plugins or trust automation.
 
@@ -193,9 +197,106 @@ docker-compose up codex-agent
 
 Notes:
 
-- `codex-agent` currently uses `codex exec --full-auto`.
+- `codex-agent` runs `codex exec --full-auto --json` under a small supervisor.
 - The prompt is read from `PROMPT_FILE` via stdin.
-- Set `CODEX_JSON=true` if you want JSONL event output in the session log.
+- Raw event logs are written under `logs/codex-preview/agent-*/runs/`.
+
+### Run Codex Preview
+
+Start the headless agent and browser preview together:
+
+```bash
+REPO_PATH=/path/to/repo \
+OPENAI_API_KEY=your_key_here \
+PROMPT_FILE=/prompts/PROMPT_V5_WORK.md \
+MAX_ITERATIONS=3 \
+docker-compose up codex-agent codex-preview
+```
+
+Then open:
+
+```text
+http://localhost:3001
+```
+
+Optional app embed inside the preview UI:
+
+```bash
+REPO_PATH=/path/to/repo \
+OPENAI_API_KEY=your_key_here \
+PROMPT_FILE=/prompts/PROMPT_V5_WORK.md \
+PREVIEW_APP_URL=http://host.docker.internal:4173 \
+docker-compose up codex-agent codex-preview
+```
+
+If your target app is running locally, the preview page will embed that URL in an iframe next to the agent status.
+
+### Simple Codex Agent UI
+
+Raw JSONL is useful for automation, but it is the wrong operator surface. The preview service sits on top of the event stream and publishes a small derived state instead.
+
+Recommended shape:
+
+- Run `codex exec --json` inside the `codex-agent` supervisor.
+- Parse the JSONL stream and derive operator state.
+- Write a few human-friendly files on every event:
+  - `logs/codex-preview/agent-1/status.json`
+  - `logs/codex-preview/agent-1/summary.md`
+  - `logs/codex-preview/agent-1/last-message.txt`
+  - `logs/codex-preview/agent-1/runs/<timestamp>.jsonl`
+
+Suggested `status.json` fields:
+
+```json
+{
+  "state": "running",
+  "iteration": 3,
+  "max_iterations": 10,
+  "started_at": "2026-03-09T10:15:00Z",
+  "updated_at": "2026-03-09T10:18:12Z",
+  "last_event": "turn.completed",
+  "current_task": "Run tests and fix the auth flow regression",
+  "last_message": "Implemented the fix and reran the targeted tests.",
+  "last_exit_code": 0,
+  "files_changed": 4,
+  "commit": "abc1234",
+  "completion_promise_seen": false,
+  "stall_count": 0
+}
+```
+
+That gives you three low-effort UI options without reading JSONL directly:
+
+1. Terminal status view
+
+   Use `watch -n 2 cat logs/codex-preview/agent-1/summary.md` or a tiny shell script that prints `status.json` in a readable format.
+
+2. Static browser page
+
+   Use `codex-preview`, which serves a minimal page that polls the derived status files every 2-5 seconds and renders:
+   - current state
+   - iteration progress
+   - current task
+   - last agent message
+   - changed files count
+   - latest commit
+
+3. Log-friendly sidecar
+
+   Append one human-readable line per major event to `logs/codex-agent.status.log`, for example:
+
+   ```text
+   [10:18:12] iter=3 state=running event=turn.completed files=4 commit=abc1234
+   ```
+
+Current implementation choices:
+
+- Keep the UI read-only.
+- Do not render raw event payloads by default.
+- Treat JSONL as the transport layer and `status.json` as the operator API.
+- Stop at a single-agent view first; add multi-agent panels only after the single-agent loop is stable.
+
+This is the Codex equivalent of a Ralph monitor: not a native hook-based loop inside the agent, but a thin supervisor that converts machine events into a small, inspectable status surface.
 
 ## Apple Silicon
 

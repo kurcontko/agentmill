@@ -10,9 +10,11 @@ MAX_ITERATIONS="${MAX_ITERATIONS:-0}"
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
 LOOP_DELAY="${LOOP_DELAY:-5}"
-CODEX_JSON="${CODEX_JSON:-false}"
+CODEX_COMPLETION_PROMISE="${CODEX_COMPLETION_PROMISE:-}"
+PREVIEW_APP_URL="${PREVIEW_APP_URL:-}"
 ITERATION=0
 SHUTTING_DOWN=false
+PREVIEW_STATUS_FILE=""
 
 cleanup() {
     echo "[agentmill-codex] Received shutdown signal. Finishing current session..."
@@ -26,6 +28,28 @@ log() {
     local msg="[agentmill-codex:agent-${AGENT_ID} $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
     echo "$msg"
     echo "$msg" >> "$LOG_DIR/codex-agent-${AGENT_ID}.log"
+}
+
+update_preview_status() {
+    local state="$1"
+    if [ -z "$PREVIEW_STATUS_FILE" ] || [ ! -f "$PREVIEW_STATUS_FILE" ]; then
+        return 0
+    fi
+
+    local commit branch
+    commit="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || true)"
+    branch="$(git -C "$REPO_DIR" branch --show-current 2>/dev/null || true)"
+
+    local tmp_file
+    tmp_file="$(mktemp)"
+    jq \
+        --arg state "$state" \
+        --arg updated_at "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+        --arg commit "$commit" \
+        --arg branch "$branch" \
+        '.state = $state | .updated_at = $updated_at | .commit = $commit | .branch = $branch' \
+        "$PREVIEW_STATUS_FILE" > "$tmp_file"
+    mv "$tmp_file" "$PREVIEW_STATUS_FILE"
 }
 
 if [ -n "${OPENAI_API_KEY:-}" ]; then
@@ -94,7 +118,7 @@ while true; do
     fi
 
     ITERATION=$((ITERATION + 1))
-    SESSION_LOG="$LOG_DIR/codex_session_$(date -u '+%Y%m%d_%H%M%S')_iter${ITERATION}.log"
+    PREVIEW_STATUS_FILE="$LOG_DIR/codex-preview/agent-${AGENT_ID}/status.json"
 
     log "==== Iteration $ITERATION ===="
 
@@ -103,18 +127,29 @@ while true; do
         exit 1
     fi
 
-    codex_args=(exec --full-auto -C "$REPO_DIR")
+    supervisor_args=(
+        /codex_preview_supervisor.py
+        --repo-dir "$REPO_DIR"
+        --prompt-file "$PROMPT_FILE"
+        --log-dir "$LOG_DIR"
+        --agent-id "$AGENT_ID"
+        --iteration "$ITERATION"
+        --max-iterations "$MAX_ITERATIONS"
+    )
     if [ -n "$CODEX_MODEL" ]; then
-        codex_args+=(-m "$CODEX_MODEL")
+        supervisor_args+=(--model "$CODEX_MODEL")
     fi
-    if [ "$CODEX_JSON" = "true" ]; then
-        codex_args+=(--json)
+    if [ -n "$CODEX_COMPLETION_PROMISE" ]; then
+        supervisor_args+=(--completion-promise "$CODEX_COMPLETION_PROMISE")
+    fi
+    if [ -n "$PREVIEW_APP_URL" ]; then
+        supervisor_args+=(--preview-app-url "$PREVIEW_APP_URL")
     fi
 
-    log "Running Codex (session log: $SESSION_LOG)..."
+    log "Running Codex with preview supervisor..."
     set +e
-    codex "${codex_args[@]}" - < "$PROMPT_FILE" 2>&1 | tee "$SESSION_LOG"
-    CODEX_EXIT=${PIPESTATUS[0]}
+    python3 "${supervisor_args[@]}"
+    CODEX_EXIT=$?
     set -e
 
     log "Codex exited with code $CODEX_EXIT"
@@ -138,16 +173,20 @@ while true; do
                 fi
             fi
         fi
+        update_preview_status "committed"
     else
         log "No changes to commit."
+        update_preview_status "idle"
     fi
 
     if [ "$MAX_ITERATIONS" -gt 0 ] && [ "$ITERATION" -ge "$MAX_ITERATIONS" ]; then
         log "Reached max iterations ($MAX_ITERATIONS). Stopping."
+        update_preview_status "stopped"
         break
     fi
 
     log "Sleeping ${LOOP_DELAY}s before next iteration..."
+    update_preview_status "sleeping"
     sleep "$LOOP_DELAY"
 done
 
