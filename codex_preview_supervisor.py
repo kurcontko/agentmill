@@ -6,6 +6,7 @@ import json
 import selectors
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -245,6 +246,7 @@ def main() -> int:
         stream_selector.register(process.stderr, selectors.EVENT_READ, "stderr")
 
         signal_path = state_dir / "stop.signal"
+        last_git_check = 0.0
 
         while stream_selector.get_map():
             # Check for stop signal
@@ -293,7 +295,7 @@ def main() -> int:
                     normalized["at"] = status["updated_at"]
                     recent_events.append(normalized)
                     append_event(events_path, normalized)
-                    recent_events_path.write_text(json.dumps(list(recent_events), indent=2) + "\n", encoding="utf-8")
+                    recent_events_path.write_text(json.dumps(recent_events) + "\n", encoding="utf-8")
 
                 item = payload.get("item") or {}
                 if item.get("type") == "agent_message":
@@ -304,11 +306,15 @@ def main() -> int:
                         if args.completion_promise and args.completion_promise in message_text:
                             status["completion_promise_seen"] = True
 
-                git_snapshot = current_git_snapshot(repo_dir)
-                status["files_changed"] = git_snapshot["files_changed"]
-                status["branch"] = git_snapshot["branch"]
-                status["commit"] = git_snapshot["commit"]
-                diff_stat_path.write_text(git_snapshot["diff_stat"] + ("\n" if git_snapshot["diff_stat"] else ""), encoding="utf-8")
+                # Throttle git snapshot to avoid spawning 3 git processes per event
+                now_mono = time.monotonic()
+                if now_mono - last_git_check >= 2.0:
+                    last_git_check = now_mono
+                    git_snapshot = current_git_snapshot(repo_dir)
+                    status["files_changed"] = git_snapshot["files_changed"]
+                    status["branch"] = git_snapshot["branch"]
+                    status["commit"] = git_snapshot["commit"]
+                    diff_stat_path.write_text(git_snapshot["diff_stat"] + ("\n" if git_snapshot["diff_stat"] else ""), encoding="utf-8")
                 write_json(status_path, status)
                 summary_path.write_text(render_summary(status, list(recent_events), git_snapshot["diff_stat"]), encoding="utf-8")
 
