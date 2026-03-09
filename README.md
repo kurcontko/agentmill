@@ -10,15 +10,6 @@
   <strong>Tasks go in, code comes out.</strong>
 </p>
 
-<p align="center">
-  <a href="https://github.com/kurcontko/agentmill/actions/workflows/ci.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/kurcontko/agentmill/actions/workflows/security-scan.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/security-scan.yml/badge.svg" alt="Security Scan"></a>
-  <a href="https://github.com/kurcontko/agentmill/actions/workflows/codeql.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/codeql.yml/badge.svg" alt="CodeQL"></a>
-  <a href="https://sonarcloud.io/summary/overall?id=kurcontko_agentmill"><img src="https://sonarcloud.io/api/project_badges/measure?project=kurcontko_agentmill&metric=security_rating" alt="Security Rating"></a>
-  <a href="https://sonarcloud.io/summary/overall?id=kurcontko_agentmill"><img src="https://sonarcloud.io/api/project_badges/measure?project=kurcontko_agentmill&metric=reliability_rating" alt="Reliability Rating"></a>
-  <a href="https://github.com/ossf/scorecard"><img src="https://api.scorecard.dev/projects/github.com/kurcontko/agentmill/badge" alt="OpenSSF Scorecard"></a>
-</p>
-
 ## Quick Start
 
 ```bash
@@ -98,18 +89,23 @@ The container restarts automatically on crash (`restart: unless-stopped`).
 | Env Var | Default | Description |
 |---------|---------|-------------|
 | `ANTHROPIC_API_KEY` | — | API key (or use subscription auth via `~/.claude` mount) |
+| `OPENAI_API_KEY` | — | API key for Codex services |
 | `REPO_URL` | — | Git repo URL to clone |
 | `MODEL` | `sonnet` | Claude model to use |
+| `CODEX_MODEL` | — | Optional Codex model override |
 | `MAX_ITERATIONS` | `0` (infinite) | Stop after N iterations |
 | `LOOP_DELAY` | `5` | Seconds between iterations |
 | `GIT_USER` | `agentmill` | Git commit author name |
 | `GIT_EMAIL` | `agent@agentmill` | Git commit author email |
 | `PROMPT_FILE` | `/prompts/PROMPT.md` | Path to prompt file inside container |
+| `CODEX_APPROVAL_MODE` | `suggest` | Codex approval mode: `suggest`, `auto-edit`, or `full-auto` |
 | `AUTO_SETUP` | `true` | Auto-bootstrap repo-local dev environment on container start |
 | `REPO_SETUP_COMMAND` | — | Custom repo bootstrap command, run in repo root before Claude starts |
 | `EXTRA_PYTHON_TOOLS` | — | Extra Python CLI tools to install into repo `.venv` (for example `ruff pytest`) |
 | `AUTO_RALPH_MAX_ITERATIONS` | `10` | Ralph loop cap for dashboard auto-start |
 | `AUTO_RALPH_COMPLETION_PROMISE` | `TASK_COMPLETE` | Exact `<promise>...</promise>` token Ralph watches for |
+| `PREVIEW_APP_URL` | — | Optional app URL to embed in the Codex preview page |
+| `CODEX_PREVIEW_PORT` | `3001` | Host port for the Codex preview UI |
 
 ## Repo Setup Contract
 
@@ -149,6 +145,156 @@ docker-compose run --rm \
   -e PROMPT_FILE=/prompts/PROMPT_V5_WORK.md \
   dashboard
 ```
+
+## Engines
+
+AgentMill now supports two separate interactive engines:
+
+- `dashboard`: Claude Code TUI, with optional Ralph Loop automation
+- `codex-dashboard`: OpenAI Codex interactive terminal session
+- `codex-agent`: OpenAI Codex headless loop using `codex exec --full-auto`
+- `codex-preview`: Browser UI for live Codex agent status
+
+Keep them separate. Claude services use `.claude` state, plugins, and Ralph-specific behavior. Codex services use `OPENAI_API_KEY` or mounted `~/.codex` state and do not rely on Claude plugins or trust automation.
+
+### Run Codex Dashboard
+
+API-key auth:
+
+```bash
+REPO_PATH=/path/to/repo \
+OPENAI_API_KEY=your_key_here \
+docker-compose run --rm codex-dashboard
+```
+
+With repo-local setup helpers and a prompt file available in the container:
+
+```bash
+REPO_PATH=/path/to/repo \
+OPENAI_API_KEY=your_key_here \
+EXTRA_PYTHON_TOOLS='ruff pytest' \
+PROMPT_FILE=/prompts/PROMPT_V5_WORK.md \
+CODEX_APPROVAL_MODE=auto-edit \
+docker-compose run --rm codex-dashboard
+```
+
+If you previously authenticated on the host with `codex --login`, the service also mounts `~/.codex` to reuse that state.
+
+Current limitation:
+
+- `codex-dashboard` now passes the prompt file contents as the initial interactive prompt.
+
+### Run Codex Agent
+
+```bash
+REPO_PATH=/path/to/repo \
+OPENAI_API_KEY=your_key_here \
+PROMPT_FILE=/prompts/PROMPT_V5_WORK.md \
+MAX_ITERATIONS=3 \
+docker-compose up codex-agent
+```
+
+Notes:
+
+- `codex-agent` runs `codex exec --full-auto --json` under a small supervisor.
+- The prompt is read from `PROMPT_FILE` via stdin.
+- Raw event logs are written under `logs/codex-preview/agent-*/runs/`.
+
+### Run Codex Preview
+
+Start the headless agent and browser preview together:
+
+```bash
+REPO_PATH=/path/to/repo \
+OPENAI_API_KEY=your_key_here \
+PROMPT_FILE=/prompts/PROMPT_V5_WORK.md \
+MAX_ITERATIONS=3 \
+docker-compose up codex-agent codex-preview
+```
+
+Then open:
+
+```text
+http://localhost:3001
+```
+
+Optional app embed inside the preview UI:
+
+```bash
+REPO_PATH=/path/to/repo \
+OPENAI_API_KEY=your_key_here \
+PROMPT_FILE=/prompts/PROMPT_V5_WORK.md \
+PREVIEW_APP_URL=http://host.docker.internal:4173 \
+docker-compose up codex-agent codex-preview
+```
+
+If your target app is running locally, the preview page will embed that URL in an iframe next to the agent status.
+
+### Simple Codex Agent UI
+
+Raw JSONL is useful for automation, but it is the wrong operator surface. The preview service sits on top of the event stream and publishes a small derived state instead.
+
+Recommended shape:
+
+- Run `codex exec --json` inside the `codex-agent` supervisor.
+- Parse the JSONL stream and derive operator state.
+- Write a few human-friendly files on every event:
+  - `logs/codex-preview/agent-1/status.json`
+  - `logs/codex-preview/agent-1/summary.md`
+  - `logs/codex-preview/agent-1/last-message.txt`
+  - `logs/codex-preview/agent-1/runs/<timestamp>.jsonl`
+
+Suggested `status.json` fields:
+
+```json
+{
+  "state": "running",
+  "iteration": 3,
+  "max_iterations": 10,
+  "started_at": "2026-03-09T10:15:00Z",
+  "updated_at": "2026-03-09T10:18:12Z",
+  "last_event": "turn.completed",
+  "current_task": "Run tests and fix the auth flow regression",
+  "last_message": "Implemented the fix and reran the targeted tests.",
+  "last_exit_code": 0,
+  "files_changed": 4,
+  "commit": "abc1234",
+  "stall_count": 0
+}
+```
+
+That gives you three low-effort UI options without reading JSONL directly:
+
+1. Terminal status view
+
+   Use `watch -n 2 cat logs/codex-preview/agent-1/status.json | python3 -m json.tool` or a tiny shell script that prints it in a readable format.
+
+2. Static browser page
+
+   Use `codex-preview`, which serves a minimal page that polls the derived status files every 2-5 seconds and renders:
+   - current state
+   - iteration progress
+   - current task
+   - last agent message
+   - changed files count
+   - latest commit
+
+3. Log-friendly sidecar
+
+   Append one human-readable line per major event to `logs/codex-agent.status.log`, for example:
+
+   ```text
+   [10:18:12] iter=3 state=running event=turn.completed files=4 commit=abc1234
+   ```
+
+Current implementation choices:
+
+- Keep the UI read-only.
+- Do not render raw event payloads by default.
+- Treat JSONL as the transport layer and `status.json` as the operator API.
+- Stop at a single-agent view first; add multi-agent panels only after the single-agent loop is stable.
+
+This is the Codex equivalent of a Ralph monitor: not a native hook-based loop inside the agent, but a thin supervisor that converts machine events into a small, inspectable status surface.
 
 ## Apple Silicon
 

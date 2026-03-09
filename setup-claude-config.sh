@@ -13,7 +13,7 @@ TARGET_PLUGINS="/home/agent/.claude/plugins"
 DEFAULT_TRUSTED_PATHS="/workspace/repo /workspace/upstream"
 
 # --- Merge ~/.claude.json (MCP servers, plugins) ----------------------------
-if [[ -f "$HOST_CONFIG" ]]; then
+if [ -f "$HOST_CONFIG" ]; then
     python3 -c "
 import json, os
 
@@ -58,14 +58,14 @@ target['projects'] = projects
 
 json.dump(target, open('$TARGET_CONFIG', 'w'), indent=2)
 " 2>/dev/null || {
-        if [[ ! -f "$TARGET_CONFIG" ]]; then
+        if [ ! -f "$TARGET_CONFIG" ]; then
             echo '{"hasCompletedOnboarding":true}' > "$TARGET_CONFIG"
         fi
     }
 fi
 
 # --- Merge settings.json (permissions + plugin config) ----------------------
-if [[ -f "$HOST_SETTINGS" ]]; then
+if [ -f "$HOST_SETTINGS" ]; then
     python3 -c "
 import json, os
 
@@ -91,14 +91,14 @@ json.dump(target, open('$TARGET_SETTINGS', 'w'), indent=2)
 fi
 
 # --- Copy plugins and fix paths ---------------------------------------------
-if [[ -d "$HOST_PLUGINS" ]] && [[ -n "$(ls -A "$HOST_PLUGINS" 2>/dev/null)" ]]; then
+if [ -d "$HOST_PLUGINS" ] && [ "$(ls -A "$HOST_PLUGINS" 2>/dev/null)" ]; then
     # Copy plugin files to writable location
     mkdir -p "$TARGET_PLUGINS"
     cp -a "$HOST_PLUGINS"/. "$TARGET_PLUGINS"/ 2>/dev/null || true
 
     # Fix installed_plugins.json - rewrite host home path to container home
     MANIFEST="$TARGET_PLUGINS/installed_plugins.json"
-    if [[ -f "$MANIFEST" ]]; then
+    if [ -f "$MANIFEST" ]; then
         python3 -c "
 import json, re, os
 
@@ -120,7 +120,7 @@ json.dump(manifest, open('$MANIFEST', 'w'), indent=2)
     fi
 
     MARKETPLACES="$TARGET_PLUGINS/known_marketplaces.json"
-    if [[ -f "$MARKETPLACES" ]]; then
+    if [ -f "$MARKETPLACES" ]; then
         python3 -c "
 import json, re, os
 
