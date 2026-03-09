@@ -136,7 +136,6 @@ INDEX_HTML = r"""<!doctype html>
   --bg-1:     #111111;
   --bg-2:     #181818;
   --bg-3:     #222222;
-  --bg-card:  #0f0f0f;
   --border:   #1e1e1e;
   --border-h: #333333;
   --t1:       #e8e8e8;
@@ -149,7 +148,6 @@ INDEX_HTML = r"""<!doctype html>
   --cyan:     #73daca;
   --purple:   #bb9af7;
   --mono: 'SF Mono','Cascadia Code','JetBrains Mono','Fira Code',ui-monospace,monospace;
-  --sans: -apple-system,'Inter','Segoe UI',sans-serif;
   --content-max: 720px;
   --ease-out-expo: cubic-bezier(.16,1,.3,1);
   --ease-spring: cubic-bezier(.34,1.56,.64,1);
@@ -844,7 +842,7 @@ html,body{
 /* ── Jump pill (per-pane) ────────────────────────────────── */
 .jump-pill{
   position:absolute;
-  bottom:12px;
+  bottom:40px;
   left:50%;
   transform:translateX(-50%) translateY(40px);
   padding:4px 12px;
