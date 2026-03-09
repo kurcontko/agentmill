@@ -1255,7 +1255,7 @@ const S={
 };
 
 /* ── Helpers ───────────────────────────────────────────── */
-function esc(s){const d=document.createElement("div");d.textContent=s;return d.innerHTML}
+function esc(s){if(s==null) return "";const d=document.createElement("div");d.textContent=String(s);return d.innerHTML}
 function fmtTime(iso){
   if(!iso) return "--";
   try{return new Date(iso).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit",second:"2-digit"})}
@@ -1549,9 +1549,12 @@ function renderPaneStatus(agentName){
   const updatedEl=q("updated");
   if(updatedEl) updatedEl.textContent=fmtTime(s.updated_at);
 
-  // Clean up thinking indicator when agent stops running
+  // Clean up transient UI when agent stops running
   if(!isRunning && p.feed){
     ensureThinking(p.feed,agentName,false);
+    // Remove streaming cursor from last message
+    const streaming=p.feed.querySelector(".fi-msg.streaming");
+    if(streaming) streaming.classList.remove("streaming");
   }
 }
 
@@ -1961,7 +1964,7 @@ function connect(){
 
   es.addEventListener("events",safeParse(d=>{
     S.events[d.agent]=d.data;
-    if(!S.panes[d.agent]){S.agents.push(d.agent);rebuildGrid()}
+    if(!S.agents.includes(d.agent)){S.agents.push(d.agent);rebuildGrid()}
     renderFeed(d.agent);
   }));
 
