@@ -1302,9 +1302,10 @@ function classify(ev){
   if(kind==="reasoning") return {kind:"reasoning",text:ev.text||"",status:ev.status||""};
   if(kind==="tool") return {kind:"tool",icon:"fn",iconCls:"tool",text:label,fullCmd:"",output:"",status:ev.status||"",statusCls:ev.status==="completed"?"ok":"misc"};
   if(kind==="system"||label.startsWith("thread.")||label.startsWith("turn.")){
-    if(label.includes("error")||label.includes("failed")) return {kind:"turn",variant:"fail",text:label};
     if(label==="turn.started") return {kind:"turn",variant:"start",text:"turn started"};
     if(label==="turn.completed") return {kind:"turn",variant:"end",text:"turn completed"};
+    if(label==="turn.failed") return {kind:"turn",variant:"fail",text:"turn failed"};
+    if(label==="error"||label.includes("error")||label.includes("failed")) return {kind:"turn",variant:"fail",text:label};
     if(label==="thread.started") return {kind:"thread",text:"thread started"};
     return {kind:"divider",text:label};
   }
@@ -1316,9 +1317,10 @@ function classify(ev){
   }
   if(label.startsWith("agent_message:")) return {kind:"msg",text:label.replace(/^agent_message:\s*/,"")};
   if(label.startsWith("reasoning:")) return {kind:"reasoning",text:label.replace(/^reasoning:\s*/,""),status:""};
-  if(label.includes("error")||label.includes("failed")) return {kind:"turn",variant:"fail",text:label};
   if(label==="turn.started") return {kind:"turn",variant:"start",text:"turn started"};
   if(label==="turn.completed") return {kind:"turn",variant:"end",text:"turn completed"};
+  if(label==="turn.failed") return {kind:"turn",variant:"fail",text:"turn failed"};
+  if(label.includes("error")||label.includes("failed")) return {kind:"turn",variant:"fail",text:label};
   if(label==="thread.started") return {kind:"thread",text:"thread started"};
   if(label.startsWith("thread.")||label.startsWith("turn.")) return {kind:"divider",text:label};
   return {kind:"sys",icon:"SYS",iconCls:"misc",text:label};
