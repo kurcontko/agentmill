@@ -1158,6 +1158,16 @@ button:focus-visible{
   background:rgba(228,228,228,.02);
 }
 
+/* ── Failed turn highlight ───────────────────────────────── */
+.fi-turn.turn-fail{
+  background:rgba(247,118,142,.03);
+}
+
+/* ── Performance: promote animated elements to own layer ─── */
+.pane-feed{will-change:scroll-position}
+.pane-spinner{will-change:transform}
+.thinking-dots span{will-change:transform,opacity}
+
 /* ── Sealed tool group subtle fade ───────────────────────── */
 .tool-group:not(.active):not(.open){
   opacity:.85;
@@ -1272,7 +1282,11 @@ function displayName(agentName){
 }
 function renderMd(text){
   if(typeof marked!=="undefined"&&marked.parse){
-    try{return marked.parse(text,{breaks:true,gfm:true})}catch{}
+    try{
+      const html=marked.parse(text,{breaks:true,gfm:true});
+      // Sanitize: strip script tags as a safety measure
+      return html.replace(/<script[\s\S]*?<\/script>/gi,"");
+    }catch{}
   }
   return esc(text).replace(/\n/g,"<br>");
 }
@@ -1534,6 +1548,11 @@ function renderPaneStatus(agentName){
 
   const updatedEl=q("updated");
   if(updatedEl) updatedEl.textContent=fmtTime(s.updated_at);
+
+  // Clean up thinking indicator when agent stops running
+  if(!isRunning && p.feed){
+    ensureThinking(p.feed,agentName,false);
+  }
 }
 
 /* ── Tool row builder ──────────────────────────────────── */
@@ -1553,7 +1572,10 @@ function buildToolRow(ev,c){
   detail.className="trow-detail";
   let dh="";
   if(c.fullCmd) dh+=`<div class="td-section"><div class="td-label">command</div><div class="td-code">${esc(c.fullCmd)}</div></div>`;
-  if(c.output) dh+=`<div class="td-section"><div class="td-label">output</div><div class="td-code">${esc(c.output)}</div></div>`;
+  if(c.output){
+    const truncated=c.output.length>=7900;
+    dh+=`<div class="td-section"><div class="td-label">output${truncated?" (truncated)":""}</div><div class="td-code">${esc(c.output)}</div></div>`;
+  }
   if(c.exitCode!==undefined&&c.exitCode!==null) dh+=`<div class="td-exit">exit <span class="${c.exitCode===0?"ok":"fail"}">${c.exitCode}</span></div>`;
   if(!dh) dh=`<div class="td-code">${esc(c.text)}</div>`;
   detail.innerHTML=dh;
@@ -1824,6 +1846,9 @@ function renderFeed(agentName){
     if(!S.tailGroup[agentName] && !hasActiveReasoning && lastC.kind!=="divider" && lastC.kind!=="turn"){
       ensureThinking(feed,agentName,true);
     }
+  } else {
+    // Agent finished — remove thinking indicator
+    ensureThinking(feed,agentName,false);
   }
 
   if(appended) onNew(agentName);
@@ -1855,8 +1880,15 @@ function renderDiff(agentName){
       const t=line.trimStart();
       if(/^\d+ files? changed/.test(t)) return `<span class="df">${esc(line)}</span>`;
       if(/\|/.test(line)){
-        // Colorize the +/- bar in git diff --stat output
-        return esc(line).replace(/(\++)/g,'<span class="da">$1</span>').replace(/(-+)/g,'<span class="dd">$1</span>');
+        // Colorize the +/- bar in git diff --stat (only the bar portion after |)
+        const parts=esc(line).split("|");
+        if(parts.length>=2){
+          const bar=parts.slice(1).join("|")
+            .replace(/(\++)/g,'<span class="da">$1</span>')
+            .replace(/(-+)/g,'<span class="dd">$1</span>');
+          return parts[0]+"|"+bar;
+        }
+        return esc(line);
       }
       return esc(line);
     }).join("\n");
