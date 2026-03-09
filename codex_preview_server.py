@@ -632,7 +632,7 @@ html,body{
 .td-exit .ok{color:var(--green)}
 .td-exit .fail{color:var(--red)}
 
-/* ── System event ────────────────────────────────────────── */
+/* ── System / divider event ───────────────────────────────── */
 .fi-sys{
   padding:2px 10px;
   font-size:10px;
@@ -647,6 +647,98 @@ html,body{
   flex:1;
   height:1px;
   background:var(--border);
+}
+
+/* ── Turn separator — prominent visual break ─────────────── */
+.fi-turn{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:8px 10px;
+  margin:4px 0;
+}
+
+.fi-turn::before,.fi-turn::after{
+  content:'';
+  flex:1;
+  height:1px;
+}
+
+.fi-turn.turn-start::before,.fi-turn.turn-start::after{
+  background:linear-gradient(90deg,transparent,var(--blue),transparent);
+  height:1px;
+}
+
+.fi-turn.turn-end::before,.fi-turn.turn-end::after{
+  background:linear-gradient(90deg,transparent,var(--green),transparent);
+  height:1px;
+}
+
+.fi-turn.turn-fail::before,.fi-turn.turn-fail::after{
+  background:linear-gradient(90deg,transparent,var(--red),transparent);
+  height:1px;
+}
+
+.fi-turn-badge{
+  font-size:9px;
+  font-weight:700;
+  padding:1px 8px;
+  border-radius:3px;
+  white-space:nowrap;
+  letter-spacing:.03em;
+}
+
+.turn-start .fi-turn-badge{
+  color:var(--blue);
+  background:rgba(122,162,247,.1);
+  border:1px solid rgba(122,162,247,.2);
+}
+
+.turn-end .fi-turn-badge{
+  color:var(--green);
+  background:rgba(158,206,106,.1);
+  border:1px solid rgba(158,206,106,.2);
+}
+
+.turn-fail .fi-turn-badge{
+  color:var(--red);
+  background:rgba(247,118,142,.1);
+  border:1px solid rgba(247,118,142,.2);
+}
+
+.fi-turn-ts{
+  font-size:8px;
+  color:var(--t3);
+  font-variant-numeric:tabular-nums;
+}
+
+/* ── Thread start — subtle header ────────────────────────── */
+.fi-thread{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  padding:6px 10px;
+  margin:2px 0;
+  font-size:9px;
+  color:var(--t3);
+}
+
+.fi-thread::before,.fi-thread::after{
+  content:'';
+  flex:1;
+  height:1px;
+  background:var(--border-h);
+}
+
+.fi-thread-badge{
+  font-size:8px;
+  font-weight:700;
+  padding:1px 6px;
+  border-radius:2px;
+  color:var(--cyan);
+  background:rgba(115,218,202,.08);
+  border:1px solid rgba(115,218,202,.15);
+  letter-spacing:.04em;
 }
 
 /* ── Pane diff bar ───────────────────────────────────────── */
@@ -1021,7 +1113,10 @@ function classify(ev){
   if(kind==="reasoning") return {kind:"reasoning",text:ev.text||"",status:ev.status||""};
   if(kind==="tool") return {kind:"tool",icon:"fn",iconCls:"tool",text:label,fullCmd:"",output:"",status:ev.status||"",statusCls:ev.status==="completed"?"ok":"misc"};
   if(kind==="system"||label.startsWith("thread.")||label.startsWith("turn.")){
-    if(label.includes("error")||label.includes("failed")) return {kind:"sys",icon:"ERR",iconCls:"err",text:label};
+    if(label.includes("error")||label.includes("failed")) return {kind:"turn",variant:"fail",text:label};
+    if(label==="turn.started") return {kind:"turn",variant:"start",text:"turn started"};
+    if(label==="turn.completed") return {kind:"turn",variant:"end",text:"turn completed"};
+    if(label==="thread.started") return {kind:"thread",text:"thread started"};
     return {kind:"divider",text:label};
   }
   // Legacy
@@ -1032,7 +1127,10 @@ function classify(ev){
   }
   if(label.startsWith("agent_message:")) return {kind:"msg",text:label.replace(/^agent_message:\s*/,"")};
   if(label.startsWith("reasoning:")) return {kind:"reasoning",text:label.replace(/^reasoning:\s*/,""),status:""};
-  if(label.includes("error")||label.includes("failed")) return {kind:"sys",icon:"ERR",iconCls:"err",text:label};
+  if(label.includes("error")||label.includes("failed")) return {kind:"turn",variant:"fail",text:label};
+  if(label==="turn.started") return {kind:"turn",variant:"start",text:"turn started"};
+  if(label==="turn.completed") return {kind:"turn",variant:"end",text:"turn completed"};
+  if(label==="thread.started") return {kind:"thread",text:"thread started"};
   if(label.startsWith("thread.")||label.startsWith("turn.")) return {kind:"divider",text:label};
   return {kind:"sys",icon:"SYS",iconCls:"misc",text:label};
 }
@@ -1384,6 +1482,8 @@ function renderFeed(agentName){
   }
   if(!S.feedFingerprint) S.feedFingerprint={};
   S.feedFingerprint[agentName]=fp;
+  if(!S.turnCount) S.turnCount={};
+  if(cur===0) S.turnCount[agentName]=0;
 
   if(cur>=events.length) return;
 
@@ -1477,6 +1577,21 @@ function renderFeed(agentName){
           `<div class="fi-body">${renderMd(c.text)}</div>`;
         feed.appendChild(el);
         appended=true;
+      } else if(c.kind==="turn"){
+        if(c.variant==="start") S.turnCount[agentName]=(S.turnCount[agentName]||0)+1;
+        const tn=S.turnCount[agentName]||1;
+        const el=document.createElement("div");
+        el.className="fi fi-turn turn-"+(c.variant||"start");
+        const label=c.variant==="start"?`turn ${tn}`:`turn ${tn} ${c.variant==="end"?"complete":"failed"}`;
+        el.innerHTML=
+          `<span class="fi-turn-badge">${esc(label)}</span>`+
+          `<span class="fi-turn-ts">${fmtTime(ev.at)}</span>`;
+        feed.appendChild(el);
+      } else if(c.kind==="thread"){
+        const el=document.createElement("div");
+        el.className="fi fi-thread";
+        el.innerHTML=`<span class="fi-thread-badge">${esc(c.text)}</span>`;
+        feed.appendChild(el);
       } else if(c.kind==="divider"){
         const el=document.createElement("div");
         el.className="fi fi-sys";
@@ -1497,7 +1612,7 @@ function renderFeed(agentName){
     const lastEv=events[events.length-1];
     const lastC=classify(lastEv);
     const hasActiveReasoning=!!feed.querySelector(".fi-reasoning.active");
-    if(!S.tailGroup[agentName] && !hasActiveReasoning && lastC.kind!=="divider"){
+    if(!S.tailGroup[agentName] && !hasActiveReasoning && lastC.kind!=="divider" && lastC.kind!=="turn"){
       ensureThinking(feed,agentName,true);
     }
   }
