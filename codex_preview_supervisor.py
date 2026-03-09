@@ -233,8 +233,14 @@ def main() -> int:
             bufsize=1,
         )
 
-        assert process.stdout is not None
-        assert process.stderr is not None
+        if process.stdout is None:
+            process.kill()
+            process.wait()
+            raise RuntimeError("codex subprocess did not provide stdout pipe")
+        if process.stderr is None:
+            process.kill()
+            process.wait()
+            raise RuntimeError("codex subprocess did not provide stderr pipe")
 
         stream_selector = selectors.DefaultSelector()
         stream_selector.register(process.stdout, selectors.EVENT_READ, "stdout")
