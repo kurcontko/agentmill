@@ -71,7 +71,12 @@ mkdir -p .claude
 if [ -f "$SETTINGS_LOCAL" ]; then
     SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
 fi
-echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"}}' > "$SETTINGS_LOCAL"
+SETTINGS_JSON='{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"}}'
+if [ "${RESPAWN:-false}" = "true" ]; then
+    # Add Stop hook to exit Claude when done, so the respawn loop can restart it
+    SETTINGS_JSON='{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"},"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"kill -TERM $PPID 2>/dev/null; exit 0"}]}]}}'
+fi
+echo "$SETTINGS_JSON" > "$SETTINGS_LOCAL"
 
 restore_settings() {
     if [ -n "$SETTINGS_BACKUP" ]; then
@@ -85,7 +90,7 @@ trap restore_settings EXIT
 
 # --- Build initial prompt -------------------------------------
 INITIAL_PROMPT=""
-if [ -f "$PROMPT_FILE" ]; then
+if [ "${SKIP_PROMPT:-false}" != "true" ] && [ -f "$PROMPT_FILE" ]; then
     INITIAL_PROMPT="$(cat "$PROMPT_FILE")"
     log "Loaded prompt from $PROMPT_FILE"
 fi
@@ -108,12 +113,54 @@ EOF
     log "Ralph Loop limits: max_iterations=$AUTO_RALPH_MAX_ITERATIONS completion_promise=$AUTO_RALPH_COMPLETION_PROMISE"
 fi
 
+# --- Graceful shutdown -----------------------------------------
+SHUTTING_DOWN=false
+cleanup() {
+    log "Received shutdown signal. Finishing current session..."
+    SHUTTING_DOWN=true
+}
+trap 'cleanup; restore_settings' SIGTERM SIGINT
+
 # --- Launch Claude Code TUI -----------------------------------
-log "Launching Claude TUI (model=$MODEL)"
+RESPAWN="${RESPAWN:-false}"
+LOOP_DELAY="${LOOP_DELAY:-5}"
+ITERATION=0
+
 if [ -n "$INITIAL_PROMPT" ]; then
-    log "Starting interactive session with prompt from $PROMPT_FILE."
+    log "Starting session with prompt from $PROMPT_FILE."
     export CLAUDE_INITIAL_PROMPT="$INITIAL_PROMPT"
 else
     unset CLAUDE_INITIAL_PROMPT
 fi
-exec /auto-trust.exp
+
+while true; do
+    ITERATION=$((ITERATION + 1))
+    log "Launching Claude TUI (model=$MODEL, iteration=$ITERATION)"
+
+    if [ "${SKIP_PROMPT:-false}" = "true" ]; then
+        # Manual mode: launch Claude directly, no expect wrapper
+        claude --model "$MODEL" || true
+    else
+        /auto-trust.exp || true
+    fi
+
+    # Safety-net: commit any leftover changes
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        log "Committing leftover changes from iteration $ITERATION..."
+        git add -A
+        git commit -m "[wip] tui session $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))" || true
+    fi
+
+    if [ "$RESPAWN" != "true" ]; then
+        log "Respawn disabled. Exiting."
+        break
+    fi
+
+    if [ "$SHUTTING_DOWN" = true ]; then
+        log "Shutdown requested. Exiting."
+        break
+    fi
+
+    log "Claude exited. Restarting in ${LOOP_DELAY}s..."
+    sleep "$LOOP_DELAY"
+done

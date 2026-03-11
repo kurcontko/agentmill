@@ -75,7 +75,7 @@ class FileWatcher:
         while self._running:
             try:
                 self._poll_once()
-            except Exception:
+            except (OSError, json.JSONDecodeError):
                 pass
             time.sleep(self.interval)
 

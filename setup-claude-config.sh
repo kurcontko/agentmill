@@ -30,26 +30,39 @@ if 'mcpServers' in host:
 projects = target.get('projects', {})
 host_projects = host.get('projects', {})
 
-trusted_source = None
-for project in host_projects.values():
-    if project.get('hasTrustDialogAccepted'):
-        trusted_source = project
-        break
+# Merge values from ALL trusted host projects (not just the first).
+# For dict keys (mcpServers etc.), later projects add to earlier ones.
+merged_trusted = {}
+for hp in host_projects.values():
+    if not hp.get('hasTrustDialogAccepted'):
+        continue
+    for key in (
+        'allowedTools',
+        'mcpContextUris',
+        'mcpServers',
+        'enabledMcpjsonServers',
+        'disabledMcpjsonServers',
+        'hasClaudeMdExternalIncludesApproved',
+        'hasClaudeMdExternalIncludesWarningShown',
+    ):
+        if key not in hp:
+            continue
+        val = hp[key]
+        if isinstance(val, dict):
+            merged_trusted.setdefault(key, {}).update(val)
+        elif isinstance(val, list):
+            existing = merged_trusted.setdefault(key, [])
+            for item in val:
+                if item not in existing:
+                    existing.append(item)
+        else:
+            merged_trusted[key] = val
 
 for path in '$DEFAULT_TRUSTED_PATHS'.split():
     project = dict(projects.get(path, {}))
-    if trusted_source is not None:
-        for key in (
-            'allowedTools',
-            'mcpContextUris',
-            'mcpServers',
-            'enabledMcpjsonServers',
-            'disabledMcpjsonServers',
-            'hasClaudeMdExternalIncludesApproved',
-            'hasClaudeMdExternalIncludesWarningShown',
-        ):
-            if key in trusted_source and key not in project:
-                project[key] = trusted_source[key]
+    for key, val in merged_trusted.items():
+        if key not in project:
+            project[key] = val
     project['hasTrustDialogAccepted'] = True
     project['hasTrustDialogHooksAccepted'] = True
     projects[path] = project

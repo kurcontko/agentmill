@@ -11,6 +11,8 @@ MAX_ITERATIONS="${MAX_ITERATIONS:-0}"  # 0 = infinite
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
 LOOP_DELAY="${LOOP_DELAY:-5}"  # seconds between iterations
+AUTO_COMMIT="${AUTO_COMMIT:-wip}"  # "off" = no auto-commit, "wip" = safety-net [wip] only, "on" = always commit (legacy)
+PUSH_REBASE_MAX_RETRIES="${PUSH_REBASE_MAX_RETRIES:-3}"
 
 # — State ————————————————————————————————————————
 ITERATION=0
@@ -30,6 +32,38 @@ log() {
     local msg="[agentmill:agent-${AGENT_ID} $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
     echo "$msg"
     echo "$msg" >> "$LOG_DIR/agent-${AGENT_ID}.log"
+}
+
+push_branch_with_retries() {
+    local branch="$1"
+    local max_retries="${2:-$PUSH_REBASE_MAX_RETRIES}"
+    local retry=0
+
+    log "Pushing to upstream (branch: $branch)..."
+    while true; do
+        if git push origin "$branch" 2>/dev/null; then
+            return 0
+        fi
+
+        if [ "$retry" -ge "$max_retries" ]; then
+            log "ERROR: push failed after $max_retries retries"
+            return 1
+        fi
+
+        retry=$((retry + 1))
+        log "Push failed, rebasing and retrying ($retry/$max_retries)..."
+
+        if ! git fetch origin; then
+            log "ERROR: git fetch failed during push retry $retry/$max_retries"
+            return 1
+        fi
+
+        if ! git rebase "origin/$branch" 2>/dev/null; then
+            git rebase --abort 2>/dev/null || true
+            log "WARN: Rebase conflict on retry $retry/$max_retries, will retry next iteration"
+            return 1
+        fi
+    done
 }
 
 # — Auth check ———————————————————————————————————
@@ -157,6 +191,7 @@ while true; do
     fi
 
     ITERATION=$((ITERATION + 1))
+    ITER_START_TIME="$(date +%s)"
     SESSION_LOG="$LOG_DIR/session_$(date -u '+%Y%m%d_%H%M%S')_iter${ITERATION}.log"
 
     log "==== Iteration $ITERATION ===="
@@ -182,25 +217,46 @@ while true; do
 
     log "Claude exited with code $CLAUDE_EXIT"
 
-    # Commit any changes
+    # Commit any changes (controlled by AUTO_COMMIT flag)
     if [ -n "$(git status --porcelain)" ]; then
-        log "Committing changes..."
-        git add -A
-        git commit -m "agent-${AGENT_ID}: iteration $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))"
-        log "Changes committed."
+        # Check if the agent already committed during this iteration
+        LAST_COMMIT_TIME="$(git log -1 --format='%ct' 2>/dev/null || echo 0)"
+        AGENT_COMMITTED=false
+        if [ "$LAST_COMMIT_TIME" -ge "$ITER_START_TIME" ] 2>/dev/null; then
+            AGENT_COMMITTED=true
+        fi
+
+        case "$AUTO_COMMIT" in
+            off)
+                log "Auto-commit disabled. Uncommitted changes left in working tree."
+                ;;
+            wip)
+                if [ "$AGENT_COMMITTED" = true ]; then
+                    # Agent made its own commits — only safety-net the leftovers
+                    if [ -n "$(git status --porcelain)" ]; then
+                        log "Safety-net: committing leftover uncommitted changes as [wip]..."
+                        git add -A
+                        git commit -m "[wip] agent-${AGENT_ID}: uncommitted leftovers from iteration $ITERATION"
+                    fi
+                else
+                    # Agent didn't commit at all — save everything as wip
+                    log "Safety-net: agent made no commits, saving work as [wip]..."
+                    git add -A
+                    git commit -m "[wip] agent-${AGENT_ID}: iteration $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))"
+                fi
+                ;;
+            on|*)
+                log "Committing changes..."
+                git add -A
+                git commit -m "agent-${AGENT_ID}: iteration $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))"
+                log "Changes committed."
+                ;;
+        esac
 
         # Multi-agent: push agent branch to upstream
         if [ "$MULTI_AGENT" = true ]; then
-            log "Pushing to upstream (branch: $AGENT_BRANCH)..."
-            if ! git push origin "$AGENT_BRANCH" 2>/dev/null; then
-                log "Push failed, rebasing and retrying..."
-                git fetch origin
-                if git rebase "origin/$AGENT_BRANCH" 2>/dev/null; then
-                    git push origin "$AGENT_BRANCH" || log "WARN: Push failed, will retry next iteration"
-                else
-                    git rebase --abort
-                    log "WARN: Rebase conflict, will retry next iteration"
-                fi
+            if ! push_branch_with_retries "$AGENT_BRANCH"; then
+                log "WARN: Skipping push for iteration $ITERATION"
             fi
         fi
     else

@@ -122,7 +122,33 @@ services:
     restart: "no"
     environment:
       <<: *common-env
+      PROMPT_FILE: ${PROMPT_FILE:-/prompts/PROMPT.md}
       AUTO_RALPH: ${AUTO_RALPH:-false}
+      RESPAWN: ${RESPAWN:-false}
+      LOOP_DELAY: ${LOOP_DELAY:-5}
+    volumes:
+      - ./prompts:/prompts
+      - ./logs:/workspace/logs
+      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
+      - ~/.claude.json:/home/agent/.host-claude.json:ro
+      - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
+      - ~/.claude/plugins:/home/agent/.host-plugins:ro
+      - ~/.claude/commands:/home/agent/.claude/commands:ro
+
+# --- TUI manual -----------------------------------------------
+# Plain Claude TUI for manual interactive work. No ralph-loop.
+# Usage: docker compose run tui
+  tui:
+    <<: *agent-base
+    entrypoint: ["/entrypoint-tui.sh"]
+    tty: true
+    stdin_open: true
+    restart: "no"
+    environment:
+      <<: *common-env
+      AUTO_RALPH: "false"
+      RESPAWN: "false"
+      SKIP_PROMPT: "true"
     volumes:
       - ./prompts:/prompts
       - ./logs:/workspace/logs

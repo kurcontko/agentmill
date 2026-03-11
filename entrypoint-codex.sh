@@ -4,6 +4,39 @@ set -euo pipefail
 AGENT_ID="${AGENT_ID:-1}"
 AGENT_BRANCH="${AGENT_BRANCH:-}"
 LOG_DIR="/workspace/logs"
+
+# --- Auto-detect unique AGENT_ID for --scale mode ---
+# When multiple replicas share the same AGENT_ID env var, claim a unique
+# slot using atomic mkdir on the shared logs volume.
+CLAIM_DIR="/workspace/logs/.codex-agent-claims"
+# Clean stale claims from previous runs (dirs whose PID files reference dead processes)
+if [ -d "$CLAIM_DIR" ]; then
+    for _d in "$CLAIM_DIR"/*/; do
+        [ -d "$_d" ] || continue
+        _pid_file="$_d/pid"
+        if [ -f "$_pid_file" ]; then
+            _old_pid="$(cat "$_pid_file" 2>/dev/null || true)"
+            # Inside containers, stale PIDs from previous containers won't exist
+            if [ -n "$_old_pid" ] && ! kill -0 "$_old_pid" 2>/dev/null; then
+                rm -rf "$_d"
+            fi
+        else
+            # No PID file = stale from a crash
+            rm -rf "$_d"
+        fi
+    done
+fi
+mkdir -p "$CLAIM_DIR"
+_claimed=""
+for _i in $(seq 1 20); do
+    if mkdir "$CLAIM_DIR/$_i" 2>/dev/null; then
+        AGENT_ID="$_i"
+        _claimed="$CLAIM_DIR/$_i"
+        echo $$ > "$_claimed/pid"
+        break
+    fi
+done
+# _claimed is cleaned up by cleanup_exit trap
 PROMPT_FILE="${PROMPT_FILE:-/prompts/PROMPT.md}"
 CODEX_MODEL="${CODEX_MODEL:-}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-0}"
@@ -19,7 +52,11 @@ cleanup() {
     echo "[agentmill-codex] Received shutdown signal. Finishing current session..."
     SHUTTING_DOWN=true
 }
+cleanup_exit() {
+    [ -n "${_claimed:-}" ] && rm -rf "$_claimed" 2>/dev/null || true
+}
 trap cleanup SIGTERM SIGINT
+trap cleanup_exit EXIT
 
 mkdir -p "$LOG_DIR"
 
@@ -64,11 +101,13 @@ fi
 
 git config --global user.name "${GIT_USER}-${AGENT_ID}"
 git config --global user.email "$GIT_EMAIL"
+git config --global --add safe.directory '*'
 
 UPSTREAM_DIR="/workspace/upstream"
 REPO_DIR="/workspace/repo"
 
 if [ -d "$UPSTREAM_DIR/.git" ] || [ -f "$UPSTREAM_DIR/HEAD" ]; then
+    # Explicit multi-agent: upstream mounted via docker-compose
     REPO_DIR="/workspace/repo-${AGENT_ID}"
     : "${AGENT_BRANCH:=codex-agent-${AGENT_ID}}"
     MULTI_AGENT=true
@@ -95,10 +134,41 @@ if [ -d "$UPSTREAM_DIR/.git" ] || [ -f "$UPSTREAM_DIR/HEAD" ]; then
 
     log "Repo ready at $REPO_DIR (branch: $(git branch --show-current))"
 elif [ -d "$REPO_DIR/.git" ] || [ -f "$REPO_DIR/.git" ]; then
-    MULTI_AGENT=false
-    : "${AGENT_BRANCH:=main}"
-    cd "$REPO_DIR"
-    log "Repo ready at $REPO_DIR (direct mount)"
+    if [ "$AGENT_ID" -gt 1 ] 2>/dev/null; then
+        # Scaled mode (--scale): /workspace/repo is shared, clone into own dir
+        MULTI_AGENT=true
+        : "${AGENT_BRANCH:=codex-agent-${AGENT_ID}}"
+        SHARED_REPO="$REPO_DIR"
+        REPO_DIR="/workspace/repo-${AGENT_ID}"
+
+        log "Scaled mode: agent-${AGENT_ID} cloning from shared repo into ${REPO_DIR}"
+        git -C "$SHARED_REPO" config receive.denyCurrentBranch updateInstead 2>/dev/null || true
+
+        if [ ! -d "$REPO_DIR/.git" ]; then
+            git clone "$SHARED_REPO" "$REPO_DIR"
+            cd "$REPO_DIR"
+            git remote set-url origin "$SHARED_REPO"
+        else
+            cd "$REPO_DIR"
+            git fetch origin
+        fi
+
+        UPSTREAM_HEAD="$(git -C "$SHARED_REPO" rev-parse HEAD)"
+        if git show-ref --verify --quiet "refs/heads/$AGENT_BRANCH"; then
+            git checkout "$AGENT_BRANCH"
+            git rebase "$UPSTREAM_HEAD" 2>/dev/null || git rebase --abort
+        else
+            git checkout -b "$AGENT_BRANCH" "$UPSTREAM_HEAD"
+        fi
+
+        log "Repo ready at $REPO_DIR (branch: $(git branch --show-current))"
+    else
+        # Single agent: work directly in mounted repo
+        MULTI_AGENT=false
+        : "${AGENT_BRANCH:=main}"
+        cd "$REPO_DIR"
+        log "Repo ready at $REPO_DIR (direct mount)"
+    fi
 else
     log "ERROR: No repo found. Mount to /workspace/repo (single) or /workspace/upstream (multi)."
     exit 1
