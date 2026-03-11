@@ -36,10 +36,16 @@
   - Added `docs/research/message-bus.md`: evaluates file mailbox (TOCTOU), FIFOs (no persistence), SQLite (no push), and SSE HTTP bus; recommends HTTP bus for live coordination; documents integration with R2 coordinator and R3 merge gate.
   - Verification: `python3 -m unittest tests.test_message_bus` — 31 tests, OK.
 
+- 2026-03-11: Completed `[R5] Shared Workspace Awareness` research task.
+  - Implemented `lock_manager.py`: HTTP-based advisory file-lock manager, Python stdlib only, atomic acquire via threading.Lock, batch acquisition with sorted-order deadlock prevention, TTL + heartbeat renewal, background reaper thread, crash recovery (persisted to `logs/lock_state.json`).
+  - Added `tests/test_lock_manager.py`: 44 tests including concurrent acquire (20 threads, exactly one wins), concurrent release (10 threads, exactly one succeeds), batch acquire with partial conflicts, persistence across restart, TTL expiry, and full HTTP API coverage (200/403/404/409).
+  - Added `docs/research/workspace-awareness.md`: surveys `.locks/` files (TOCTOU), NFS locks (unreliable in Docker), etcd leases (overkill), SQLite (unreliable cross-container), and HTTP lock manager (recommended); documents integration with R2 coordinator and R4 message bus; comparison table.
+  - Verification: `python3 -m unittest tests.test_lock_manager` — 44 tests, OK.
+
 ## In Progress
 
 ## Blocked
 - Full smoke verifier from `TASK.md` is currently unavailable in this environment because `docker` is not installed.
 
 ## Next Up
-- Pick next P1 research task from `TASK.md`: `[R5] Shared Workspace Awareness`.
+- Pick next P2 research task from `TASK.md`: `[R6] Role-Based Agent Specialization`.

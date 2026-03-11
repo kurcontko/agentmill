@@ -51,8 +51,8 @@ Branch naming: `research/<short-name>` (e.g. `research/work-stealing-queue`)
 - **Research**: What's the simplest IPC that works across Docker containers with shared volumes? How do ant colonies and bee swarms communicate (stigmergy)?
 
 ### [R5] Shared Workspace Awareness
-- **Branch**: `research/workspace-awareness`
-- **Status**: `[ ]`
+- **Branch**: `research/hierarchical-coordination`
+- **Status**: `[x]`
 - **Goal**: Agents should know what files others are currently editing to avoid conflicts proactively (not just reactively via rebase). Implement file-level locking or advisory locks.
 - **Deliverable**: A lock manager that agents check before editing files. Could be `.locks/` directory with agent-ID files, or extend `current_tasks/` with file-level granularity. Document in `docs/research/workspace-awareness.md`.
 - **Research**: How do distributed file systems handle advisory locks? Look at NFS locks, etcd leases. What's the Docker-volume-friendly equivalent?
