@@ -94,8 +94,8 @@ Branch naming: `research/<short-name>` (e.g. `research/work-stealing-queue`)
 - **Research**: How do database transaction logs work? How does git bisect find regressions? Can we automate "did this iteration improve or harm the codebase?"
 
 ### [R10] Conflict Resolution Strategies
-- **Branch**: `research/conflict-resolution`
-- **Status**: `[ ]`
+- **Branch**: `research/cross-repo`
+- **Status**: `[x]`
 - **Goal**: Go beyond simple rebase-retry. Implement smarter conflict resolution: semantic merge, LLM-assisted merge, or split-and-reassign conflicting work.
 - **Deliverable**: A conflict resolver that can handle common conflict patterns automatically. Falls back to splitting the conflicting files into separate tasks. Document in `docs/research/conflict-resolution.md`.
 - **Research**: Look at semantic merge tools (SemanticMerge, IntelliMerge). Can an LLM resolve merge conflicts better than git's default? What conflict patterns are most common in multi-agent codebases?

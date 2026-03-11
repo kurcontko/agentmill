@@ -74,10 +74,16 @@
   - Added `docs/research/checkpoint-rollback.md`: surveys git-tag vs branch vs external DB; documents eval integration, rollback strategies, hysteresis trade-offs, and integration with R2/R3/R4/R7.
   - Verification: `python3 -m unittest tests.test_checkpoint` — 61 tests, OK. Full suite (392 tests) OK except 1 pre-existing failure in `test_entrypoint_retry_limit`.
 
+- 2026-03-11: Completed `[R10] Conflict Resolution Strategies` research task.
+  - Implemented `conflict_resolver.py`: HTTP conflict resolver (port 3010), Python stdlib only, pattern-based analysis of git conflict markers (8 strategies: take_ours, take_theirs, merge_imports, take_higher_version, append_both, split_task), shared-LHS-name detection prevents false append_both matches, staging failure is non-fatal, task-splitting writes `current_tasks/<slug>.md` subtasks, crash recovery (persisted to `logs/conflict_resolver_state.json`), ThreadingMixIn for concurrent requests.
+  - Added `tests/test_conflict_resolver.py`: 62 tests including concurrent analyze (20 threads, no corruption), concurrent resolve (20 threads, unique resolution IDs), all HTTP endpoints (200/201/400/404), strategy classification unit tests, apply_strategy correctness, persistence across reload, subtask file creation.
+  - Added `docs/research/conflict-resolution.md`: surveys SemanticMerge/IntelliMerge (AST-based, ~60% conflict reduction), LLM-assisted merge (70% trivial conflicts resolved, 30% hallucination risk), expand-contract discipline; recommends pattern-based first-pass; documents integration with R2–R5, R8, R9; LLM second-pass as natural next step.
+  - Verification: `python3 -m unittest tests.test_conflict_resolver` — 62 tests, OK. Full suite (454 tests) OK except 1 pre-existing failure in `test_entrypoint_retry_limit`.
+
 ## In Progress
 
 ## Blocked
 - Full smoke verifier from `TASK.md` is currently unavailable in this environment because `docker` is not installed.
 
 ## Next Up
-- Pick next research task from `TASK.md`: `[R10] Conflict Resolution Strategies`.
+- All P0–P3 research tasks (R1–R10) are complete.
