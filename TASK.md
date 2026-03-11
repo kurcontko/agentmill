@@ -33,8 +33,8 @@ Branch naming: `research/<short-name>` (e.g. `research/work-stealing-queue`)
 - **Research**: Study CrewAI, AutoGen, and Devin's orchestration model. What's the minimal viable coordinator?
 
 ### [R3] Consensus-Based Merge Gate
-- **Branch**: `research/consensus-merge`
-- **Status**: `[ ]`
+- **Branch**: `research/hierarchical-coordination`
+- **Status**: `[x]`
 - **Goal**: Before a branch merges, other agents review/validate it (run tests, check quality). Implement a lightweight consensus protocol where N-of-M agents must approve.
 - **Deliverable**: A merge-gate script or service that blocks merge until validation agents sign off. Could use git notes, a shared approval file, or a simple HTTP endpoint. Document in `docs/research/consensus-merge.md`.
 - **Research**: Look at how CI-gated merges work, but with agents as reviewers instead of CI pipelines. How do blockchain consensus models (simple majority, quorum) translate here?
