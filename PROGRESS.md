@@ -62,10 +62,16 @@
   - Added `docs/research/dynamic-scaling.md`: surveys Kubernetes HPA, KEDA, Docker Compose scaling; recommends `docker compose --scale` for local deployments; documents hysteresis, cooldowns, and scale-to-zero trade-offs.
   - Verification: `python3 -m unittest tests.test_scaler` — 60 tests, OK. Full suite (274 tests) OK except 1 pre-existing failure in `test_entrypoint_retry_limit`.
 
+- 2026-03-11: Completed `[R8] Cross-Repo Agent Coordination` research task.
+  - Implemented `cross_repo_coordinator.py`: HTTP cross-repo event bus (port 3008), Python stdlib only, directed dependency graph with cycle detection (DFS), three event types (api_change / version_bump / integration_result), consumer ack protocol (event cleared when all notified repos ack), background reaper (TTL expiry), crash recovery (persisted to `logs/cross_repo_state.json`).
+  - Added `tests/test_cross_repo_coordinator.py`: 57 tests including cycle detection (simple + transitive), concurrent registration (20 threads, exactly one wins), concurrent event ack, concurrent publish (20 threads, 20 unique IDs), persistence across reload, and full HTTP API coverage (201/400/404/409).
+  - Added `docs/research/cross-repo.md`: surveys monorepo tools (Nx, Turborepo, Bazel) and microservice patterns (expand-contract, consumer-driven contracts, Pact); recommends HTTP coordinator; documents integration with R2 (task assignment), R3 (merge gate), R4 (message bus), R7 (event-driven scaling).
+  - Verification: `python3 -m unittest tests.test_cross_repo_coordinator` — 57 tests, OK. Full suite (331 tests) OK except 1 pre-existing failure in `test_entrypoint_retry_limit`.
+
 ## In Progress
 
 ## Blocked
 - Full smoke verifier from `TASK.md` is currently unavailable in this environment because `docker` is not installed.
 
 ## Next Up
-- Pick next research task from `TASK.md`: `[R8] Cross-Repo Agent Coordination` or `[R9] Checkpoint & Rollback Protocol`.
+- Pick next research task from `TASK.md`: `[R9] Checkpoint & Rollback Protocol` or `[R10] Conflict Resolution Strategies`.

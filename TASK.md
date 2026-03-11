@@ -77,7 +77,7 @@ Branch naming: `research/<short-name>` (e.g. `research/work-stealing-queue`)
 
 ### [R8] Cross-Repo Agent Coordination
 - **Branch**: `research/cross-repo`
-- **Status**: `[ ]`
+- **Status**: `[x]`
 - **Goal**: Agents working on different repos that depend on each other (e.g., a library and its consumers). How do they coordinate API changes, version bumps, and integration testing?
 - **Deliverable**: A prototype where agent-A changes a library API and agent-B adapts the consumer, coordinated through a shared manifest or event. Document in `docs/research/cross-repo.md`.
 - **Research**: How do monorepo tools (Nx, Turborepo, Bazel) handle cross-project dependencies? How do microservice teams coordinate breaking changes?
