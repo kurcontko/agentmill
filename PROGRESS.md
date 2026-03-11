@@ -68,10 +68,16 @@
   - Added `docs/research/cross-repo.md`: surveys monorepo tools (Nx, Turborepo, Bazel) and microservice patterns (expand-contract, consumer-driven contracts, Pact); recommends HTTP coordinator; documents integration with R2 (task assignment), R3 (merge gate), R4 (message bus), R7 (event-driven scaling).
   - Verification: `python3 -m unittest tests.test_cross_repo_coordinator` — 57 tests, OK. Full suite (331 tests) OK except 1 pre-existing failure in `test_entrypoint_retry_limit`.
 
+- 2026-03-11: Completed `[R9] Checkpoint & Rollback Protocol` research task.
+  - Implemented `checkpoint.py`: HTTP checkpoint service (port 3009), Python stdlib only, git annotated-tag snapshots (`ckpt/<session>/<seq>`), three rollback strategies (best-score, prev, specific), optional `CHECKPOINT_EVAL_CMD` shell evaluator, dry-run mode, per-session pruning (max 50), crash recovery (persisted to `logs/checkpoint_state.json`).
+  - Added `tests/test_checkpoint.py`: 61 tests including concurrent add (20 threads, no duplicate seq), persistence across reload, evaluation timeout, all HTTP endpoints (201/200/400/404/500), dry-run rollback, strategy correctness.
+  - Added `docs/research/checkpoint-rollback.md`: surveys git-tag vs branch vs external DB; documents eval integration, rollback strategies, hysteresis trade-offs, and integration with R2/R3/R4/R7.
+  - Verification: `python3 -m unittest tests.test_checkpoint` — 61 tests, OK. Full suite (392 tests) OK except 1 pre-existing failure in `test_entrypoint_retry_limit`.
+
 ## In Progress
 
 ## Blocked
 - Full smoke verifier from `TASK.md` is currently unavailable in this environment because `docker` is not installed.
 
 ## Next Up
-- Pick next research task from `TASK.md`: `[R9] Checkpoint & Rollback Protocol` or `[R10] Conflict Resolution Strategies`.
+- Pick next research task from `TASK.md`: `[R10] Conflict Resolution Strategies`.

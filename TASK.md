@@ -87,8 +87,8 @@ Branch naming: `research/<short-name>` (e.g. `research/work-stealing-queue`)
 ## P3 — Resilience & Recovery
 
 ### [R9] Checkpoint & Rollback Protocol
-- **Branch**: `research/checkpoint-rollback`
-- **Status**: `[ ]`
+- **Branch**: `research/cross-repo`
+- **Status**: `[x]`
 - **Goal**: Periodically snapshot agent state so that if an agent goes off-track, it can roll back to the last good checkpoint rather than starting over.
 - **Deliverable**: A checkpoint mechanism using git tags or branches. An evaluation step after each iteration that decides keep/rollback. Document in `docs/research/checkpoint-rollback.md`.
 - **Research**: How do database transaction logs work? How does git bisect find regressions? Can we automate "did this iteration improve or harm the codebase?"
