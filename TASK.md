@@ -1,182 +1,112 @@
-# AgentMill — Task Board
+# TASK — Autonomous Agent Coordination Research
 
-Each task is independent, verifiable, and scoped to one agent session.
-Pick one, do it, run the verifier, commit.
+## How This Works
 
-Verifier: `docker build -t agentmill-test . && docker run --rm --entrypoint python3 agentmill-test -c "import codex_preview_server; import codex_preview_supervisor; print('OK')"` (smoke) + manual dashboard check for UI tasks.
+Each task is a research+implementation track. The agent picks the highest-priority unblocked task, creates or resumes a branch for it, does research, implements a prototype, commits progress, and moves on. If a task needs clarification, mark it `[NEEDS-CLARIFICATION]` and switch to another.
 
----
+Branch naming: `research/<short-name>` (e.g. `research/work-stealing-queue`)
 
-## Merge — Prerequisite
+## Status Key
 
----
-
-### [P0-2] Fix unquoted variable expansion in setup-repo-env.sh
-Line 39: `pip install $EXTRA_PYTHON_TOOLS` — word-splits on spaces.
-- Quote `"$EXTRA_PYTHON_TOOLS"` or convert to array
-- Also: `eval "$REPO_SETUP_COMMAND"` on line 52 is a shell injection vector — document the trust boundary (operator-controlled, not user-controlled)
-- **Files:** `setup-repo-env.sh`
-- **Done when:** `shellcheck setup-repo-env.sh` passes clean
-
-### [P0-3] Replace asserts on subprocess pipes with conditionals
-`codex_preview_supervisor.py` and `codex_preview_server.py` use `assert process.stdout is not None`. Asserts are stripped with `python -O`.
-- Replace with `if process.stdout is None: raise RuntimeError(...)`
-- **Files:** `codex_preview_supervisor.py`, `codex_preview_server.py`
-- **Done when:** `grep -r "assert process" *.py` returns zero matches
-
-### [P0-4] Fix subscriber broadcast race condition in server
-`codex_preview_server.py`: iterating `self.subscribers` while another thread could modify it.
-- Copy the list before iterating: `for q in list(self.subscribers):`
-- **Files:** `codex_preview_server.py`
-- **Done when:** no shared mutable iteration without copy
+- `[ ]` — Not started
+- `[~]` — In progress (branch exists, work ongoing)
+- `[x]` — Done (merged or ready for review)
+- `[?]` — Needs clarification from user
+- `[!]` — Blocked
 
 ---
 
-## P1 — Robustness
+## P0 — Core Coordination Alternatives
 
-### [P1-2] Prevent infinite rebase-push loop in entrypoint.sh
-If push fails due to permanent conflict, the loop retries every iteration forever.
-- Add a retry counter (max 3 rebase attempts per iteration)
-- Log `ERROR: push failed after 3 retries` and skip push after max
-- **Files:** `entrypoint.sh`
-- **Done when:** agent logs error and continues to next iteration instead of looping
+### [R1] Work-Stealing Queue
+- **Branch**: `research/work-stealing-queue`
+- **Status**: `[ ]`
+- **Goal**: Replace file-based task claiming (`current_tasks/`) with an explicit work-stealing queue. Evaluate: shared file queue vs. lightweight HTTP queue vs. Redis-backed queue.
+- **Deliverable**: Working prototype where agents dequeue tasks atomically. Compare throughput vs. current git-based claiming. Write findings in `docs/research/work-stealing-queue.md`.
+- **Research**: Look at how distributed work-stealing works (Cilk, Go scheduler, Tokio). What's the simplest version that works with Docker containers sharing a volume?
 
-### [P1-3] Narrow broad exception handlers in server
-`codex_preview_server.py`: bare `except Exception: pass` silently swallows OOM, KeyboardInterrupt, etc.
-- Catch `(OSError, json.JSONDecodeError)` specifically
-- **Files:** `codex_preview_server.py`
-- **Done when:** no bare `except Exception: pass` in file
+### [R2] Hierarchical / Supervisor-Worker Model
+- **Branch**: `research/hierarchical-coordination`
+- **Status**: `[ ]`
+- **Goal**: Implement a coordinator agent that decomposes tasks and assigns them to worker agents. The coordinator doesn't write code — it plans, assigns, reviews, and merges.
+- **Deliverable**: A `coordinator.py` or coordinator entrypoint that reads TASK.md, breaks tasks into subtasks, assigns branches to workers, monitors progress, and merges results. Document in `docs/research/hierarchical-coordination.md`.
+- **Research**: Study CrewAI, AutoGen, and Devin's orchestration model. What's the minimal viable coordinator?
 
-### [P1-4] Fix file handle leak in setup-claude-config.sh
-Embedded Python uses `json.load(open(...))` — never closes the fd.
-- Use `with open(...) as f: json.load(f)` pattern
-- **Files:** `setup-claude-config.sh`
-- **Done when:** no bare `open()` calls in embedded Python
-
-### [P1-5] Add graceful shutdown to FileWatcher daemon thread
-The watcher thread is a daemon that gets killed abruptly on server stop.
-- Add a `threading.Event` stop flag, check in poll loop, set on shutdown
-- **Files:** `codex_preview_server.py`
-- **Done when:** server shuts down cleanly without orphan threads
-
-### [P1-6] Clean up temp files in entrypoint-codex.sh
-`mktemp` creates temp files that aren't cleaned on error paths.
-- Add a trap: `trap 'rm -f "$tmp_file"' EXIT`
-- **Files:** `entrypoint-codex.sh`
-- **Done when:** temp files cleaned on both success and error exit
+### [R3] Consensus-Based Merge Gate
+- **Branch**: `research/consensus-merge`
+- **Status**: `[ ]`
+- **Goal**: Before a branch merges, other agents review/validate it (run tests, check quality). Implement a lightweight consensus protocol where N-of-M agents must approve.
+- **Deliverable**: A merge-gate script or service that blocks merge until validation agents sign off. Could use git notes, a shared approval file, or a simple HTTP endpoint. Document in `docs/research/consensus-merge.md`.
+- **Research**: Look at how CI-gated merges work, but with agents as reviewers instead of CI pipelines. How do blockchain consensus models (simple majority, quorum) translate here?
 
 ---
 
-## P2 — Dashboard UI/UX
+## P1 — Communication & Awareness
 
-### [P2-1] Add event type filtering to feed
-Filter by: errors only, commands only, reasoning only, all.
-- Add a filter bar above the feed with toggle buttons
-- Filter by CSS class (`.tool-group`, `.reasoning-block`, `.msg-block`)
-- Persist selection in `sessionStorage`
-- **Files:** `static/index.html`
-- **Done when:** clicking "errors" hides non-error events; refresh preserves filter
+### [R4] Agent Message Bus
+- **Branch**: `research/message-bus`
+- **Status**: `[ ]`
+- **Goal**: Give agents a way to send messages to each other beyond git commits. Evaluate: shared file mailbox, Unix named pipes, lightweight pub/sub (SSE-based reusing existing server), or a simple SQLite-backed queue.
+- **Deliverable**: A messaging module agents can import/source. Agents can broadcast status, request help, or signal task completion. Document in `docs/research/message-bus.md`.
+- **Research**: What's the simplest IPC that works across Docker containers with shared volumes? How do ant colonies and bee swarms communicate (stigmergy)?
 
-### [P2-2] Add keyboard shortcuts
-- `j`/`k` to navigate tool groups
-- `Enter` to expand/collapse focused group
-- `Esc` to close all expanded groups
-- `?` to show shortcut overlay
-- **Files:** `static/index.html`
-- **Done when:** pressing `?` shows overlay; `j`/`k` moves focus
-
-### [P2-3] Add log export button
-Button in topbar that downloads the current agent's `events.ndjson`.
-- Use `Blob` + `URL.createObjectURL` for client-side download
-- **Files:** `static/index.html`
-- **Done when:** clicking export downloads a `.ndjson` file
-
-### [P2-4] Add Subresource Integrity to CDN scripts
-`marked.js` loaded from CDN without SRI hash.
-- Pin to exact version (not `@15`)
-- Add `integrity="sha384-..."` and `crossorigin="anonymous"`
-- **Files:** `static/index.html`
-- **Done when:** marked.js has SRI attribute
-
-### [P2-5] Cap reasoning block height
-Reasoning blocks can be arbitrarily long and push the feed down.
-- Add `max-height: 300px; overflow-y: auto` to `.reasoning-block .rb-body`
-- Add "show more" toggle when content overflows
-- **Files:** `static/index.html`
-- **Done when:** long reasoning blocks are scrollable with expand option
-
-### [P2-6] Show visual indicator for stop confirmation
-Stop button changes text to "confirm?" but has no visual distinction.
-- Add red border or pulsing animation when in confirm state
-- Auto-reset after 3 seconds if not clicked
-- **Files:** `static/index.html`
-- **Done when:** stop button visually changes during confirm window
+### [R5] Shared Workspace Awareness
+- **Branch**: `research/workspace-awareness`
+- **Status**: `[ ]`
+- **Goal**: Agents should know what files others are currently editing to avoid conflicts proactively (not just reactively via rebase). Implement file-level locking or advisory locks.
+- **Deliverable**: A lock manager that agents check before editing files. Could be `.locks/` directory with agent-ID files, or extend `current_tasks/` with file-level granularity. Document in `docs/research/workspace-awareness.md`.
+- **Research**: How do distributed file systems handle advisory locks? Look at NFS locks, etcd leases. What's the Docker-volume-friendly equivalent?
 
 ---
 
-## P3 — Code Quality & DX
+## P2 — Scaling & Specialization
 
-### [P3-1] Deduplicate git sync logic between entrypoints
-`entrypoint.sh` and `entrypoint-codex.sh` share identical git clone/rebase/push logic (~40 lines).
-- Extract into `git-sync.sh` sourced by both
-- **Files:** `entrypoint.sh`, `entrypoint-codex.sh`, new `git-sync.sh`
-- **Done when:** both entrypoints source `git-sync.sh`; no duplicated git logic
+### [R6] Role-Based Agent Specialization
+- **Branch**: `research/agent-roles`
+- **Status**: `[ ]`
+- **Goal**: Instead of N identical agents, assign roles: architect, implementer, tester, reviewer, documenter. Each role gets a different prompt and different permissions.
+- **Deliverable**: Role-specific prompt templates in `prompts/roles/` and a role-assignment mechanism (env var, config file, or auto-assignment). Document in `docs/research/agent-roles.md`.
+- **Research**: Study the Carlini C compiler project's role breakdown. How does CrewAI assign roles? What's the optimal role mix for a 3-5 agent team?
 
-### [P3-2] Reduce docker-compose.yml duplication
-agent-1/2/3 are nearly identical (~50 lines of copy-paste).
-- Use `docker compose --scale` or more aggressive YAML merge keys
-- Or document `--scale agent=3` as the recommended pattern
-- **Files:** `docker-compose.yml`
-- **Done when:** agent definitions are <20 lines total (excluding comments)
+### [R7] Dynamic Agent Scaling
+- **Branch**: `research/dynamic-scaling`
+- **Status**: `[ ]`
+- **Goal**: Automatically spawn/kill agent containers based on workload. If the task queue is deep, scale up. If idle, scale down.
+- **Deliverable**: A scaler script that monitors task queue depth and uses `docker compose scale` or direct Docker API to adjust agent count. Document in `docs/research/dynamic-scaling.md`.
+- **Research**: How does Kubernetes HPA work? What's the simplest autoscaler for Docker Compose? Look at KEDA for event-driven scaling patterns.
 
-### [P3-3] Add shellcheck CI
-All `.sh` files should pass `shellcheck`.
-- Fix all shellcheck warnings across all scripts
-- Add a `Makefile` target or CI step: `shellcheck *.sh`
-- **Files:** all `.sh` files, optionally `Makefile` or `.github/workflows/lint.yml`
-- **Done when:** `shellcheck *.sh` exits 0
-
-### [P3-4] Extract embedded Python from setup-claude-config.sh
-~40 lines of Python inside a bash heredoc. Can't be linted, tested, or debugged easily.
-- Move to `merge_claude_config.py`
-- Call from bash: `python3 /merge_claude_config.py ...`
-- **Files:** `setup-claude-config.sh`, new `merge_claude_config.py`
-- **Done when:** no Python heredocs in shell scripts
-
-### [P3-5] Add type hints to Python files
-Both `.py` files lack type annotations on most functions.
-- Add type hints to all function signatures
-- Optionally add `mypy` config
-- **Files:** `codex_preview_server.py`, `codex_preview_supervisor.py`
-- **Done when:** `mypy --check-untyped-defs` passes
+### [R8] Cross-Repo Agent Coordination
+- **Branch**: `research/cross-repo`
+- **Status**: `[ ]`
+- **Goal**: Agents working on different repos that depend on each other (e.g., a library and its consumers). How do they coordinate API changes, version bumps, and integration testing?
+- **Deliverable**: A prototype where agent-A changes a library API and agent-B adapts the consumer, coordinated through a shared manifest or event. Document in `docs/research/cross-repo.md`.
+- **Research**: How do monorepo tools (Nx, Turborepo, Bazel) handle cross-project dependencies? How do microservice teams coordinate breaking changes?
 
 ---
 
-## P4 — Documentation
+## P3 — Resilience & Recovery
 
-### [P4-1] Document multi-agent branch strategy
-README mentions multi-agent but doesn't explain the branch model (each agent gets `agent-{id}` branch, rebases on upstream).
-- Add "Multi-Agent Workflow" section with step-by-step
-- **Files:** `README.md`
-- **Done when:** new section explains clone, branch, rebase, push cycle
+### [R9] Checkpoint & Rollback Protocol
+- **Branch**: `research/checkpoint-rollback`
+- **Status**: `[ ]`
+- **Goal**: Periodically snapshot agent state so that if an agent goes off-track, it can roll back to the last good checkpoint rather than starting over.
+- **Deliverable**: A checkpoint mechanism using git tags or branches. An evaluation step after each iteration that decides keep/rollback. Document in `docs/research/checkpoint-rollback.md`.
+- **Research**: How do database transaction logs work? How does git bisect find regressions? Can we automate "did this iteration improve or harm the codebase?"
 
-### [P4-2] Add troubleshooting section
-Common failures: auth not configured, repo path wrong, codex binary missing, permission denied on volumes.
-- Add "Troubleshooting" section with symptom → fix table
-- **Files:** `README.md`
-- **Done when:** at least 5 common issues documented
-
-### [P4-3] Sync README status.json example with actual supervisor output
-Example may show fields that don't match what the supervisor actually writes.
-- Audit `codex_preview_supervisor.py` for actual fields
-- Update README example to match exactly
-- **Files:** `README.md`, cross-reference `codex_preview_supervisor.py`
-- **Done when:** README example matches supervisor output
+### [R10] Conflict Resolution Strategies
+- **Branch**: `research/conflict-resolution`
+- **Status**: `[ ]`
+- **Goal**: Go beyond simple rebase-retry. Implement smarter conflict resolution: semantic merge, LLM-assisted merge, or split-and-reassign conflicting work.
+- **Deliverable**: A conflict resolver that can handle common conflict patterns automatically. Falls back to splitting the conflicting files into separate tasks. Document in `docs/research/conflict-resolution.md`.
+- **Research**: Look at semantic merge tools (SemanticMerge, IntelliMerge). Can an LLM resolve merge conflicts better than git's default? What conflict patterns are most common in multi-agent codebases?
 
 ---
 
-## Completed
+## Notes for the Research Agent
 
-_Move tasks here with date and commit hash when done._
-
-- 2026-03-09: `[P1-1] Add process.wait() timeout in supervisor` completed in `codex_preview_supervisor.py` and `tests/test_codex_preview_supervisor.py`.
+- **Start with what exists**: Before implementing, check if there's an existing branch with prior work.
+- **Prototype first**: Don't over-engineer. Get something working, document findings, iterate.
+- **Compare to baseline**: The current git-based coordination is the baseline. Every alternative should justify its added complexity.
+- **Keep it stdlib**: Match the project convention — Python 3.11+ stdlib only for core components. Research docs can reference external tools.
+- **Create `docs/research/`** directory for all research writeups.
+- **Update this file** with status changes as you work.
