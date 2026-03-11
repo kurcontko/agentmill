@@ -30,10 +30,16 @@
   - Added `docs/research/consensus-merge.md`: surveys CI-gated merges, blockchain consensus (simple majority vs BFT), CrewAI/AutoGen/Devin patterns; recommends HTTP gate over approval file (TOCTOU risk) or SQLite; documents integration path with R2 coordinator and R4 message bus.
   - Verification: `python3 -m unittest tests.test_merge_gate` — 33 tests, OK.
 
+- 2026-03-11: Completed `[R4] Agent Message Bus` research task.
+  - Implemented `message_bus.py`: HTTP-based pub/sub bus, Python stdlib only, SSE live delivery, persistent mailboxes (JSON), atomic operations via threading.Lock, broadcast (`to:"*"`) and targeted delivery, ack protocol, crash recovery (unacked messages survive restart).
+  - Added `tests/test_message_bus.py`: 31 tests including concurrent publish (20 threads, no double-delivery), concurrent ack (10 threads, exactly one succeeds), SSE delivery, persistence, and full HTTP API coverage.
+  - Added `docs/research/message-bus.md`: evaluates file mailbox (TOCTOU), FIFOs (no persistence), SQLite (no push), and SSE HTTP bus; recommends HTTP bus for live coordination; documents integration with R2 coordinator and R3 merge gate.
+  - Verification: `python3 -m unittest tests.test_message_bus` — 31 tests, OK.
+
 ## In Progress
 
 ## Blocked
 - Full smoke verifier from `TASK.md` is currently unavailable in this environment because `docker` is not installed.
 
 ## Next Up
-- Pick next P1 research task from `TASK.md`: `[R4] Agent Message Bus`.
+- Pick next P1 research task from `TASK.md`: `[R5] Shared Workspace Awareness`.

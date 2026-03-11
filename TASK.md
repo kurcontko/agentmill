@@ -44,8 +44,8 @@ Branch naming: `research/<short-name>` (e.g. `research/work-stealing-queue`)
 ## P1 — Communication & Awareness
 
 ### [R4] Agent Message Bus
-- **Branch**: `research/message-bus`
-- **Status**: `[ ]`
+- **Branch**: `research/hierarchical-coordination`
+- **Status**: `[x]`
 - **Goal**: Give agents a way to send messages to each other beyond git commits. Evaluate: shared file mailbox, Unix named pipes, lightweight pub/sub (SSE-based reusing existing server), or a simple SQLite-backed queue.
 - **Deliverable**: A messaging module agents can import/source. Agents can broadcast status, request help, or signal task completion. Document in `docs/research/message-bus.md`.
 - **Research**: What's the simplest IPC that works across Docker containers with shared volumes? How do ant colonies and bee swarms communicate (stigmergy)?
