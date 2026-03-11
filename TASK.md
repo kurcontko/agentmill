@@ -62,8 +62,8 @@ Branch naming: `research/<short-name>` (e.g. `research/work-stealing-queue`)
 ## P2 — Scaling & Specialization
 
 ### [R6] Role-Based Agent Specialization
-- **Branch**: `research/agent-roles`
-- **Status**: `[ ]`
+- **Branch**: `research/hierarchical-coordination`
+- **Status**: `[x]`
 - **Goal**: Instead of N identical agents, assign roles: architect, implementer, tester, reviewer, documenter. Each role gets a different prompt and different permissions.
 - **Deliverable**: Role-specific prompt templates in `prompts/roles/` and a role-assignment mechanism (env var, config file, or auto-assignment). Document in `docs/research/agent-roles.md`.
 - **Research**: Study the Carlini C compiler project's role breakdown. How does CrewAI assign roles? What's the optimal role mix for a 3-5 agent team?

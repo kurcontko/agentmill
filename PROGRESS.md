@@ -42,10 +42,17 @@
   - Added `docs/research/workspace-awareness.md`: surveys `.locks/` files (TOCTOU), NFS locks (unreliable in Docker), etcd leases (overkill), SQLite (unreliable cross-container), and HTTP lock manager (recommended); documents integration with R2 coordinator and R4 message bus; comparison table.
   - Verification: `python3 -m unittest tests.test_lock_manager` — 44 tests, OK.
 
+- 2026-03-11: Completed `[R6] Role-Based Agent Specialization` research task.
+  - Added `prompts/roles/` with 5 role prompt templates: `architect.md`, `implementer.md`, `tester.md`, `reviewer.md`, `documenter.md`.
+  - Implemented `agent_roles.py`: HTTP role manager (port 3006), Python stdlib only, auto-assignment via priority queue (fills most under-represented role), `max_per_team` cap enforcement via threading.Lock (concurrent architect cap held at 1 in 20-thread test), `AGENT_ROLE` env var override, `resolve_prompt_file()` helper for entrypoints, crash recovery (persisted to `logs/role_manager_state.json`).
+  - Added `tests/test_agent_roles.py`: 49 tests including concurrent cap enforcement, persistence, env var override, all 5 HTTP endpoints, and optimal_mix across team sizes.
+  - Added `docs/research/agent-roles.md`: surveys CrewAI/AutoGen/Devin/Carlini C compiler; recommends role-based for teams ≥ 4; documents auto-assignment algorithm, integration with R2–R5, and soft vs. hard cap trade-offs.
+  - Verification: `python3 -m unittest tests.test_agent_roles` — 49 tests, OK. Full suite (185 tests) OK.
+
 ## In Progress
 
 ## Blocked
 - Full smoke verifier from `TASK.md` is currently unavailable in this environment because `docker` is not installed.
 
 ## Next Up
-- Pick next P2 research task from `TASK.md`: `[R6] Role-Based Agent Specialization`.
+- Pick next P2 research task from `TASK.md`: `[R7] Dynamic Agent Scaling`.
