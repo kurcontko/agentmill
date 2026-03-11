@@ -196,6 +196,9 @@ while true; do
 
     log "==== Iteration $ITERATION ===="
 
+    # Pre-iteration checkpoint tag (lightweight rollback point)
+    git tag -f "pre-iter-${AGENT_ID}-${ITERATION}" 2>/dev/null || true
+
     # Check for prompt file
     if [ ! -f "$PROMPT_FILE" ]; then
         log "ERROR: Prompt file not found at $PROMPT_FILE"
@@ -253,10 +256,39 @@ while true; do
                 ;;
         esac
 
+        # Log quality metrics
+        DIFF_STAT="$(git diff --stat HEAD~1 2>/dev/null | tail -1 || echo 'unknown')"
+        log "Iteration $ITERATION diff: $DIFF_STAT"
+
         # Multi-agent: push agent branch to upstream
         if [ "$MULTI_AGENT" = true ]; then
             if ! push_branch_with_retries "$AGENT_BRANCH"; then
-                log "WARN: Skipping push for iteration $ITERATION"
+                # Rebase failed with conflicts — ask Claude to resolve
+                if [ -n "$(git diff --name-only --diff-filter=U 2>/dev/null)" ]; then
+                    log "Merge conflicts detected. Asking Claude to resolve..."
+                    CONFLICT_FILES="$(git diff --name-only --diff-filter=U 2>/dev/null | head -20)"
+                    RESOLVE_PROMPT="There are git merge conflicts in the following files that need to be resolved:
+
+${CONFLICT_FILES}
+
+Please resolve all conflict markers (<<<<<<< ======= >>>>>>>) in these files.
+Choose the best resolution for each conflict based on the intent of both sides.
+After resolving, stage the files with git add and run: git rebase --continue"
+
+                    set +e
+                    claude --dangerously-skip-permissions \
+                        -p "$RESOLVE_PROMPT" \
+                        --model "$MODEL" \
+                        2>&1 | tee "$LOG_DIR/resolve_iter${ITERATION}.log"
+                    set -e
+
+                    # Retry push after resolution
+                    if ! push_branch_with_retries "$AGENT_BRANCH"; then
+                        log "WARN: Push still failed after conflict resolution in iteration $ITERATION"
+                    fi
+                else
+                    log "WARN: Skipping push for iteration $ITERATION"
+                fi
             fi
         fi
     else

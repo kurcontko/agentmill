@@ -49,8 +49,10 @@ services:
 #   docker compose up agent-1 agent-2 agent-3
 #
 # Different prompts/roles per agent:
-#   PROMPT_FILE_1=/prompts/core.md PROMPT_FILE_2=/prompts/tests.md \
-#     docker compose up agent-1 agent-2
+#   PROMPT_FILE_1=/prompts/roles/architect.md \
+#   PROMPT_FILE_2=/prompts/roles/implementer.md \
+#   PROMPT_FILE_3=/prompts/roles/tester.md \
+#     docker compose up agent-1 agent-2 agent-3
 #
 # All agents on same branch (they'll rebase on conflict):
 #   AGENT_BRANCH=main docker compose up agent-1 agent-2

@@ -35,7 +35,10 @@ prompts/               # Versioned agent task prompts (PROMPT.md through V7)
 ## Key Patterns
 
 - **Respawning Loop**: Each iteration runs Claude in a fresh context, commits results, waits, repeats. No context rot.
-- **Multi-Agent Sync**: Agents push to their own branches (`agent-1`, `agent-2`, etc.). On conflict: rebase + retry (max 3).
+- **Multi-Agent Sync**: Agents push to their own branches (`agent-1`, `agent-2`, etc.). On conflict: rebase + retry (max 3), then auto-resolve conflicts via Claude.
+- **Pre-Iteration Tags**: Each iteration creates `pre-iter-{agent}-{n}` git tags for lightweight rollback.
+- **Quality Metrics**: Diff stats logged after each iteration for observability.
+- **Role Prompts**: `prompts/roles/` contains role-specific prompts (architect, implementer, tester, reviewer) assignable via `PROMPT_FILE_N` env vars.
 - **Graceful Shutdown**: Entrypoints trap SIGTERM/SIGINT, complete current session, commit WIP, exit.
 - **Settings Override**: Agents backup `.claude/settings.local.json`, apply permissive config, restore on exit.
 - **Auto-Setup**: Detects `pyproject.toml`/`requirements.txt` and runs appropriate installer (uv > poetry > pip).
