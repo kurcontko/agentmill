@@ -20,7 +20,7 @@ Branch naming: `research/<short-name>` (e.g. `research/work-stealing-queue`)
 
 ### [R1] Work-Stealing Queue
 - **Branch**: `research/work-stealing-queue`
-- **Status**: `[ ]`
+- **Status**: `[x]`
 - **Goal**: Replace file-based task claiming (`current_tasks/`) with an explicit work-stealing queue. Evaluate: shared file queue vs. lightweight HTTP queue vs. Redis-backed queue.
 - **Deliverable**: Working prototype where agents dequeue tasks atomically. Compare throughput vs. current git-based claiming. Write findings in `docs/research/work-stealing-queue.md`.
 - **Research**: Look at how distributed work-stealing works (Cilk, Go scheduler, Tokio). What's the simplest version that works with Docker containers sharing a volume?
