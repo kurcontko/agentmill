@@ -54,5 +54,18 @@
 ## Blocked
 - Full smoke verifier from `TASK.md` is currently unavailable in this environment because `docker` is not installed.
 
+- 2026-03-11: Completed `[R7] Dynamic Agent Scaling` research task.
+  - Implemented `scaler.py`: HTTP-based dynamic agent scaler (port 3007), Python stdlib only, Kubernetes-HPA-style algorithm (ceil(pending/tasks_per_agent) clamped to [min, max]), hysteresis to prevent thrashing, separate scale-up (30s) and scale-down (120s) cooldowns, pause/resume control, crash recovery (persisted to `logs/scaler_state.json`).
+  - Supports two backends: `ComposeBackend` (calls `docker compose up --scale`) and `DockerAPIBackend` (unix socket), plus `NoneBackend` for tests.
+  - Reads queue depth from `queue_server.py` (R1) or `coordinator.py` (R2) via HTTP `/status`.
+  - Added `tests/test_scaler.py`: 60 tests including concurrent tick test (20 threads, final count ≤ max_agents), compose backend subprocess mocking, fetch_pending mocking, persistence, HTTP API, and poll loop integration.
+  - Added `docs/research/dynamic-scaling.md`: surveys Kubernetes HPA, KEDA, Docker Compose scaling; recommends `docker compose --scale` for local deployments; documents hysteresis, cooldowns, and scale-to-zero trade-offs.
+  - Verification: `python3 -m unittest tests.test_scaler` — 60 tests, OK. Full suite (274 tests) OK except 1 pre-existing failure in `test_entrypoint_retry_limit`.
+
+## In Progress
+
+## Blocked
+- Full smoke verifier from `TASK.md` is currently unavailable in this environment because `docker` is not installed.
+
 ## Next Up
-- Pick next P2 research task from `TASK.md`: `[R7] Dynamic Agent Scaling`.
+- Pick next research task from `TASK.md`: `[R8] Cross-Repo Agent Coordination` or `[R9] Checkpoint & Rollback Protocol`.

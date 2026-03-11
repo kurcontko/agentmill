@@ -70,7 +70,7 @@ Branch naming: `research/<short-name>` (e.g. `research/work-stealing-queue`)
 
 ### [R7] Dynamic Agent Scaling
 - **Branch**: `research/dynamic-scaling`
-- **Status**: `[ ]`
+- **Status**: `[x]`
 - **Goal**: Automatically spawn/kill agent containers based on workload. If the task queue is deep, scale up. If idle, scale down.
 - **Deliverable**: A scaler script that monitors task queue depth and uses `docker compose scale` or direct Docker API to adjust agent count. Document in `docs/research/dynamic-scaling.md`.
 - **Research**: How does Kubernetes HPA work? What's the simplest autoscaler for Docker Compose? Look at KEDA for event-driven scaling patterns.
