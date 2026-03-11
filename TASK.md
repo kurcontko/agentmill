@@ -27,7 +27,7 @@ Branch naming: `research/<short-name>` (e.g. `research/work-stealing-queue`)
 
 ### [R2] Hierarchical / Supervisor-Worker Model
 - **Branch**: `research/hierarchical-coordination`
-- **Status**: `[ ]`
+- **Status**: `[x]`
 - **Goal**: Implement a coordinator agent that decomposes tasks and assigns them to worker agents. The coordinator doesn't write code — it plans, assigns, reviews, and merges.
 - **Deliverable**: A `coordinator.py` or coordinator entrypoint that reads TASK.md, breaks tasks into subtasks, assigns branches to workers, monitors progress, and merges results. Document in `docs/research/hierarchical-coordination.md`.
 - **Research**: Study CrewAI, AutoGen, and Devin's orchestration model. What's the minimal viable coordinator?
