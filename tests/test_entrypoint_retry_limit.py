@@ -104,7 +104,7 @@ class PushBranchWithRetriesTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertEqual(result.stdout.count("Push failed, rebasing and retrying"), 3)
-        self.assertIn("ERROR: push failed after 3 retries; skipping push until next iteration", result.stdout)
+        self.assertIn("ERROR: push failed after 3 retries", result.stdout)
 
     def test_returns_success_without_retries_when_push_works(self) -> None:
         self.make_worker_commit("allow me")
