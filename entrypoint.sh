@@ -15,11 +15,41 @@ LOOP_DELAY="${LOOP_DELAY:-5}"  # seconds between iterations
 # — State ————————————————————————————————————————
 ITERATION=0
 SHUTTING_DOWN=false
+CLAUDE_PID=""
+GRACE_TIMEOUT="${GRACE_TIMEOUT:-0}"  # seconds to wait before killing claude (0 = wait forever)
 
 # — Graceful shutdown ————————————————————————————
+# Two-phase shutdown:
+#   1st signal: set flag, optionally start grace timer to kill claude process
+#   2nd signal: kill claude process immediately
 cleanup() {
+    if [[ "$SHUTTING_DOWN" = true ]]; then
+        # Second signal — force kill
+        echo "[agentmill] Second signal received. Killing Claude process..."
+        kill_claude
+        return
+    fi
+
     echo "[agentmill] Received shutdown signal. Finishing current session..."
     SHUTTING_DOWN=true
+
+    if [[ "$GRACE_TIMEOUT" -gt 0 && -n "$CLAUDE_PID" ]]; then
+        # Start a background timer to force-kill after grace period
+        (
+            sleep "$GRACE_TIMEOUT"
+            echo "[agentmill] Grace timeout (${GRACE_TIMEOUT}s) reached. Killing Claude..."
+            kill "$CLAUDE_PID" 2>/dev/null
+        ) &
+        GRACE_TIMER_PID=$!
+    fi
+}
+
+kill_claude() {
+    if [[ -n "$CLAUDE_PID" ]]; then
+        # Kill the process group to clean up child processes
+        kill -- -"$CLAUDE_PID" 2>/dev/null || kill "$CLAUDE_PID" 2>/dev/null || true
+        CLAUDE_PID=""
+    fi
 }
 trap cleanup SIGTERM SIGINT
 
@@ -176,15 +206,30 @@ while true; do
     PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
 
     # NOSONAR — dangerously-skip-permissions is required for headless autonomous operation
+    # Run claude with its PID tracked so we can kill it on shutdown.
+    # Write output to log file directly; tail -f provides live console output.
     set +e
+    touch "$SESSION_LOG"
     claude --dangerously-skip-permissions \
         -p "$PROMPT_CONTENT" \
         --model "$MODEL" \
-        2>&1 | tee "$SESSION_LOG"
+        > "$SESSION_LOG" 2>&1 &
+    CLAUDE_PID=$!
+    tail -f "$SESSION_LOG" &
+    TAIL_PID=$!
+    wait "$CLAUDE_PID"
     CLAUDE_EXIT=$?
+    CLAUDE_PID=""
+    kill "$TAIL_PID" 2>/dev/null || true
+    wait "$TAIL_PID" 2>/dev/null || true
     set -e
 
     log "Claude exited with code $CLAUDE_EXIT"
+
+    # If shutdown was requested while claude was running, exit now
+    if [[ "$SHUTTING_DOWN" = true ]]; then
+        log "Shutdown requested during session. Committing any remaining changes..."
+    fi
 
     # Commit any changes
     if [[ -n "$(git status --porcelain)" ]]; then
@@ -211,15 +256,27 @@ while true; do
         log "No changes to commit."
     fi
 
+    # Exit immediately after committing if shutdown was requested
+    if [[ "$SHUTTING_DOWN" = true ]]; then
+        log "Shutdown complete. Breaking loop."
+        break
+    fi
+
     # Check iteration limit
     if [[ "$MAX_ITERATIONS" -gt 0 && "$ITERATION" -ge "$MAX_ITERATIONS" ]]; then
         log "Reached max iterations ($MAX_ITERATIONS). Stopping."
         break
     fi
 
-    # Brief pause before next iteration
-    log "Sleeping ${LOOP_DELAY}s before next iteration..."
-    sleep "$LOOP_DELAY"
+    # Brief pause before next iteration (interruptible by signals)
+    if [[ "$SHUTTING_DOWN" = false ]]; then
+        log "Sleeping ${LOOP_DELAY}s before next iteration..."
+        sleep "$LOOP_DELAY" &
+        wait $! 2>/dev/null || true
+    fi
 done
+
+# Clean up grace timer if it's still running
+[[ -n "${GRACE_TIMER_PID:-}" ]] && kill "$GRACE_TIMER_PID" 2>/dev/null || true
 
 log "Agent loop finished after $ITERATION iterations."
