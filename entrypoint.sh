@@ -217,6 +217,82 @@ release_task_lock() {
     fi
 }
 
+# — Smart commit helpers ——————————————————————————
+classify_commit() {
+    # Classify changes as feat/fix/refactor/test/docs based on file paths
+    local files="$1"
+    local classification="feat"
+
+    if echo "$files" | grep -qE '(test_|_test\.|\.test\.|spec\.)'; then
+        classification="test"
+    elif echo "$files" | grep -qE '(README|CHANGELOG|\.md$|docs/)'; then
+        classification="docs"
+    elif echo "$files" | grep -qE '(\.fix|bugfix|hotfix)' || echo "$files" | grep -qiE 'fix'; then
+        classification="fix"
+    fi
+
+    echo "$classification"
+}
+
+extract_intended_message() {
+    # Parse Claude's session log for commit messages it intended but didn't execute
+    local session_log="$1"
+    # Look for patterns like: git commit -m "..." or commit message suggestions
+    local msg
+    msg="$(grep -oP 'git commit -m ["\x27]\K[^"\x27]+' "$session_log" 2>/dev/null | tail -1 || true)"
+    if [ -z "$msg" ]; then
+        # Try to find commit message suggestions in natural language
+        msg="$(grep -oP '(?:commit message|commit msg)[:\s]*["\x27]?\K[^"\x27\n]+' "$session_log" 2>/dev/null | tail -1 || true)"
+    fi
+    echo "$msg"
+}
+
+smart_commit_split() {
+    # If diff is large (>500 lines), try to split into semantic commits by directory
+    local total_lines
+    total_lines="$(git diff --cached --stat | tail -1 | grep -oP '\d+(?= insertion)' || echo 0)"
+    local total_deletions
+    total_deletions="$(git diff --cached --stat | tail -1 | grep -oP '\d+(?= deletion)' || echo 0)"
+    local total_changes=$(( total_lines + total_deletions ))
+
+    if [ "$total_changes" -le 500 ]; then
+        return 1  # Not large enough to split
+    fi
+
+    log "Large diff detected ($total_changes lines). Splitting into semantic commits..."
+
+    # Get unique top-level directories of changed files
+    local dirs
+    dirs="$(git diff --cached --name-only | sed 's|/.*||' | sort -u)"
+
+    # Unstage everything first
+    git reset HEAD -- . > /dev/null 2>&1
+
+    local committed=false
+    local dir
+    for dir in $dirs; do
+        local dir_files
+        dir_files="$(git status --porcelain -- "$dir" 2>/dev/null | awk '{print $2}')"
+        if [ -z "$dir_files" ]; then
+            continue
+        fi
+
+        git add -- "$dir"
+        local classification
+        classification="$(classify_commit "$dir_files")"
+        git commit -m "${classification}: agent-${AGENT_ID}: changes in ${dir}/ (iteration $ITERATION)" > /dev/null 2>&1 || true
+        committed=true
+    done
+
+    # Catch any remaining files not in subdirectories
+    if [ -n "$(git status --porcelain)" ]; then
+        git add -A
+        git commit -m "feat: agent-${AGENT_ID}: remaining changes (iteration $ITERATION)" > /dev/null 2>&1 || true
+    fi
+
+    [ "$committed" = true ]
+}
+
 # — Quality gates ————————————————————————————————
 check_progress_updated() {
     local before_hash="$1"
@@ -479,10 +555,29 @@ $(cat "$PROMPT_FILE")"
                         git commit -m "[wip] agent-${AGENT_ID}: uncommitted leftovers from iteration $ITERATION"
                     fi
                 else
-                    # Agent didn't commit at all — save everything as wip
-                    log "Safety-net: agent made no commits, saving work as [wip]..."
+                    # Agent didn't commit at all — try smart commit
+                    log "Safety-net: agent made no commits, saving work..."
+
+                    # Try to extract intended commit message from session log
+                    INTENDED_MSG="$(extract_intended_message "$SESSION_LOG")"
+
                     git add -A
-                    git commit -m "[wip] agent-${AGENT_ID}: iteration $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))"
+
+                    # Try to split large diffs into semantic commits
+                    if smart_commit_split; then
+                        log "Split large diff into semantic commits."
+                    elif [ -n "$INTENDED_MSG" ]; then
+                        # Use the agent's intended message with classification
+                        CHANGED_FILES="$(git diff --cached --name-only 2>/dev/null)"
+                        COMMIT_CLASS="$(classify_commit "$CHANGED_FILES")"
+                        git commit -m "${COMMIT_CLASS}: ${INTENDED_MSG}"
+                        log "Committed with extracted message: ${COMMIT_CLASS}: ${INTENDED_MSG}"
+                    else
+                        # Fallback: classify and commit as wip
+                        CHANGED_FILES="$(git diff --cached --name-only 2>/dev/null)"
+                        COMMIT_CLASS="$(classify_commit "$CHANGED_FILES")"
+                        git commit -m "[wip] ${COMMIT_CLASS}: agent-${AGENT_ID}: iteration $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))"
+                    fi
                 fi
                 ;;
             on|*)

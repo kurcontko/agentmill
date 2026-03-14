@@ -7,6 +7,8 @@
 - **Area 3: Prompt Evolution** — Created `prompts/PROMPT_V8.md` with Observe sub-phase (reads agent manifests), iteration-aware instructions (first vs continuation), Reflect step before Persist (progress check, blocker detection, repetition avoidance), and more directive language.
 - **Area 4: Quality Gates** — PROGRESS.md update check (hash comparison before/after Claude run, reminder re-run if not updated), quality score per iteration (`logs/quality.csv` with files_changed, tests_added, tests_passing, progress_updated).
 
+- **Area 5: Smarter Auto-Commit** — Parse session log for intended commit messages, split large diffs (>500 lines) into semantic commits by directory, classify commits as feat/fix/refactor/test/docs based on changed file paths.
+
 ## In Progress
 
 (none)
