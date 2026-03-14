@@ -217,6 +217,48 @@ release_task_lock() {
     fi
 }
 
+# — Quality gates ————————————————————————————————
+check_progress_updated() {
+    local before_hash="$1"
+    local after_hash
+    if [ -f PROGRESS.md ]; then
+        after_hash="$(md5sum PROGRESS.md | cut -d' ' -f1)"
+    else
+        after_hash="none"
+    fi
+    [ "$before_hash" != "$after_hash" ]
+}
+
+log_quality_score() {
+    local quality_file="$LOG_DIR/quality.csv"
+    if [ ! -f "$quality_file" ]; then
+        echo "iteration,timestamp,files_changed,tests_added,tests_passing,progress_updated" > "$quality_file"
+    fi
+
+    local files_changed tests_added tests_passing progress_updated
+    files_changed="$(git diff --name-only HEAD~1 2>/dev/null | wc -l || echo 0)"
+    tests_added="$(git diff HEAD~1 2>/dev/null | grep -c '^+.*\(def test_\|it(\|describe(\|assert\|expect\)' || echo 0)"
+
+    # Check if tests pass (quick check)
+    tests_passing="unknown"
+    if [ -f Makefile ] && grep -q '^test:' Makefile 2>/dev/null; then
+        if make test > /tmp/quality_test.log 2>&1; then
+            tests_passing="yes"
+        else
+            tests_passing="no"
+        fi
+    elif [ -f pyproject.toml ] || [ -f setup.py ]; then
+        if python3 -m unittest discover -s tests > /tmp/quality_test.log 2>&1; then
+            tests_passing="yes"
+        else
+            tests_passing="no"
+        fi
+    fi
+
+    progress_updated="${1:-false}"
+    echo "$ITERATION,$(date -u '+%Y-%m-%dT%H:%M:%SZ'),$files_changed,$tests_added,$tests_passing,$progress_updated" >> "$quality_file"
+}
+
 # — Auth check ———————————————————————————————————
 if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     log "Auth: using ANTHROPIC_API_KEY"
@@ -365,6 +407,13 @@ while true; do
         exit 1
     fi
 
+    # Snapshot PROGRESS.md hash for quality gate
+    if [ -f PROGRESS.md ]; then
+        PROGRESS_HASH_BEFORE="$(md5sum PROGRESS.md | cut -d' ' -f1)"
+    else
+        PROGRESS_HASH_BEFORE="none"
+    fi
+
     # Generate iteration context preamble
     CONTEXT_FILE="$(generate_iteration_context)"
 
@@ -385,6 +434,26 @@ $(cat "$PROMPT_FILE")"
     set -e
 
     log "Claude exited with code $CLAUDE_EXIT"
+
+    # Quality gate: check if PROGRESS.md was updated when changes were made
+    PROGRESS_WAS_UPDATED=false
+    if [ -n "$(git status --porcelain)" ] || [ -n "$(git diff --name-only HEAD 2>/dev/null)" ]; then
+        if check_progress_updated "$PROGRESS_HASH_BEFORE"; then
+            PROGRESS_WAS_UPDATED=true
+        else
+            log "WARN: Changes made but PROGRESS.md not updated. Running reminder..."
+            set +e
+            claude --dangerously-skip-permissions \
+                -p "You made changes but did not update PROGRESS.md. Please update PROGRESS.md now with what you accomplished, what's in progress, and what's next. Keep it concise." \
+                --model "$MODEL" \
+                2>&1 | tee "$LOG_DIR/reminder_iter${ITERATION}.log"
+            set -e
+            # Re-check after reminder
+            if check_progress_updated "$PROGRESS_HASH_BEFORE"; then
+                PROGRESS_WAS_UPDATED=true
+            fi
+        fi
+    fi
 
     # Commit any changes (controlled by AUTO_COMMIT flag)
     ITERATION_HAD_CHANGES=false
@@ -427,6 +496,9 @@ $(cat "$PROMPT_FILE")"
         # Log quality metrics
         DIFF_STAT="$(git diff --stat HEAD~1 2>/dev/null | tail -1 || echo 'unknown')"
         log "Iteration $ITERATION diff: $DIFF_STAT"
+
+        # Log quality score
+        log_quality_score "$PROGRESS_WAS_UPDATED"
 
         # Multi-agent: push agent branch to upstream
         if [ "$MULTI_AGENT" = true ]; then
