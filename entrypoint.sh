@@ -98,6 +98,13 @@ generate_iteration_context() {
             echo ""
         fi
 
+        # Last session summary (continuity)
+        if [ -f "$LOG_DIR/last-session-summary.md" ]; then
+            echo "### Last Session Summary"
+            cat "$LOG_DIR/last-session-summary.md"
+            echo ""
+        fi
+
         # Other active agents
         AWARENESS="$(generate_agent_awareness)"
         if [ -n "$AWARENESS" ]; then
@@ -291,6 +298,49 @@ smart_commit_split() {
     fi
 
     [ "$committed" = true ]
+}
+
+# — Session continuity ————————————————————————————
+write_session_summary() {
+    local summary_file="$LOG_DIR/last-session-summary.md"
+    {
+        echo "# Session Summary (agent-${AGENT_ID}, iteration $ITERATION)"
+        echo "Generated: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        echo ""
+
+        # What changed
+        echo "## What Changed"
+        git log --oneline -5 2>/dev/null || echo "(no commits)"
+        echo ""
+        DIFF_STAT="$(git diff --stat HEAD~1 2>/dev/null | tail -1 || echo 'nothing')"
+        echo "Last diff: $DIFF_STAT"
+        echo ""
+
+        # What broke (test results if available)
+        echo "## Test Status"
+        if [ -f /tmp/quality_test.log ]; then
+            tail -5 /tmp/quality_test.log
+        else
+            echo "(no test results available)"
+        fi
+        echo ""
+
+        # What's next
+        echo "## What's Next"
+        if [ -f PROGRESS.md ]; then
+            grep -A5 '## Next Up' PROGRESS.md 2>/dev/null || echo "(see PROGRESS.md)"
+        else
+            echo "(no PROGRESS.md)"
+        fi
+        echo ""
+
+        # No-progress streak warning
+        if [ "$NO_CHANGE_STREAK" -ge 3 ]; then
+            echo "## WARNING: No-progress streak ($NO_CHANGE_STREAK iterations)"
+            echo "Consider operator intervention. The agent has produced no meaningful changes for $NO_CHANGE_STREAK consecutive iterations."
+            echo ""
+        fi
+    } > "$summary_file"
 }
 
 # — Quality gates ————————————————————————————————
@@ -638,6 +688,9 @@ After resolving, stage the files with git add and run: git rebase --continue"
     # Log budget/token metrics
     log_budget "$SESSION_LOG"
 
+    # Write session summary for continuity
+    write_session_summary
+
     # Check iteration limit
     if [ "$MAX_ITERATIONS" -gt 0 ] && [ "$ITERATION" -ge "$MAX_ITERATIONS" ]; then
         log "Reached max iterations ($MAX_ITERATIONS). Stopping."
@@ -655,6 +708,9 @@ After resolving, stage the files with git add and run: git rebase --continue"
             CURRENT_DELAY="$LOOP_DELAY_MAX"
         fi
         log "No changes detected (streak: $NO_CHANGE_STREAK). Backing off."
+        if [ "$NO_CHANGE_STREAK" -ge 3 ]; then
+            log "WARNING: No-progress streak ($NO_CHANGE_STREAK iterations). Consider operator intervention."
+        fi
     fi
 
     log "Sleeping ${CURRENT_DELAY}s before next iteration..."

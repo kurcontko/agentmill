@@ -9,6 +9,7 @@
 
 - **Area 5: Smarter Auto-Commit** — Parse session log for intended commit messages, split large diffs (>500 lines) into semantic commits by directory, classify commits as feat/fix/refactor/test/docs based on changed file paths.
 - **Area 6: Role Prompt Improvements** — Made architect coordination-aware (reads other agents' commits and manifests), reviewer produces structured reviews with severity levels, tester tracks coverage metrics to `logs/coverage.csv`, added new integrator role for branch merging and cross-agent validation.
+- **Area 7: Session Continuity** — Write `logs/last-session-summary.md` after each iteration (what changed, test status, what's next), inject it into next iteration's context, track no-progress streaks with operator warning at 3+ consecutive idle iterations.
 
 ## In Progress
 
@@ -20,6 +21,4 @@
 
 ## Next Up
 
-- Area 5: Smarter Auto-Commit
-- Area 6: Role Prompt Improvements
-- Area 7: Session Continuity
+(all 7 areas complete)
