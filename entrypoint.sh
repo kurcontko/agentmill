@@ -11,12 +11,15 @@ MAX_ITERATIONS="${MAX_ITERATIONS:-0}"  # 0 = infinite
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
 LOOP_DELAY="${LOOP_DELAY:-5}"  # seconds between iterations
+LOOP_DELAY_MAX="${LOOP_DELAY_MAX:-300}"  # max backoff delay (5 min)
 AUTO_COMMIT="${AUTO_COMMIT:-wip}"  # "off" = no auto-commit, "wip" = safety-net [wip] only, "on" = always commit (legacy)
 PUSH_REBASE_MAX_RETRIES="${PUSH_REBASE_MAX_RETRIES:-3}"
 
 # — State ————————————————————————————————————————
 ITERATION=0
 SHUTTING_DOWN=false
+CURRENT_DELAY="$LOOP_DELAY"
+NO_CHANGE_STREAK=0
 
 # — Graceful shutdown ————————————————————————————
 cleanup() {
@@ -64,6 +67,65 @@ push_branch_with_retries() {
             return 1
         fi
     done
+}
+
+# — Context injection ————————————————————————————
+generate_iteration_context() {
+    local context_file="$LOG_DIR/iteration_context.md"
+    {
+        echo "## Iteration $ITERATION Context (auto-generated)"
+        echo ""
+
+        # Last commit summary
+        echo "### Last Commit"
+        git log -1 --format='%h %s (%ar)' 2>/dev/null || echo "(no commits yet)"
+        echo ""
+
+        # Recent changes overview
+        echo "### Recent Changes (last 5 commits)"
+        git log --oneline -5 2>/dev/null || echo "(no history)"
+        echo ""
+
+        # Current working tree status
+        echo "### Working Tree"
+        git status --short 2>/dev/null || echo "(clean)"
+        echo ""
+
+        # PROGRESS.md tail
+        if [ -f PROGRESS.md ]; then
+            echo "### Progress (tail)"
+            tail -15 PROGRESS.md
+            echo ""
+        fi
+
+        # No-change streak warning
+        if [ "$NO_CHANGE_STREAK" -ge 2 ]; then
+            echo "### WARNING: No-change streak ($NO_CHANGE_STREAK iterations)"
+            echo "The last $NO_CHANGE_STREAK iterations produced no changes. Try a different approach."
+            echo ""
+        fi
+    } > "$context_file"
+    echo "$context_file"
+}
+
+# — Budget tracking ——————————————————————————————
+log_budget() {
+    local session_log="$1"
+    local budget_file="$LOG_DIR/budget.csv"
+
+    # Create header if file doesn't exist
+    if [ ! -f "$budget_file" ]; then
+        echo "iteration,timestamp,input_tokens,output_tokens,total_tokens,duration_s" > "$budget_file"
+    fi
+
+    # Try to extract token counts from Claude's output
+    local input_tokens output_tokens total_tokens
+    input_tokens="$(grep -oP 'input[_\s]*tokens?[:\s]*\K[0-9]+' "$session_log" 2>/dev/null | tail -1 || echo 0)"
+    output_tokens="$(grep -oP 'output[_\s]*tokens?[:\s]*\K[0-9]+' "$session_log" 2>/dev/null | tail -1 || echo 0)"
+    total_tokens="$(grep -oP 'total[_\s]*tokens?[:\s]*\K[0-9]+' "$session_log" 2>/dev/null | tail -1 || echo 0)"
+
+    local duration=$(($(date +%s) - ITER_START_TIME))
+    echo "$ITERATION,$(date -u '+%Y-%m-%dT%H:%M:%SZ'),$input_tokens,$output_tokens,$total_tokens,$duration" >> "$budget_file"
 }
 
 # — Auth check ———————————————————————————————————
@@ -206,9 +268,16 @@ while true; do
         exit 1
     fi
 
-    # Run Claude
+    # Generate iteration context preamble
+    CONTEXT_FILE="$(generate_iteration_context)"
+
+    # Run Claude with context-enriched prompt
     log "Running Claude (session log: $SESSION_LOG)..."
-    PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
+    PROMPT_CONTENT="$(cat "$CONTEXT_FILE")
+
+---
+
+$(cat "$PROMPT_FILE")"
 
     set +e
     claude --dangerously-skip-permissions \
@@ -221,7 +290,9 @@ while true; do
     log "Claude exited with code $CLAUDE_EXIT"
 
     # Commit any changes (controlled by AUTO_COMMIT flag)
+    ITERATION_HAD_CHANGES=false
     if [ -n "$(git status --porcelain)" ]; then
+        ITERATION_HAD_CHANGES=true
         # Check if the agent already committed during this iteration
         LAST_COMMIT_TIME="$(git log -1 --format='%ct' 2>/dev/null || echo 0)"
         AGENT_COMMITTED=false
@@ -292,8 +363,16 @@ After resolving, stage the files with git add and run: git rebase --continue"
             fi
         fi
     else
+        # Check if agent committed during this iteration (working tree clean but commits made)
+        LAST_COMMIT_TIME="$(git log -1 --format='%ct' 2>/dev/null || echo 0)"
+        if [ "$LAST_COMMIT_TIME" -ge "$ITER_START_TIME" ] 2>/dev/null; then
+            ITERATION_HAD_CHANGES=true
+        fi
         log "No changes to commit."
     fi
+
+    # Log budget/token metrics
+    log_budget "$SESSION_LOG"
 
     # Check iteration limit
     if [ "$MAX_ITERATIONS" -gt 0 ] && [ "$ITERATION" -ge "$MAX_ITERATIONS" ]; then
@@ -301,9 +380,21 @@ After resolving, stage the files with git add and run: git rebase --continue"
         break
     fi
 
-    # Brief pause before next iteration
-    log "Sleeping ${LOOP_DELAY}s before next iteration..."
-    sleep "$LOOP_DELAY"
+    # Adaptive delay: backoff on no changes, reset on changes
+    if [ "$ITERATION_HAD_CHANGES" = true ]; then
+        CURRENT_DELAY="$LOOP_DELAY"
+        NO_CHANGE_STREAK=0
+    else
+        NO_CHANGE_STREAK=$((NO_CHANGE_STREAK + 1))
+        CURRENT_DELAY=$((CURRENT_DELAY * 2))
+        if [ "$CURRENT_DELAY" -gt "$LOOP_DELAY_MAX" ]; then
+            CURRENT_DELAY="$LOOP_DELAY_MAX"
+        fi
+        log "No changes detected (streak: $NO_CHANGE_STREAK). Backing off."
+    fi
+
+    log "Sleeping ${CURRENT_DELAY}s before next iteration..."
+    sleep "$CURRENT_DELAY"
 done
 
 log "Agent loop finished after $ITERATION iterations."
