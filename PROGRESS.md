@@ -8,6 +8,7 @@
 - **Area 4: Quality Gates** — PROGRESS.md update check (hash comparison before/after Claude run, reminder re-run if not updated), quality score per iteration (`logs/quality.csv` with files_changed, tests_added, tests_passing, progress_updated).
 
 - **Area 5: Smarter Auto-Commit** — Parse session log for intended commit messages, split large diffs (>500 lines) into semantic commits by directory, classify commits as feat/fix/refactor/test/docs based on changed file paths.
+- **Area 6: Role Prompt Improvements** — Made architect coordination-aware (reads other agents' commits and manifests), reviewer produces structured reviews with severity levels, tester tracks coverage metrics to `logs/coverage.csv`, added new integrator role for branch merging and cross-agent validation.
 
 ## In Progress
 
