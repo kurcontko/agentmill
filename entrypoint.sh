@@ -98,6 +98,13 @@ generate_iteration_context() {
             echo ""
         fi
 
+        # Other active agents
+        AWARENESS="$(generate_agent_awareness)"
+        if [ -n "$AWARENESS" ]; then
+            echo "$AWARENESS"
+            echo ""
+        fi
+
         # No-change streak warning
         if [ "$NO_CHANGE_STREAK" -ge 2 ]; then
             echo "### WARNING: No-change streak ($NO_CHANGE_STREAK iterations)"
@@ -126,6 +133,88 @@ log_budget() {
 
     local duration=$(($(date +%s) - ITER_START_TIME))
     echo "$ITERATION,$(date -u '+%Y-%m-%dT%H:%M:%SZ'),$input_tokens,$output_tokens,$total_tokens,$duration" >> "$budget_file"
+}
+
+# — Agent manifest ———————————————————————————————
+AGENT_MANIFEST_DIR="$LOG_DIR/agents"
+mkdir -p "$AGENT_MANIFEST_DIR"
+
+write_agent_manifest() {
+    local status="${1:-running}"
+    local manifest="$AGENT_MANIFEST_DIR/agent-${AGENT_ID}.json"
+    cat > "$manifest" <<MANIFEST_EOF
+{
+  "id": "${AGENT_ID}",
+  "branch": "${AGENT_BRANCH:-unknown}",
+  "role": "${AGENT_ROLE:-general}",
+  "prompt_file": "${PROMPT_FILE}",
+  "started_at": "${AGENT_START_TIME:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}",
+  "last_iteration": ${ITERATION},
+  "status": "${status}",
+  "updated_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+}
+MANIFEST_EOF
+}
+
+# — Mutual awareness —————————————————————————————
+generate_agent_awareness() {
+    local awareness=""
+    local manifest_file
+    for manifest_file in "$AGENT_MANIFEST_DIR"/agent-*.json; do
+        [ -f "$manifest_file" ] || continue
+        local other_id
+        other_id="$(basename "$manifest_file" .json | sed 's/^agent-//')"
+        # Skip self
+        [ "$other_id" = "$AGENT_ID" ] && continue
+        # Skip stale manifests (>30 min old)
+        local file_age
+        file_age=$(( $(date +%s) - $(stat -c %Y "$manifest_file" 2>/dev/null || echo 0) ))
+        [ "$file_age" -gt 1800 ] && continue
+        awareness="${awareness}
+- Agent ${other_id}: $(grep -oP '"status"\s*:\s*"\K[^"]+' "$manifest_file" 2>/dev/null || echo unknown) (iter $(grep -oP '"last_iteration"\s*:\s*\K[0-9]+' "$manifest_file" 2>/dev/null || echo '?'), branch $(grep -oP '"branch"\s*:\s*"\K[^"]+' "$manifest_file" 2>/dev/null || echo '?'))"
+    done
+
+    if [ -n "$awareness" ]; then
+        echo "### Active Agents${awareness}"
+    fi
+}
+
+# — Lock protocol for current_tasks/ —————————————
+LOCK_STALE_SECONDS=900  # 15 minutes
+
+acquire_task_lock() {
+    local slug="$1"
+    local lock_file="current_tasks/${slug}.lock"
+    mkdir -p current_tasks
+
+    # Check for existing lock
+    if [ -f "$lock_file" ]; then
+        local lock_age
+        lock_age=$(( $(date +%s) - $(stat -c %Y "$lock_file" 2>/dev/null || echo 0) ))
+        if [ "$lock_age" -lt "$LOCK_STALE_SECONDS" ]; then
+            local lock_owner
+            lock_owner="$(head -1 "$lock_file" 2>/dev/null || echo unknown)"
+            log "WARN: Task '$slug' locked by $lock_owner (${lock_age}s ago)"
+            return 1
+        fi
+        log "Removing stale lock for '$slug' (${lock_age}s old)"
+    fi
+
+    echo "agent-${AGENT_ID}" > "$lock_file"
+    date -u '+%Y-%m-%dT%H:%M:%SZ' >> "$lock_file"
+    return 0
+}
+
+release_task_lock() {
+    local slug="$1"
+    local lock_file="current_tasks/${slug}.lock"
+    if [ -f "$lock_file" ]; then
+        local lock_owner
+        lock_owner="$(head -1 "$lock_file" 2>/dev/null || echo unknown)"
+        if [ "$lock_owner" = "agent-${AGENT_ID}" ]; then
+            rm -f "$lock_file"
+        fi
+    fi
 }
 
 # — Auth check ———————————————————————————————————
@@ -243,6 +332,11 @@ restore_settings() {
 
 trap 'restore_settings' EXIT
 
+# — Write initial agent manifest ——————————————————
+AGENT_START_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+AGENT_ROLE="${AGENT_ROLE:-general}"
+write_agent_manifest "starting"
+
 # — Main loop ————————————————————————————————————
 log "Starting agent loop (model=$MODEL, max_iterations=$MAX_ITERATIONS)"
 
@@ -257,6 +351,9 @@ while true; do
     SESSION_LOG="$LOG_DIR/session_$(date -u '+%Y%m%d_%H%M%S')_iter${ITERATION}.log"
 
     log "==== Iteration $ITERATION ===="
+
+    # Update agent manifest
+    write_agent_manifest "running"
 
     # Pre-iteration checkpoint tag (lightweight rollback point)
     git tag -f "pre-iter-${AGENT_ID}-${ITERATION}" 2>/dev/null || true
@@ -397,4 +494,5 @@ After resolving, stage the files with git add and run: git rebase --continue"
     sleep "$CURRENT_DELAY"
 done
 
+write_agent_manifest "finished"
 log "Agent loop finished after $ITERATION iterations."
