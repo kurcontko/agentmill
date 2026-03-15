@@ -100,6 +100,39 @@ PROVIDERS: dict[str, ProviderConfig] = {
         input_cost_per_m=0.15,
         output_cost_per_m=0.60,
     ),
+    # --- Local models (vLLM on DGX Spark) ---
+    "local-minimax": ProviderConfig(
+        name="local",
+        model="MiniMax-M2.5",
+        api_key_env="LOCAL_API_KEY",
+        base_url="http://localhost:8000/v1",
+        input_cost_per_m=0.0,
+        output_cost_per_m=0.0,
+    ),
+    "local-qwen122b": ProviderConfig(
+        name="local",
+        model="Qwen3.5-122B-A10B",
+        api_key_env="LOCAL_API_KEY",
+        base_url="http://localhost:8000/v1",
+        input_cost_per_m=0.0,
+        output_cost_per_m=0.0,
+    ),
+    "local-glm4-flash": ProviderConfig(
+        name="local",
+        model="GLM-4.7-Flash",
+        api_key_env="LOCAL_API_KEY",
+        base_url="http://localhost:8000/v1",
+        input_cost_per_m=0.0,
+        output_cost_per_m=0.0,
+    ),
+    "local-qwen35b": ProviderConfig(
+        name="local",
+        model="Qwen3.5-35B",
+        api_key_env="LOCAL_API_KEY",
+        base_url="http://localhost:8000/v1",
+        input_cost_per_m=0.0,
+        output_cost_per_m=0.0,
+    ),
 }
 
 

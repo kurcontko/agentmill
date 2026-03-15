@@ -1,95 +1,110 @@
 # AgentMill Benchmark Plan
 
-## Goal
+## Models
 
-Run SWE-bench Lite (5-task smoke test, then 50-task subset) across cheap coding models to show:
-1. AgentMill works with the respawning loop pattern
-2. Cost/performance tradeoffs across models
-3. Multi-iteration value (does iteration 2+ actually help?)
+### API
 
-## Models to Benchmark
+| Label | Model | $/M in | $/M out | SWE-bench | Notes |
+|-------|-------|--------|---------|-----------|-------|
+| `gemini3-flash` | Gemini 3 Flash Preview | $0.50 | $3.00 | 78% | Best cheap API model |
 
-### Via Claude Code CLI (`--model`)
-These work directly with AgentMill's existing `claude` CLI:
+### Local (DGX Spark, 128GB)
 
-| Model ID | $/M in | $/M out | Est. SWE-bench |
-|----------|--------|---------|----------------|
-| `haiku` | $1.00 | $5.00 | ~74% |
-| `sonnet` | $3.00 | $15.00 | ~80% |
+| Label | Model | Params (total/active) | VRAM | SWE-bench | Notes |
+|-------|-------|-----------------------|------|-----------|-------|
+| `minimax-m2.5` | MiniMax M2.5 | 230B / 10B MoE | ~101GB (3-bit GGUF) | **80.2%** | Best open-source, #1 SWE-bench |
+| `qwen3.5-122b` | Qwen3.5-122B-A10B | 122B / 10B MoE | ~75GB (NVFP4) | 72.0% | NVIDIA-optimized for Spark |
+| `glm4.7-flash` | GLM-4.7-Flash | 30B / 3B MoE | ~12GB (Q4) | 59.2% | Ultra-light, great for local folks |
+| `qwen3.5-35b` | Qwen3.5-35B | 35B dense | ~20GB (Q4) | ~55% est. | Solid small dense model |
 
-### Via OpenAI-compatible API (needs adapter)
-These require a lightweight adapter that replaces `claude` CLI with direct API calls:
+## Why These Models
 
-| Model | Provider | $/M in | $/M out | Est. SWE-bench |
-|-------|----------|--------|---------|----------------|
-| DeepSeek V3.2 | DeepSeek | $0.28 | $0.42 | ~72% |
-| GLM-4.7-Flash | Zhipu/Z.AI | $0.07 | $0.40 | 59% |
-| Gemini 3 Flash | Google | $0.50 | $3.00 | 78% |
-| Qwen3 Coder Plus | Alibaba | $0.65 | $3.25 | ~70% |
-| Codestral | Mistral | $0.30 | $0.90 | N/A |
-| GPT-4o-mini | OpenAI | $0.15 | $0.60 | ~30% |
+- **MiniMax M2.5**: Highest SWE-bench open-source score (80.2%), proven on DGX Spark at 26 tok/s, strong tool calling (76.8% BFCL)
+- **Qwen3.5-122B**: Runner-up, NVFP4 quantization purpose-built for DGX Spark, 262K context, excellent tool calling
+- **Gemini 3 Flash**: Best API value — 78% SWE-bench at $0.50/M input, 1M context
+- **GLM-4.7-Flash**: Nearly free to run locally (~3B active), 59% SWE-bench is impressive per-param. Audience: local hobbyists
+- **Qwen3.5-35B**: Popular community model, runs on consumer GPUs (24GB), good baseline
 
-## Benchmark Configs
+## Run Configs
 
-### Smoke test (5 tasks, all models)
+### Smoke test (5 tasks, ~30 min)
 ```bash
-python benchmarks/swe_bench_lite/run.py --limit 5 --model haiku
-python benchmarks/swe_bench_lite/run.py --limit 5 --model sonnet
-python benchmarks/swe_bench_lite/run.py --limit 5 --provider deepseek --model deepseek-chat
-python benchmarks/swe_bench_lite/run.py --limit 5 --provider zhipu --model glm-4.7-flash
+bash benchmarks/run_benchmark.sh smoke
 ```
 
-### 50-task subset (top 3 models)
+### Short run (20 tasks, ~2-3 hours)
 ```bash
-python benchmarks/swe_bench_lite/run.py --limit 50 --model haiku --max-iterations 3
-python benchmarks/swe_bench_lite/run.py --limit 50 --provider deepseek --model deepseek-chat --max-iterations 3
-python benchmarks/swe_bench_lite/run.py --limit 50 --provider google --model gemini-3-flash-preview --max-iterations 3
+bash benchmarks/run_benchmark.sh short
 ```
 
-### Iteration-value test (does loop help?)
-Run same 20 tasks with 1, 3, 5 iterations:
+### Full run (300 tasks, ~8-12 hours)
 ```bash
-for iters in 1 3 5; do
-  python benchmarks/swe_bench_lite/run.py --limit 20 --model haiku --max-iterations $iters \
-    --results-dir benchmark_results/iter_test/haiku_${iters}
-done
+bash benchmarks/run_benchmark.sh full
 ```
 
-## Expected Output
+### Running local models
 
+Start vLLM with target model, then set env vars:
+
+```bash
+# On DGX Spark — start vLLM with MiniMax M2.5
+vllm serve MiniMax-M2.5 --port 8000 --tensor-parallel-size 1
+
+# In another terminal — run benchmark
+export LOCAL_API_KEY=dummy
+export RUN_MINIMAX=1
+bash benchmarks/run_benchmark.sh short
+
+# Swap model and run next
+# (stop vLLM, restart with GLM-4.7-Flash)
+export RUN_MINIMAX=0
+export RUN_GLM4FLASH=1
+bash benchmarks/run_benchmark.sh short
 ```
-benchmark_results/
-├── swe_lite/
-│   ├── haiku/          # predictions.jsonl, metrics.jsonl, config.json
-│   ├── sonnet/
-│   ├── deepseek/
-│   ├── glm4flash/
-│   └── gemini3flash/
-├── iter_test/
-│   ├── haiku_1/
-│   ├── haiku_3/
-│   └── haiku_5/
-└── summary.md          # Auto-generated comparison table
+
+### Running Gemini 3 Flash (API)
+```bash
+export GOOGLE_API_KEY=your-key-here
+bash benchmarks/run_benchmark.sh short
 ```
 
 ## Key Numbers to Report
 
-1. **Resolve rate** per model (from SWE-bench eval)
-2. **Cost per resolved issue** = total_cost / resolved_count
-3. **Iteration value** = resolve_rate(3 iters) - resolve_rate(1 iter)
-4. **Patch rate** = % of tasks that produced any diff
-5. **Avg time per task**
+| Metric | What it shows |
+|--------|---------------|
+| **Resolve rate** | % of tasks where tests pass (primary metric) |
+| **Patch rate** | % of tasks that produced any diff |
+| **Cost per resolved issue** | Total cost / resolved count (API models only) |
+| **Iterations needed** | How many loop iterations to solve |
+| **Time per task** | Wall-clock seconds |
+| **Iteration value** | resolve_rate(3 iters) - resolve_rate(1 iter) |
 
-## Architecture: Multi-Provider Support
-
-AgentMill currently runs `claude` CLI. For non-Claude models, the benchmark runner
-bypasses the entrypoint and calls APIs directly via a thin adapter:
+## Output Structure
 
 ```
-Claude models:    entrypoint.sh → claude CLI → Anthropic API
-Other models:     benchmark runner → provider adapter → Provider API
+benchmark_results/
+└── run_20260315_143000/
+    ├── gemini3-flash/
+    │   ├── predictions.jsonl    # SWE-bench compatible
+    │   ├── metrics.jsonl        # Per-task details
+    │   └── config.json          # Reproducibility
+    ├── minimax-m2.5/
+    ├── glm4.7-flash/
+    ├── qwen3.5-35b/
+    └── qwen3.5-122b/
 ```
 
-The adapter mimics the agent loop: read prompt, call API with tool use, apply edits,
-commit, repeat for N iterations. This is lighter than full AgentMill but tests the
-same core value: does multi-iteration looping improve results?
+## Evaluation
+
+After all runs complete:
+```bash
+pip install swebench
+
+for d in benchmark_results/run_*/*/; do
+    label=$(basename "$d")
+    python -m swebench.harness.run_evaluation \
+        --dataset_name princeton-nlp/SWE-bench_Lite \
+        --predictions_path "$d/predictions.jsonl" \
+        --max_workers 8 --run_id "$label"
+done
+```
