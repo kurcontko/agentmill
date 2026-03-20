@@ -1,3 +1,10 @@
-{"instance_id": "astropy__astropy-12907", "elapsed_seconds": 8.6, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 0, "has_patch": false, "error": ""}
-{"instance_id": "astropy__astropy-14182", "elapsed_seconds": 19.1, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 0, "has_patch": false, "error": ""}
-{"instance_id": "astropy__astropy-14365", "elapsed_seconds": 173.7, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 13574, "has_patch": true, "error": ""}
+{"instance_id": "astropy__astropy-12907", "elapsed_seconds": 58.3, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 0, "has_patch": false, "error": ""}
+{"instance_id": "astropy__astropy-14182", "elapsed_seconds": 95.3, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 0, "has_patch": false, "error": ""}
+{"instance_id": "astropy__astropy-14365", "elapsed_seconds": 19.9, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 0, "has_patch": false, "error": ""}
+{"instance_id": "astropy__astropy-14995", "elapsed_seconds": 40.5, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 0, "has_patch": false, "error": ""}
+{"instance_id": "astropy__astropy-6938", "elapsed_seconds": 25.0, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 0, "has_patch": false, "error": ""}
+{"instance_id": "astropy__astropy-7746", "elapsed_seconds": 31.8, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 0, "has_patch": false, "error": ""}
+{"instance_id": "django__django-10914", "elapsed_seconds": 43.2, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 0, "has_patch": false, "error": ""}
+{"instance_id": "django__django-10924", "elapsed_seconds": 25.1, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 0, "has_patch": false, "error": ""}
+{"instance_id": "django__django-11001", "elapsed_seconds": 30.3, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 0, "has_patch": false, "error": ""}
+{"instance_id": "django__django-11019", "elapsed_seconds": 88.1, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 0, "has_patch": false, "error": ""}
