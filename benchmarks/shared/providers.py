@@ -101,6 +101,22 @@ PROVIDERS: dict[str, ProviderConfig] = {
         output_cost_per_m=0.60,
     ),
     # --- Local models (vLLM on DGX Spark) ---
+    "local-gpt-oss": ProviderConfig(
+        name="local",
+        model="openai/gpt-oss-120b",
+        api_key_env="LOCAL_API_KEY",
+        base_url="http://localhost:30000/v1",
+        input_cost_per_m=0.0,
+        output_cost_per_m=0.0,
+    ),
+    "local-nemotron": ProviderConfig(
+        name="local",
+        model="nvidia/Nemotron-120B",
+        api_key_env="LOCAL_API_KEY",
+        base_url="http://localhost:30000/v1",
+        input_cost_per_m=0.0,
+        output_cost_per_m=0.0,
+    ),
     "local-minimax": ProviderConfig(
         name="local",
         model="MiniMax-M2.5",
