@@ -266,13 +266,13 @@ def run_with_openai_compat(
             "type": "function",
             "function": {
                 "name": "list_files",
-                "description": "List files matching a glob pattern",
+                "description": "List files and directories. Use pattern for glob matching (e.g. '**/*.py') or path to list a directory. If no args, lists repo root.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "pattern": {"type": "string", "description": "Glob pattern (e.g. 'src/**/*.py')"},
+                        "pattern": {"type": "string", "description": "Glob pattern (e.g. '**/*.py', 'src/*.ts')"},
+                        "path": {"type": "string", "description": "Directory path to list (e.g. 'src/models')"},
                     },
-                    "required": ["pattern"],
                 },
             },
         },
@@ -290,10 +290,11 @@ def run_with_openai_compat(
                 messages=messages,
                 tools=tools,
                 tool_choice="auto",
-                max_tokens=8192,
+                max_tokens=65536,
                 timeout=timeout,
             )
         except Exception as e:
+            logger.warning(f"API error on round {_round}: {e}")
             return 1, f"API error: {e}", total_usage
 
         choice = response.choices[0]
@@ -306,6 +307,20 @@ def run_with_openai_compat(
         # Collect text content
         if msg.content:
             output_parts.append(msg.content)
+
+        tool_count = len(msg.tool_calls) if msg.tool_calls else 0
+        logger.info(
+            f"Round {_round}: finish={choice.finish_reason}, "
+            f"tools={tool_count}, content_len={len(msg.content) if msg.content else 0}"
+        )
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                try:
+                    a = json.loads(tc.function.arguments)
+                    brief = {k: (v[:80] + '...' if isinstance(v, str) and len(v) > 80 else v) for k, v in a.items()}
+                except Exception:
+                    brief = tc.function.arguments[:100]
+                logger.info(f"  -> {tc.function.name}({brief})")
 
         # No tool calls — model is done
         if not msg.tool_calls:
@@ -365,14 +380,50 @@ def _execute_tool(name: str, args: dict, cwd: str) -> str:
             return output[:10000] if output else "(no output)"
 
         elif name == "list_files":
-            pattern = str(Path(cwd) / args["pattern"])
-            matches = sorted(glob_mod.glob(pattern, recursive=True))
-            # Return relative paths
-            rel = [str(Path(m).relative_to(cwd)) for m in matches]
-            return "\n".join(rel[:200]) if rel else "(no matches)"
+            # Support both pattern-based glob and path-based directory listing
+            pattern = args.get("pattern", "")
+            dir_path = args.get("path", "")
+
+            if pattern:
+                full_pattern = str(Path(cwd) / pattern)
+                matches = sorted(glob_mod.glob(full_pattern, recursive=True))
+                rel = [str(Path(m).relative_to(cwd)) for m in matches]
+                return "\n".join(rel[:200]) if rel else "(no matches for pattern)"
+            else:
+                # List directory contents
+                target = Path(cwd) / dir_path if dir_path else Path(cwd)
+                if not target.is_dir():
+                    return f"Error: not a directory: {dir_path}"
+                entries = sorted(target.iterdir())
+                rel = []
+                for e in entries[:200]:
+                    name_str = str(e.relative_to(cwd))
+                    if e.is_dir():
+                        name_str += "/"
+                    rel.append(name_str)
+                return "\n".join(rel) if rel else "(empty directory)"
+
+        elif name in ("search", "grep", "find_files", "grep_files"):
+            # Handle hallucinated search tools — redirect to run_command
+            query = args.get("query", args.get("pattern", args.get("regex", "")))
+            path = args.get("path", ".")
+            if query:
+                proc = subprocess.run(
+                    f"grep -rn '{query}' {path} --include='*.py' | head -30",
+                    shell=True, cwd=cwd, capture_output=True, text=True, timeout=30,
+                )
+                return (proc.stdout + proc.stderr)[:10000] or "(no matches)"
+            return "Error: provide a 'query' argument"
+
+        elif name in ("open_file",):
+            # Handle hallucinated open_file — redirect to read_file
+            path = Path(cwd) / args.get("path", "")
+            if not path.exists():
+                return f"Error: file not found: {args.get('path', '')}"
+            return path.read_text(errors="replace")[:50000]
 
         else:
-            return f"Unknown tool: {name}"
+            return f"Unknown tool: {name}. Available tools: read_file, write_file, run_command, list_files"
 
     except subprocess.TimeoutExpired:
         return "Error: command timed out (120s)"

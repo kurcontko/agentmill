@@ -138,11 +138,18 @@ def run_task_with_provider(
         prompt += """
 ## Instructions
 
-- Read the relevant source files to understand the codebase.
-- Make the minimal code changes needed to fix this issue.
-- Do NOT modify test files unless the issue specifically requires it.
-- Use the tools provided: read_file, write_file, run_command, list_files.
-- Start by finding the relevant files, then read them, then make your fix.
+You MUST use the provided tools to fix this issue. Follow this workflow:
+
+1. Use `list_files` or `run_command` (with grep) to find relevant source files.
+2. Use `read_file` to read the relevant code.
+3. Use `write_file` to write the COMPLETE fixed file content back. This is REQUIRED.
+4. You may use `run_command` to run tests and verify your fix.
+
+CRITICAL: You MUST call `write_file` with the full corrected file content to apply your fix.
+Do NOT just analyze the code — you must actually write the fix using write_file.
+Do NOT modify test files unless the issue specifically requires it.
+
+Available tools: read_file, write_file, run_command, list_files.
 """
 
         start = time.monotonic()
