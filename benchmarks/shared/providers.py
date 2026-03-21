@@ -111,7 +111,7 @@ PROVIDERS: dict[str, ProviderConfig] = {
     ),
     "local-nemotron": ProviderConfig(
         name="local",
-        model="nvidia/Nemotron-120B",
+        model="nemotron",
         api_key_env="LOCAL_API_KEY",
         base_url="http://localhost:30000/v1",
         input_cost_per_m=0.0,

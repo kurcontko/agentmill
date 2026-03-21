@@ -1,0 +1,10 @@
+{"instance_id": "astropy__astropy-12907", "elapsed_seconds": 1511.6, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 920, "has_patch": true, "error": ""}
+{"instance_id": "astropy__astropy-14182", "elapsed_seconds": 2757.3, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 677, "has_patch": true, "error": ""}
+{"instance_id": "astropy__astropy-14365", "elapsed_seconds": 2240.2, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 11499, "has_patch": true, "error": ""}
+{"instance_id": "astropy__astropy-14995", "elapsed_seconds": 1192.9, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 23883, "has_patch": true, "error": ""}
+{"instance_id": "astropy__astropy-6938", "elapsed_seconds": 1511.9, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 54957, "has_patch": true, "error": ""}
+{"instance_id": "astropy__astropy-7746", "elapsed_seconds": 1827.5, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 1365, "has_patch": true, "error": ""}
+{"instance_id": "django__django-10914", "elapsed_seconds": 1041.0, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 0, "has_patch": false, "error": ""}
+{"instance_id": "django__django-10924", "elapsed_seconds": 1687.0, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 2141, "has_patch": true, "error": ""}
+{"instance_id": "django__django-11001", "elapsed_seconds": 2075.9, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 60591, "has_patch": true, "error": ""}
+{"instance_id": "django__django-11019", "elapsed_seconds": 3270.2, "iterations_used": 2, "exit_code": 0, "patch_size_chars": 726, "has_patch": true, "error": ""}
