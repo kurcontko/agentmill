@@ -25,6 +25,7 @@ COPY entrypoint-tui.sh /entrypoint-tui.sh
 COPY setup-claude-config.sh /setup-claude-config.sh
 COPY setup-repo-env.sh /setup-repo-env.sh
 COPY auto-trust.exp /auto-trust.exp
+COPY thin_runner.py /thin_runner.py
 RUN chmod +x /entrypoint.sh /entrypoint-tui.sh /setup-claude-config.sh /setup-repo-env.sh /auto-trust.exp
 
 USER agent
