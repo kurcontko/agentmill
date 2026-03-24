@@ -11,6 +11,10 @@ MAX_ITERATIONS="${MAX_ITERATIONS:-0}"  # 0 = infinite
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
 LOOP_DELAY="${LOOP_DELAY:-5}"  # seconds between iterations
+AGENT_RUNTIME="${AGENT_RUNTIME:-claude-code}"  # claude-code | thin
+THIN_BASE_URL="${THIN_BASE_URL:-${OPENAI_BASE_URL:-https://api.openai.com/v1}}"
+THIN_API_KEY="${THIN_API_KEY:-${OPENAI_API_KEY:-}}"
+THIN_MAX_ROUNDS="${THIN_MAX_ROUNDS:-50}"
 
 # — State ————————————————————————————————————————
 ITERATION=0
@@ -34,7 +38,13 @@ log() {
 }
 
 # — Auth check ———————————————————————————————————
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+if [[ "$AGENT_RUNTIME" = "thin" ]]; then
+    if [[ -z "${THIN_API_KEY:-}" ]]; then
+        log "ERROR: thin runtime requires THIN_API_KEY, OPENAI_API_KEY, or --api-key"
+        exit 1
+    fi
+    log "Auth: using thin runtime (base_url=${THIN_BASE_URL})"
+elif [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
     log "Auth: using ANTHROPIC_API_KEY"
 elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
     log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
@@ -45,11 +55,14 @@ else
     log "ERROR: No auth configured."
     log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
     log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (subscription, from 'claude setup-token')"
+    log "  Option 3: Set AGENT_RUNTIME=thin with THIN_API_KEY (any OpenAI-compatible API)"
     exit 1
 fi
 
 # — Merge host Claude config (MCP, plugins, settings) ———
-/setup-claude-config.sh
+if [[ "$AGENT_RUNTIME" != "thin" ]]; then
+    /setup-claude-config.sh
+fi
 
 # — Git configuration ————————————————————————————
 git config --global user.name "${GIT_USER}-${AGENT_ID}"
@@ -127,31 +140,64 @@ log "Preparing repo environment..."
 log "Repo environment ready."
 
 # — Override project settings for autonomous mode ————————
-SETTINGS_LOCAL=".claude/settings.local.json"
-SETTINGS_BACKUP=""
-mkdir -p .claude
+if [[ "$AGENT_RUNTIME" != "thin" ]]; then
+    SETTINGS_LOCAL=".claude/settings.local.json"
+    SETTINGS_BACKUP=""
+    mkdir -p .claude
 
-if [[ -f "$SETTINGS_LOCAL" ]]; then
-    SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
+    if [[ -f "$SETTINGS_LOCAL" ]]; then
+        SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
+    fi
+
+    # NOSONAR — autonomous agent container requires full tool permissions
+    echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit","mcp__*"],"defaultMode":"bypassPermissions"}}' \
+        > "$SETTINGS_LOCAL"
+
+    restore_settings() {
+        if [[ -n "$SETTINGS_BACKUP" ]]; then
+            echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
+        else
+            rm -f "$SETTINGS_LOCAL"
+        fi
+        return 0
+    }
+
+    trap 'restore_settings' EXIT
 fi
 
-# NOSONAR — autonomous agent container requires full tool permissions
-echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit","mcp__*"],"defaultMode":"bypassPermissions"}}' \
-    > "$SETTINGS_LOCAL"
+# — Agent dispatch ———————————————————————————————
+run_agent() {
+    local prompt="$1"
+    local log_file="$2"
 
-restore_settings() {
-    if [[ -n "$SETTINGS_BACKUP" ]]; then
-        echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
-    else
-        rm -f "$SETTINGS_LOCAL"
-    fi
-    return 0
+    case "$AGENT_RUNTIME" in
+        claude-code)
+            # NOSONAR — dangerously-skip-permissions is required for headless autonomous operation
+            claude --dangerously-skip-permissions \
+                -p "$prompt" \
+                --model "$MODEL" \
+                2>&1 | tee "$log_file"
+            ;;
+        thin)
+            python3 /thin_runner.py \
+                --prompt "$prompt" \
+                --model "$MODEL" \
+                --base-url "$THIN_BASE_URL" \
+                --api-key "$THIN_API_KEY" \
+                --max-rounds "$THIN_MAX_ROUNDS" \
+                --cwd "$PWD" \
+                --verbose \
+                2>&1 | tee "$log_file"
+            ;;
+        *)
+            log "ERROR: Unknown AGENT_RUNTIME: $AGENT_RUNTIME"
+            return 1
+            ;;
+    esac
 }
 
-trap 'restore_settings' EXIT
-
 # — Main loop ————————————————————————————————————
-log "Starting agent loop (model=$MODEL, max_iterations=$MAX_ITERATIONS)"
+log "Starting agent loop (runtime=$AGENT_RUNTIME, model=$MODEL, max_iterations=$MAX_ITERATIONS)"
 
 while true; do
     if [[ "$SHUTTING_DOWN" = true ]]; then
@@ -171,20 +217,16 @@ while true; do
         exit 1
     fi
 
-    # Run Claude
-    log "Running Claude (session log: $SESSION_LOG)..."
+    # Run agent
+    log "Running agent ($AGENT_RUNTIME, session log: $SESSION_LOG)..."
     PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
 
-    # NOSONAR — dangerously-skip-permissions is required for headless autonomous operation
     set +e
-    claude --dangerously-skip-permissions \
-        -p "$PROMPT_CONTENT" \
-        --model "$MODEL" \
-        2>&1 | tee "$SESSION_LOG"
-    CLAUDE_EXIT=$?
+    run_agent "$PROMPT_CONTENT" "$SESSION_LOG"
+    AGENT_EXIT=$?
     set -e
 
-    log "Claude exited with code $CLAUDE_EXIT"
+    log "Agent exited with code $AGENT_EXIT"
 
     # Commit any changes
     if [[ -n "$(git status --porcelain)" ]]; then
