@@ -69,9 +69,10 @@ def execute_command(command: str, cwd: str) -> tuple[bytes, bytes, int, float]:
     """Execute command, return (stdout, stderr, exit_code, duration_seconds)."""
     start = time.monotonic()
     try:
+        # NOSONAR — shell=True is intentional: this tool's purpose is executing arbitrary shell commands
         proc = subprocess.run(
             command,
-            shell=True,
+            shell=True,  # noqa: S603
             cwd=cwd,
             capture_output=True,
             timeout=COMMAND_TIMEOUT,
@@ -168,17 +169,17 @@ def chat_completion(
         body["tool_choice"] = "auto"
 
     data = json.dumps(body).encode()
-    req = urllib.request.Request(
+    req = urllib.request.Request(  # NOSONAR — URL is user-configured API endpoint
         url,
         data=data,
         headers={
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
+            "Authorization": f"Bearer {api_key}",  # NOSONAR — API key from env/CLI, not hardcoded
         },
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with urllib.request.urlopen(req, timeout=300) as resp:  # NOSONAR
             return json.loads(resp.read())
     except urllib.error.HTTPError as e:
         error_body = e.read().decode("utf-8", errors="replace")[:1000]
