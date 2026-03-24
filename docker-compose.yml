@@ -1,6 +1,11 @@
 x-common-env: &common-env
+  AGENT_CLI: ${AGENT_CLI:-claude}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  LOCAL_ENDPOINT: ${LOCAL_ENDPOINT:-}
+  LOCAL_API_KEY: ${LOCAL_API_KEY:-}
+  OPENCODE_EXTRA_CONFIG: ${OPENCODE_EXTRA_CONFIG:-}
   MODEL: ${MODEL:-sonnet}
   GIT_USER: ${GIT_USER:-agentmill}
   GIT_EMAIL: ${GIT_EMAIL:-agent@agentmill}
@@ -156,3 +161,43 @@ services:
       - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
+
+# --- OpenCode: local model agent --------------------------------
+# Runs OpenCode with a local vLLM/llama.cpp endpoint.
+# Usage:
+#   LOCAL_ENDPOINT=http://host.docker.internal:30000/v1 \
+#   MODEL=openai-compatible/nemotron \
+#     docker compose up agent-local
+  agent-local:
+    <<: *agent-base
+    environment:
+      <<: *common-env
+      AGENT_CLI: opencode
+      LOCAL_ENDPOINT: ${LOCAL_ENDPOINT:-http://host.docker.internal:30000/v1}
+      LOCAL_API_KEY: ${LOCAL_API_KEY:-dummy}
+      MODEL: ${MODEL:-openai-compatible/nemotron}
+      AGENT_ID: "1"
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
+      LOOP_DELAY: ${LOOP_DELAY:-5}
+    volumes:
+      - ./prompts:/prompts
+      - ./logs:/workspace/logs
+      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
+
+# --- OpenCode: API model agent ----------------------------------
+# Runs OpenCode with a cloud provider (Anthropic, OpenAI, etc.)
+# Usage:
+#   MODEL=anthropic/claude-sonnet-4 docker compose up agent-opencode
+  agent-opencode:
+    <<: *agent-base
+    environment:
+      <<: *common-env
+      AGENT_CLI: opencode
+      AGENT_ID: "1"
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
+      LOOP_DELAY: ${LOOP_DELAY:-5}
+    volumes:
+      - ./prompts:/prompts
+      - ./logs:/workspace/logs
+      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
+      - ~/.claude.json:/home/agent/.host-claude.json:ro

@@ -14,6 +14,7 @@ LOOP_DELAY="${LOOP_DELAY:-5}"  # seconds between iterations
 LOOP_DELAY_MAX="${LOOP_DELAY_MAX:-300}"  # max backoff delay (5 min)
 AUTO_COMMIT="${AUTO_COMMIT:-wip}"  # "off" = no auto-commit, "wip" = safety-net [wip] only, "on" = always commit (legacy)
 PUSH_REBASE_MAX_RETRIES="${PUSH_REBASE_MAX_RETRIES:-3}"
+AGENT_CLI="${AGENT_CLI:-claude}"  # "claude" or "opencode"
 
 # — State ————————————————————————————————————————
 ITERATION=0
@@ -386,22 +387,44 @@ log_quality_score() {
 }
 
 # — Auth check ———————————————————————————————————
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    log "Auth: using ANTHROPIC_API_KEY"
-elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-    log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
-    if [ ! -f "$HOME/.claude.json" ]; then
-        echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
+if [ "$AGENT_CLI" = "claude" ]; then
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        log "Auth: using ANTHROPIC_API_KEY"
+    elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+        log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
+        if [ ! -f "$HOME/.claude.json" ]; then
+            echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
+        fi
+    else
+        log "ERROR: No auth configured."
+        log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
+        log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (subscription, from 'claude setup-token')"
+        exit 1
     fi
-else
-    log "ERROR: No auth configured."
-    log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
-    log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (subscription, from 'claude setup-token')"
-    exit 1
+elif [ "$AGENT_CLI" = "opencode" ]; then
+    if [ -n "${LOCAL_ENDPOINT:-}" ]; then
+        log "Auth: using LOCAL_ENDPOINT ($LOCAL_ENDPOINT)"
+    elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        log "Auth: using ANTHROPIC_API_KEY (via opencode)"
+    elif [ -n "${OPENAI_API_KEY:-}" ]; then
+        log "Auth: using OPENAI_API_KEY (via opencode)"
+    else
+        log "ERROR: No auth configured for opencode."
+        log "  Option 1: Set LOCAL_ENDPOINT for local models (vLLM, llama.cpp)"
+        log "  Option 2: Set ANTHROPIC_API_KEY, OPENAI_API_KEY, or other provider key"
+        exit 1
+    fi
 fi
 
-# — Merge host Claude config (MCP, plugins, settings) ———
-/setup-claude-config.sh
+# — Merge host config (CLI-specific) ————————————————
+if [ "$AGENT_CLI" = "claude" ]; then
+    /setup-claude-config.sh
+else
+    log "Using AGENT_CLI=$AGENT_CLI"
+fi
+
+# — Source CLI wrapper ———————————————————————————
+. /agent-run.sh
 
 # — Git configuration ————————————————————————————
 git config --global user.name "${GIT_USER}-${AGENT_ID}"
@@ -479,26 +502,29 @@ log "Preparing repo environment..."
 log "Repo environment ready."
 
 # — Override project settings for autonomous mode ————————
-SETTINGS_LOCAL=".claude/settings.local.json"
-SETTINGS_BACKUP=""
-mkdir -p .claude
+if [ "$AGENT_CLI" = "claude" ]; then
+    SETTINGS_LOCAL=".claude/settings.local.json"
+    SETTINGS_BACKUP=""
+    mkdir -p .claude
 
-if [ -f "$SETTINGS_LOCAL" ]; then
-    SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
-fi
-
-echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit","mcp__*"],"defaultMode":"bypassPermissions"}}' \
-    > "$SETTINGS_LOCAL"
-
-restore_settings() {
-    if [ -n "$SETTINGS_BACKUP" ]; then
-        echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
-    else
-        rm -f "$SETTINGS_LOCAL"
+    if [ -f "$SETTINGS_LOCAL" ]; then
+        SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
     fi
-}
 
-trap 'restore_settings' EXIT
+    echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit","mcp__*"],"defaultMode":"bypassPermissions"}}' \
+        > "$SETTINGS_LOCAL"
+
+    restore_settings() {
+        if [ -n "$SETTINGS_BACKUP" ]; then
+            echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
+        else
+            rm -f "$SETTINGS_LOCAL"
+        fi
+    }
+    trap 'restore_settings' EXIT
+elif [ "$AGENT_CLI" = "opencode" ]; then
+    /setup-opencode-config.sh "$(pwd)"
+fi
 
 # — Write initial agent manifest ——————————————————
 AGENT_START_TIME="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -506,7 +532,7 @@ AGENT_ROLE="${AGENT_ROLE:-general}"
 write_agent_manifest "starting"
 
 # — Main loop ————————————————————————————————————
-log "Starting agent loop (model=$MODEL, max_iterations=$MAX_ITERATIONS)"
+log "Starting agent loop (cli=$AGENT_CLI, model=$MODEL, max_iterations=$MAX_ITERATIONS)"
 
 while true; do
     if [ "$SHUTTING_DOWN" = true ]; then
@@ -552,9 +578,7 @@ while true; do
 $(cat "$PROMPT_FILE")"
 
     set +e
-    claude --dangerously-skip-permissions \
-        -p "$PROMPT_CONTENT" \
-        --model "$MODEL" \
+    agent_run_headless "$PROMPT_CONTENT" "$MODEL" \
         2>&1 | tee "$SESSION_LOG"
     CLAUDE_EXIT=$?
     set -e
@@ -569,9 +593,7 @@ $(cat "$PROMPT_FILE")"
         else
             log "WARN: Changes made but PROGRESS.md not updated. Running reminder..."
             set +e
-            claude --dangerously-skip-permissions \
-                -p "You made changes but did not update PROGRESS.md. Please update PROGRESS.md now with what you accomplished, what's in progress, and what's next. Keep it concise." \
-                --model "$MODEL" \
+            agent_run_headless "You made changes but did not update PROGRESS.md. Please update PROGRESS.md now with what you accomplished, what's in progress, and what's next. Keep it concise." "$MODEL" \
                 2>&1 | tee "$LOG_DIR/reminder_iter${ITERATION}.log"
             set -e
             # Re-check after reminder
@@ -661,9 +683,7 @@ Choose the best resolution for each conflict based on the intent of both sides.
 After resolving, stage the files with git add and run: git rebase --continue"
 
                     set +e
-                    claude --dangerously-skip-permissions \
-                        -p "$RESOLVE_PROMPT" \
-                        --model "$MODEL" \
+                    agent_run_headless "$RESOLVE_PROMPT" "$MODEL" \
                         2>&1 | tee "$LOG_DIR/resolve_iter${ITERATION}.log"
                     set -e
 

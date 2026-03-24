@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # --- AgentMill TUI Mode ---------------------------------------
-# Launches Claude Code in interactive TUI mode.
+# Launches Claude Code or OpenCode in interactive TUI mode.
 # Use Ralph Loop plugin (/ralph-loop) for autonomous iteration,
 # or interact manually - your choice.
 #
@@ -15,6 +15,7 @@ PROMPT_FILE="${PROMPT_FILE:-/prompts/PROMPT.md}"
 MODEL="${MODEL:-sonnet}"
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
+AGENT_CLI="${AGENT_CLI:-claude}"
 AUTO_RALPH_MAX_ITERATIONS="${AUTO_RALPH_MAX_ITERATIONS:-${MAX_ITERATIONS:-10}}"
 AUTO_RALPH_COMPLETION_PROMISE="${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}"
 
@@ -26,23 +27,43 @@ log() {
     echo "$msg" >> "$LOG_DIR/agent.log"
 }
 
+# --- Source CLI wrapper ----------------------------------------
+. /agent-run.sh
+
 # --- Auth -----------------------------------------------------
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    log "Auth: using ANTHROPIC_API_KEY"
-elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
-    log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
-    if [ ! -f "$HOME/.claude.json" ]; then
-        echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
+if [ "$AGENT_CLI" = "claude" ]; then
+    if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        log "Auth: using ANTHROPIC_API_KEY"
+    elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+        log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
+        if [ ! -f "$HOME/.claude.json" ]; then
+            echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
+        fi
+    else
+        log "ERROR: No auth configured."
+        log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
+        log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (subscription, from 'claude setup-token')"
+        exit 1
     fi
-else
-    log "ERROR: No auth configured."
-    log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
-    log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (subscription, from 'claude setup-token')"
-    exit 1
+elif [ "$AGENT_CLI" = "opencode" ]; then
+    if [ -n "${LOCAL_ENDPOINT:-}" ]; then
+        log "Auth: using LOCAL_ENDPOINT ($LOCAL_ENDPOINT)"
+    elif [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+        log "Auth: using ANTHROPIC_API_KEY (via opencode)"
+    elif [ -n "${OPENAI_API_KEY:-}" ]; then
+        log "Auth: using OPENAI_API_KEY (via opencode)"
+    else
+        log "ERROR: No auth configured for opencode."
+        exit 1
+    fi
 fi
 
-# --- Merge host Claude config (MCP, plugins, settings) --------
-/setup-claude-config.sh
+# --- Merge host config (CLI-specific) -------------------------
+if [ "$AGENT_CLI" = "claude" ]; then
+    /setup-claude-config.sh
+else
+    log "Using AGENT_CLI=$AGENT_CLI"
+fi
 
 # --- Git config -----------------------------------------------
 git config --global user.name "$GIT_USER"
@@ -62,31 +83,37 @@ log "Preparing repo environment..."
 log "Repo environment ready."
 
 # --- Override project settings for autonomous mode ------------
-# The host repo may have restrictive .claude/settings.local.json
-# Back up original and restore on exit
-SETTINGS_LOCAL=".claude/settings.local.json"
-SETTINGS_BACKUP=""
 RALPH_RULE_FILE=".claude/rules/agentmill-ralph-task.md"
-mkdir -p .claude
-if [ -f "$SETTINGS_LOCAL" ]; then
-    SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
-fi
-SETTINGS_JSON='{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"}}'
-if [ "${RESPAWN:-false}" = "true" ]; then
-    # Add Stop hook to exit Claude when done, so the respawn loop can restart it
-    SETTINGS_JSON='{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"},"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"kill -TERM $PPID 2>/dev/null; exit 0"}]}]}}'
-fi
-echo "$SETTINGS_JSON" > "$SETTINGS_LOCAL"
 
-restore_settings() {
-    if [ -n "$SETTINGS_BACKUP" ]; then
-        echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
-    else
-        rm -f "$SETTINGS_LOCAL"
+if [ "$AGENT_CLI" = "claude" ]; then
+    SETTINGS_LOCAL=".claude/settings.local.json"
+    SETTINGS_BACKUP=""
+    mkdir -p .claude
+    if [ -f "$SETTINGS_LOCAL" ]; then
+        SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
     fi
-    rm -f "$RALPH_RULE_FILE"
-}
-trap restore_settings EXIT
+    SETTINGS_JSON='{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"}}'
+    if [ "${RESPAWN:-false}" = "true" ]; then
+        SETTINGS_JSON='{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"},"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"kill -TERM $PPID 2>/dev/null; exit 0"}]}]}}'
+    fi
+    echo "$SETTINGS_JSON" > "$SETTINGS_LOCAL"
+
+    restore_settings() {
+        if [ -n "$SETTINGS_BACKUP" ]; then
+            echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
+        else
+            rm -f "$SETTINGS_LOCAL"
+        fi
+        rm -f "$RALPH_RULE_FILE"
+    }
+    trap restore_settings EXIT
+elif [ "$AGENT_CLI" = "opencode" ]; then
+    /setup-opencode-config.sh "$(pwd)"
+    restore_settings() {
+        rm -f "$RALPH_RULE_FILE"
+    }
+    trap restore_settings EXIT
+fi
 
 # --- Build initial prompt -------------------------------------
 INITIAL_PROMPT=""
@@ -121,27 +148,25 @@ cleanup() {
 }
 trap 'cleanup; restore_settings' SIGTERM SIGINT
 
-# --- Launch Claude Code TUI -----------------------------------
+# --- Launch TUI ------------------------------------------------
 RESPAWN="${RESPAWN:-false}"
 LOOP_DELAY="${LOOP_DELAY:-5}"
 ITERATION=0
 
-if [ -n "$INITIAL_PROMPT" ]; then
-    log "Starting session with prompt from $PROMPT_FILE."
-    export CLAUDE_INITIAL_PROMPT="$INITIAL_PROMPT"
-else
-    unset CLAUDE_INITIAL_PROMPT
-fi
-
 while true; do
     ITERATION=$((ITERATION + 1))
-    log "Launching Claude TUI (model=$MODEL, iteration=$ITERATION)"
+    log "Launching TUI (cli=$AGENT_CLI, model=$MODEL, iteration=$ITERATION)"
 
     if [ "${SKIP_PROMPT:-false}" = "true" ]; then
-        # Manual mode: launch Claude directly, no expect wrapper
-        claude --model "$MODEL" || true
+        # Manual mode: launch TUI directly, no initial prompt
+        agent_run_tui "$MODEL" || true
     else
-        /auto-trust.exp || true
+        if [ "$AGENT_CLI" = "claude" ]; then
+            export CLAUDE_INITIAL_PROMPT="${INITIAL_PROMPT:-}"
+            /auto-trust.exp || true
+        else
+            agent_run_tui "$MODEL" "${INITIAL_PROMPT:-}" || true
+        fi
     fi
 
     # Safety-net: commit any leftover changes
@@ -161,6 +186,6 @@ while true; do
         break
     fi
 
-    log "Claude exited. Restarting in ${LOOP_DELAY}s..."
+    log "Session exited. Restarting in ${LOOP_DELAY}s..."
     sleep "$LOOP_DELAY"
 done
