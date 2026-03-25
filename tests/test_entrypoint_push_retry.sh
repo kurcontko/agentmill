@@ -44,7 +44,7 @@ test_push_branch_with_retries_stops_after_three_retries() {
         esac
     }
 
-    PUSH_REBASE_MAX_RETRIES=3
+    export PUSH_REBASE_MAX_RETRIES=3
     eval "$(extract_function push_branch_with_retries)"
 
     set +e
@@ -96,7 +96,7 @@ test_push_branch_with_retries_aborts_on_rebase_conflict() {
         esac
     }
 
-    PUSH_REBASE_MAX_RETRIES=3
+    export PUSH_REBASE_MAX_RETRIES=3
     eval "$(extract_function push_branch_with_retries)"
 
     set +e

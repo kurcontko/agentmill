@@ -33,7 +33,8 @@ trap cleanup SIGTERM SIGINT
 mkdir -p "$LOG_DIR"
 
 log() {
-    local msg="[agentmill:agent-${AGENT_ID} $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
+    local msg
+    msg="[agentmill:agent-${AGENT_ID} $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
     echo "$msg"
     echo "$msg" >> "$LOG_DIR/agent-${AGENT_ID}.log"
 }
