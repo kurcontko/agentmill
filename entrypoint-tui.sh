@@ -21,18 +21,17 @@ AUTO_RALPH_COMPLETION_PROMISE="${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}"
 mkdir -p "$LOG_DIR"
 
 log() {
-    local msg
-    msg="[agentmill $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
+    local msg="[agentmill $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
     echo "$msg"
     echo "$msg" >> "$LOG_DIR/agent.log"
 }
 
 # --- Auth -----------------------------------------------------
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     log "Auth: using ANTHROPIC_API_KEY"
-elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
-    if [[ ! -f "$HOME/.claude.json" ]]; then
+    if [ ! -f "$HOME/.claude.json" ]; then
         echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
     fi
 else
@@ -50,7 +49,7 @@ git config --global user.name "$GIT_USER"
 git config --global user.email "$GIT_EMAIL"
 
 # --- Repo check -----------------------------------------------
-if [[ ! -d "$REPO_DIR/.git" ]]; then
+if [ ! -d "$REPO_DIR/.git" ] && [ ! -f "$REPO_DIR/.git" ]; then
     log "ERROR: No repo found at $REPO_DIR. Set REPO_PATH in .env."
     exit 1
 fi
@@ -69,31 +68,34 @@ SETTINGS_LOCAL=".claude/settings.local.json"
 SETTINGS_BACKUP=""
 RALPH_RULE_FILE=".claude/rules/agentmill-ralph-task.md"
 mkdir -p .claude
-if [[ -f "$SETTINGS_LOCAL" ]]; then
+if [ -f "$SETTINGS_LOCAL" ]; then
     SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
 fi
-# NOSONAR — autonomous agent container requires full tool permissions
-echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"}}' > "$SETTINGS_LOCAL"
+SETTINGS_JSON='{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"}}'
+if [ "${RESPAWN:-false}" = "true" ]; then
+    # Add Stop hook to exit Claude when done, so the respawn loop can restart it
+    SETTINGS_JSON='{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"},"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"kill -TERM $PPID 2>/dev/null; exit 0"}]}]}}'
+fi
+echo "$SETTINGS_JSON" > "$SETTINGS_LOCAL"
 
 restore_settings() {
-    if [[ -n "$SETTINGS_BACKUP" ]]; then
+    if [ -n "$SETTINGS_BACKUP" ]; then
         echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
     else
         rm -f "$SETTINGS_LOCAL"
     fi
     rm -f "$RALPH_RULE_FILE"
-    return 0
 }
 trap restore_settings EXIT
 
 # --- Build initial prompt -------------------------------------
 INITIAL_PROMPT=""
-if [[ -f "$PROMPT_FILE" ]]; then
+if [ "${SKIP_PROMPT:-false}" != "true" ] && [ -f "$PROMPT_FILE" ]; then
     INITIAL_PROMPT="$(cat "$PROMPT_FILE")"
     log "Loaded prompt from $PROMPT_FILE"
 fi
 
-if [[ "${AUTO_RALPH:-false}" = "true" && -n "$INITIAL_PROMPT" ]]; then
+if [ "${AUTO_RALPH:-false}" = "true" ] && [ -n "$INITIAL_PROMPT" ]; then
     mkdir -p "$(dirname "$RALPH_RULE_FILE")"
     cat > "$RALPH_RULE_FILE" <<EOF
 # AgentMill Ralph Task
@@ -111,12 +113,54 @@ EOF
     log "Ralph Loop limits: max_iterations=$AUTO_RALPH_MAX_ITERATIONS completion_promise=$AUTO_RALPH_COMPLETION_PROMISE"
 fi
 
+# --- Graceful shutdown -----------------------------------------
+SHUTTING_DOWN=false
+cleanup() {
+    log "Received shutdown signal. Finishing current session..."
+    SHUTTING_DOWN=true
+}
+trap 'cleanup; restore_settings' SIGTERM SIGINT
+
 # --- Launch Claude Code TUI -----------------------------------
-log "Launching Claude TUI (model=$MODEL)"
-if [[ -n "$INITIAL_PROMPT" ]]; then
-    log "Starting interactive session with prompt from $PROMPT_FILE."
+RESPAWN="${RESPAWN:-false}"
+LOOP_DELAY="${LOOP_DELAY:-5}"
+ITERATION=0
+
+if [ -n "$INITIAL_PROMPT" ]; then
+    log "Starting session with prompt from $PROMPT_FILE."
     export CLAUDE_INITIAL_PROMPT="$INITIAL_PROMPT"
 else
     unset CLAUDE_INITIAL_PROMPT
 fi
-exec /auto-trust.exp
+
+while true; do
+    ITERATION=$((ITERATION + 1))
+    log "Launching Claude TUI (model=$MODEL, iteration=$ITERATION)"
+
+    if [ "${SKIP_PROMPT:-false}" = "true" ]; then
+        # Manual mode: launch Claude directly, no expect wrapper
+        claude --model "$MODEL" || true
+    else
+        /auto-trust.exp || true
+    fi
+
+    # Safety-net: commit any leftover changes
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        log "Committing leftover changes from iteration $ITERATION..."
+        git add -A
+        git commit -m "[wip] tui session $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))" || true
+    fi
+
+    if [ "$RESPAWN" != "true" ]; then
+        log "Respawn disabled. Exiting."
+        break
+    fi
+
+    if [ "$SHUTTING_DOWN" = true ]; then
+        log "Shutdown requested. Exiting."
+        break
+    fi
+
+    log "Claude exited. Restarting in ${LOOP_DELAY}s..."
+    sleep "$LOOP_DELAY"
+done

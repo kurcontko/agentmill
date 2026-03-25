@@ -11,6 +11,8 @@ MAX_ITERATIONS="${MAX_ITERATIONS:-0}"  # 0 = infinite
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
 LOOP_DELAY="${LOOP_DELAY:-5}"  # seconds between iterations
+AUTO_COMMIT="${AUTO_COMMIT:-wip}"  # "off" = no auto-commit, "wip" = safety-net [wip] only, "on" = always commit (legacy)
+PUSH_REBASE_MAX_RETRIES="${PUSH_REBASE_MAX_RETRIES:-3}"
 
 # — State ————————————————————————————————————————
 ITERATION=0
@@ -27,18 +29,49 @@ trap cleanup SIGTERM SIGINT
 mkdir -p "$LOG_DIR"
 
 log() {
-    local msg
-    msg="[agentmill:agent-${AGENT_ID} $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
+    local msg="[agentmill:agent-${AGENT_ID} $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
     echo "$msg"
     echo "$msg" >> "$LOG_DIR/agent-${AGENT_ID}.log"
 }
 
+push_branch_with_retries() {
+    local branch="$1"
+    local max_retries="${2:-$PUSH_REBASE_MAX_RETRIES}"
+    local retry=0
+
+    log "Pushing to upstream (branch: $branch)..."
+    while true; do
+        if git push origin "$branch" 2>/dev/null; then
+            return 0
+        fi
+
+        if [ "$retry" -ge "$max_retries" ]; then
+            log "ERROR: push failed after $max_retries retries"
+            return 1
+        fi
+
+        retry=$((retry + 1))
+        log "Push failed, rebasing and retrying ($retry/$max_retries)..."
+
+        if ! git fetch origin; then
+            log "ERROR: git fetch failed during push retry $retry/$max_retries"
+            return 1
+        fi
+
+        if ! git rebase "origin/$branch" 2>/dev/null; then
+            git rebase --abort 2>/dev/null || true
+            log "WARN: Rebase conflict on retry $retry/$max_retries, will retry next iteration"
+            return 1
+        fi
+    done
+}
+
 # — Auth check ———————————————————————————————————
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     log "Auth: using ANTHROPIC_API_KEY"
-elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+elif [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
     log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
-    if [[ ! -f "$HOME/.claude.json" ]]; then
+    if [ ! -f "$HOME/.claude.json" ]; then
         echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
     fi
 else
@@ -75,7 +108,7 @@ git config --global user.email "$GIT_EMAIL"
 UPSTREAM_DIR="/workspace/upstream"
 REPO_DIR="/workspace/repo"
 
-if [[ -d "$UPSTREAM_DIR/.git" || -f "$UPSTREAM_DIR/HEAD" ]]; then
+if [ -d "$UPSTREAM_DIR/.git" ] || [ -f "$UPSTREAM_DIR/HEAD" ]; then
     # Mode 2: upstream mounted — clone into isolated workspace
     # Each agent gets its own clone. Sync via git push/pull.
     # Default branch: agent-$AGENT_ID (safe to push to non-bare upstream
@@ -90,7 +123,7 @@ if [[ -d "$UPSTREAM_DIR/.git" || -f "$UPSTREAM_DIR/HEAD" ]]; then
     # not the checked-out branch, so this is safe).
     git -C "$UPSTREAM_DIR" config receive.denyCurrentBranch updateInstead 2>/dev/null || true
 
-    if [[ ! -d "$REPO_DIR/.git" ]]; then
+    if [ ! -d "$REPO_DIR/.git" ]; then
         git clone "$UPSTREAM_DIR" "$REPO_DIR"
         cd "$REPO_DIR"
         git remote set-url origin "$UPSTREAM_DIR"
@@ -111,7 +144,7 @@ if [[ -d "$UPSTREAM_DIR/.git" || -f "$UPSTREAM_DIR/HEAD" ]]; then
 
     log "Repo ready at $REPO_DIR (branch: $(git branch --show-current))"
 
-elif [[ -d "$REPO_DIR/.git" ]]; then
+elif [ -d "$REPO_DIR/.git" ] || [ -f "$REPO_DIR/.git" ]; then
     # Mode 1 or 3: direct mount (single agent or pre-created worktree)
     MULTI_AGENT=false
     : "${AGENT_BRANCH:=main}"
@@ -131,21 +164,19 @@ SETTINGS_LOCAL=".claude/settings.local.json"
 SETTINGS_BACKUP=""
 mkdir -p .claude
 
-if [[ -f "$SETTINGS_LOCAL" ]]; then
+if [ -f "$SETTINGS_LOCAL" ]; then
     SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
 fi
 
-# NOSONAR — autonomous agent container requires full tool permissions
 echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit","mcp__*"],"defaultMode":"bypassPermissions"}}' \
     > "$SETTINGS_LOCAL"
 
 restore_settings() {
-    if [[ -n "$SETTINGS_BACKUP" ]]; then
+    if [ -n "$SETTINGS_BACKUP" ]; then
         echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
     else
         rm -f "$SETTINGS_LOCAL"
     fi
-    return 0
 }
 
 trap 'restore_settings' EXIT
@@ -154,18 +185,19 @@ trap 'restore_settings' EXIT
 log "Starting agent loop (model=$MODEL, max_iterations=$MAX_ITERATIONS)"
 
 while true; do
-    if [[ "$SHUTTING_DOWN" = true ]]; then
+    if [ "$SHUTTING_DOWN" = true ]; then
         log "Shutdown requested. Exiting loop."
         break
     fi
 
     ITERATION=$((ITERATION + 1))
+    ITER_START_TIME="$(date +%s)"
     SESSION_LOG="$LOG_DIR/session_$(date -u '+%Y%m%d_%H%M%S')_iter${ITERATION}.log"
 
     log "==== Iteration $ITERATION ===="
 
     # Check for prompt file
-    if [[ ! -f "$PROMPT_FILE" ]]; then
+    if [ ! -f "$PROMPT_FILE" ]; then
         log "ERROR: Prompt file not found at $PROMPT_FILE"
         log "Mount your prompt file or set PROMPT_FILE env var."
         exit 1
@@ -175,7 +207,6 @@ while true; do
     log "Running Claude (session log: $SESSION_LOG)..."
     PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
 
-    # NOSONAR — dangerously-skip-permissions is required for headless autonomous operation
     set +e
     claude --dangerously-skip-permissions \
         -p "$PROMPT_CONTENT" \
@@ -186,25 +217,46 @@ while true; do
 
     log "Claude exited with code $CLAUDE_EXIT"
 
-    # Commit any changes
-    if [[ -n "$(git status --porcelain)" ]]; then
-        log "Committing changes..."
-        git add -A
-        git commit -m "agent-${AGENT_ID}: iteration $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))"
-        log "Changes committed."
+    # Commit any changes (controlled by AUTO_COMMIT flag)
+    if [ -n "$(git status --porcelain)" ]; then
+        # Check if the agent already committed during this iteration
+        LAST_COMMIT_TIME="$(git log -1 --format='%ct' 2>/dev/null || echo 0)"
+        AGENT_COMMITTED=false
+        if [ "$LAST_COMMIT_TIME" -ge "$ITER_START_TIME" ] 2>/dev/null; then
+            AGENT_COMMITTED=true
+        fi
+
+        case "$AUTO_COMMIT" in
+            off)
+                log "Auto-commit disabled. Uncommitted changes left in working tree."
+                ;;
+            wip)
+                if [ "$AGENT_COMMITTED" = true ]; then
+                    # Agent made its own commits — only safety-net the leftovers
+                    if [ -n "$(git status --porcelain)" ]; then
+                        log "Safety-net: committing leftover uncommitted changes as [wip]..."
+                        git add -A
+                        git commit -m "[wip] agent-${AGENT_ID}: uncommitted leftovers from iteration $ITERATION"
+                    fi
+                else
+                    # Agent didn't commit at all — save everything as wip
+                    log "Safety-net: agent made no commits, saving work as [wip]..."
+                    git add -A
+                    git commit -m "[wip] agent-${AGENT_ID}: iteration $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))"
+                fi
+                ;;
+            on|*)
+                log "Committing changes..."
+                git add -A
+                git commit -m "agent-${AGENT_ID}: iteration $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))"
+                log "Changes committed."
+                ;;
+        esac
 
         # Multi-agent: push agent branch to upstream
-        if [[ "$MULTI_AGENT" = true ]]; then
-            log "Pushing to upstream (branch: $AGENT_BRANCH)..."
-            if ! git push origin "$AGENT_BRANCH" 2>/dev/null; then
-                log "Push failed, rebasing and retrying..."
-                git fetch origin
-                if git rebase "origin/$AGENT_BRANCH" 2>/dev/null; then
-                    git push origin "$AGENT_BRANCH" || log "WARN: Push failed, will retry next iteration"
-                else
-                    git rebase --abort
-                    log "WARN: Rebase conflict, will retry next iteration"
-                fi
+        if [ "$MULTI_AGENT" = true ]; then
+            if ! push_branch_with_retries "$AGENT_BRANCH"; then
+                log "WARN: Skipping push for iteration $ITERATION"
             fi
         fi
     else
@@ -212,7 +264,7 @@ while true; do
     fi
 
     # Check iteration limit
-    if [[ "$MAX_ITERATIONS" -gt 0 && "$ITERATION" -ge "$MAX_ITERATIONS" ]]; then
+    if [ "$MAX_ITERATIONS" -gt 0 ] && [ "$ITERATION" -ge "$MAX_ITERATIONS" ]; then
         log "Reached max iterations ($MAX_ITERATIONS). Stopping."
         break
     fi

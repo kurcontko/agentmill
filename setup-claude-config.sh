@@ -13,7 +13,7 @@ TARGET_PLUGINS="/home/agent/.claude/plugins"
 DEFAULT_TRUSTED_PATHS="/workspace/repo /workspace/upstream"
 
 # --- Merge ~/.claude.json (MCP servers, plugins) ----------------------------
-if [[ -f "$HOST_CONFIG" ]]; then
+if [ -f "$HOST_CONFIG" ]; then
     python3 -c "
 import json, os
 
@@ -30,26 +30,39 @@ if 'mcpServers' in host:
 projects = target.get('projects', {})
 host_projects = host.get('projects', {})
 
-trusted_source = None
-for project in host_projects.values():
-    if project.get('hasTrustDialogAccepted'):
-        trusted_source = project
-        break
+# Merge values from ALL trusted host projects (not just the first).
+# For dict keys (mcpServers etc.), later projects add to earlier ones.
+merged_trusted = {}
+for hp in host_projects.values():
+    if not hp.get('hasTrustDialogAccepted'):
+        continue
+    for key in (
+        'allowedTools',
+        'mcpContextUris',
+        'mcpServers',
+        'enabledMcpjsonServers',
+        'disabledMcpjsonServers',
+        'hasClaudeMdExternalIncludesApproved',
+        'hasClaudeMdExternalIncludesWarningShown',
+    ):
+        if key not in hp:
+            continue
+        val = hp[key]
+        if isinstance(val, dict):
+            merged_trusted.setdefault(key, {}).update(val)
+        elif isinstance(val, list):
+            existing = merged_trusted.setdefault(key, [])
+            for item in val:
+                if item not in existing:
+                    existing.append(item)
+        else:
+            merged_trusted[key] = val
 
 for path in '$DEFAULT_TRUSTED_PATHS'.split():
     project = dict(projects.get(path, {}))
-    if trusted_source is not None:
-        for key in (
-            'allowedTools',
-            'mcpContextUris',
-            'mcpServers',
-            'enabledMcpjsonServers',
-            'disabledMcpjsonServers',
-            'hasClaudeMdExternalIncludesApproved',
-            'hasClaudeMdExternalIncludesWarningShown',
-        ):
-            if key in trusted_source and key not in project:
-                project[key] = trusted_source[key]
+    for key, val in merged_trusted.items():
+        if key not in project:
+            project[key] = val
     project['hasTrustDialogAccepted'] = True
     project['hasTrustDialogHooksAccepted'] = True
     projects[path] = project
@@ -58,14 +71,14 @@ target['projects'] = projects
 
 json.dump(target, open('$TARGET_CONFIG', 'w'), indent=2)
 " 2>/dev/null || {
-        if [[ ! -f "$TARGET_CONFIG" ]]; then
+        if [ ! -f "$TARGET_CONFIG" ]; then
             echo '{"hasCompletedOnboarding":true}' > "$TARGET_CONFIG"
         fi
     }
 fi
 
 # --- Merge settings.json (permissions + plugin config) ----------------------
-if [[ -f "$HOST_SETTINGS" ]]; then
+if [ -f "$HOST_SETTINGS" ]; then
     python3 -c "
 import json, os
 
@@ -91,14 +104,14 @@ json.dump(target, open('$TARGET_SETTINGS', 'w'), indent=2)
 fi
 
 # --- Copy plugins and fix paths ---------------------------------------------
-if [[ -d "$HOST_PLUGINS" ]] && [[ -n "$(ls -A "$HOST_PLUGINS" 2>/dev/null)" ]]; then
+if [ -d "$HOST_PLUGINS" ] && [ "$(ls -A "$HOST_PLUGINS" 2>/dev/null)" ]; then
     # Copy plugin files to writable location
     mkdir -p "$TARGET_PLUGINS"
     cp -a "$HOST_PLUGINS"/. "$TARGET_PLUGINS"/ 2>/dev/null || true
 
     # Fix installed_plugins.json - rewrite host home path to container home
     MANIFEST="$TARGET_PLUGINS/installed_plugins.json"
-    if [[ -f "$MANIFEST" ]]; then
+    if [ -f "$MANIFEST" ]; then
         python3 -c "
 import json, re, os
 
@@ -120,7 +133,7 @@ json.dump(manifest, open('$MANIFEST', 'w'), indent=2)
     fi
 
     MARKETPLACES="$TARGET_PLUGINS/known_marketplaces.json"
-    if [[ -f "$MARKETPLACES" ]]; then
+    if [ -f "$MARKETPLACES" ]; then
         python3 -c "
 import json, re, os
 
