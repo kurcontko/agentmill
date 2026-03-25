@@ -115,6 +115,7 @@ target_allow = perms.get('allow', [])
 perms['allow'] = list(set(target_allow + host_allow))
 target['permissions'] = perms
 target['skipDangerousModePermissionPrompt'] = True
+target['enableAllProjectMcpServers'] = True
 
 if 'enabledPlugins' in host:
     target['enabledPlugins'] = host['enabledPlugins']
