@@ -20,6 +20,8 @@ x-agent-base: &agent-base
     - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
     - ~/.claude/plugins:/home/agent/.host-plugins:ro
     - ~/.claude/commands:/home/agent/.claude/commands:ro
+    - ~/.claude/skills:/home/agent/.host-skills:ro
+    - ~/.claude/agents:/home/agent/.host-agents:ro
 
 services:
 # --- Headless (default) ---------------------------------------
@@ -40,6 +42,8 @@ services:
       - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
+      - ~/.claude/skills:/home/agent/.host-skills:ro
+      - ~/.claude/agents:/home/agent/.host-agents:ro
 
 # --- Multi-agent: independent clones --------------------------
 # Mounts repo as upstream. Each agent clones into its own
@@ -71,6 +75,8 @@ services:
       - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
+      - ~/.claude/skills:/home/agent/.host-skills:ro
+      - ~/.claude/agents:/home/agent/.host-agents:ro
 
   agent-2:
     <<: *agent-base
@@ -89,6 +95,8 @@ services:
       - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
+      - ~/.claude/skills:/home/agent/.host-skills:ro
+      - ~/.claude/agents:/home/agent/.host-agents:ro
 
   agent-3:
     <<: *agent-base
@@ -107,6 +115,8 @@ services:
       - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
+      - ~/.claude/skills:/home/agent/.host-skills:ro
+      - ~/.claude/agents:/home/agent/.host-agents:ro
 
 # --- Watch mode -----------------------------------------------
 # Autonomous Claude TUI forwarded to your terminal. You observe.
@@ -131,6 +141,8 @@ services:
       - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
+      - ~/.claude/skills:/home/agent/.host-skills:ro
+      - ~/.claude/agents:/home/agent/.host-agents:ro
 
 # --- Interactive mode ------------------------------------------
 # Plain Claude TUI. You drive, no automation.
@@ -154,3 +166,5 @@ services:
       - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
+      - ~/.claude/skills:/home/agent/.host-skills:ro
+      - ~/.claude/agents:/home/agent/.host-agents:ro
