@@ -1,4 +1,19 @@
 .env
+.env.*
+!.env.example
 logs/
 .claude/
 .docs/
+
+# Secrets & credentials
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.jks
+credentials*
+*secret*
+!*secret*.sh
+.ssh/
+*.kube/config

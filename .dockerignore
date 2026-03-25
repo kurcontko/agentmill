@@ -1,0 +1,15 @@
+.git
+.github
+.claude
+.docs
+.env
+.env.*
+.DS_Store
+logs/
+worktrees/
+tests/
+assets/
+*.md
+!entrypoint*.sh
+!setup-*.sh
+!auto-trust.exp
