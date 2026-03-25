@@ -21,6 +21,43 @@
 
 ## Quick Start
 
+### Option A: CLI (recommended)
+
+Run agents directly from your project directory — no `.env` files, no `docker compose`.
+
+```bash
+# Install
+curl -fsSL https://raw.githubusercontent.com/kurcontko/autonomous-agents/main/install.sh | bash
+
+# Build the image (first time only)
+git clone https://github.com/kurcontko/autonomous-agents.git /tmp/agentmill
+agentmill build /tmp/agentmill
+
+# Run from your project
+cd your-project
+export ANTHROPIC_API_KEY=sk-...
+agentmill run                                    # headless single agent
+agentmill run --agents 3 --model opus            # multi-agent
+agentmill watch --ralph --max-iterations 10      # autonomous TUI
+agentmill tui                                    # interactive TUI
+agentmill stop                                   # stop running agents
+```
+
+Per-project config: place `.agentmill.yml` in your repo root:
+
+```yaml
+model: sonnet
+prompt: ./prompts/task.md
+max_iterations: 5
+auto_setup: true
+```
+
+See `agentmill --help` for all options.
+
+### Option B: Docker Compose
+
+For advanced setups or when you prefer docker compose.
+
 1. **Configure** — copy `.env.example` to `.env`, set `REPO_PATH` and auth
 2. **Write your prompt** — edit `prompts/PROMPT.md` with the task
 3. **Run** — pick a mode below
@@ -33,12 +70,12 @@ nano prompts/PROMPT.md  # describe the task
 
 ## Authentication
 
-Set one of these in `.env`:
+Set one of these in your environment (CLI) or `.env` (docker compose):
 
 - **API Key** — set `ANTHROPIC_API_KEY`
 - **OAuth Token** — run `claude setup-token` on the host, set `CLAUDE_CODE_OAUTH_TOKEN`
 
-## How to Run
+## How to Run (Docker Compose)
 
 Pick the mode that fits your workflow:
 
