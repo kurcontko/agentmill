@@ -13,6 +13,12 @@ x-common-env: &common-env
 x-agent-base: &agent-base
   build: .
   restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  mem_limit: 4g
+  pids_limit: 256
   volumes: &shared-volumes
     - ./prompts:/prompts
     - ./logs:/workspace/logs
