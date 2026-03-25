@@ -120,6 +120,16 @@ target['enableAllProjectMcpServers'] = True
 if 'enabledPlugins' in host:
     target['enabledPlugins'] = host['enabledPlugins']
 
+# Forward hooks from host settings
+if 'hooks' in host:
+    target['hooks'] = host['hooks']
+
+# Forward env vars from host settings
+if 'env' in host:
+    target_env = target.get('env', {})
+    target_env.update(host['env'])
+    target['env'] = target_env
+
 json.dump(target, open('$TARGET_SETTINGS', 'w'), indent=2)
 " 2>/dev/null || true
 fi
