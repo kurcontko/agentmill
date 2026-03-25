@@ -40,7 +40,10 @@ class PushBranchWithRetriesTests(unittest.TestCase):
         self.seed = self.root / "seed"
         self.worker = self.root / "worker"
         self.logs = self.root / "logs"
-        self.helper = extract_shell_function(Path("entrypoint.sh"), "push_branch_with_retries")
+        self.helper = (
+            extract_shell_function(Path("entrypoint-common.sh"), "push_failure_is_retryable")
+            + extract_shell_function(Path("entrypoint.sh"), "push_branch_with_retries")
+        )
 
         run(["git", "init", "--bare", str(self.origin)], cwd=self.root)
         run(["git", "init", "-b", "main", str(self.seed)], cwd=self.root)
@@ -61,6 +64,12 @@ class PushBranchWithRetriesTests(unittest.TestCase):
         run(["git", "config", "user.name", "Test User"], cwd=self.worker)
         run(["git", "config", "user.email", "test@example.com"], cwd=self.worker)
 
+        self.upstream_worker = self.root / "upstream-worker"
+        run(["git", "clone", str(self.origin), str(self.upstream_worker)], cwd=self.root)
+        run(["git", "checkout", "agent-1"], cwd=self.upstream_worker)
+        run(["git", "config", "user.name", "Test User"], cwd=self.upstream_worker)
+        run(["git", "config", "user.email", "test@example.com"], cwd=self.upstream_worker)
+
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
@@ -69,6 +78,13 @@ class PushBranchWithRetriesTests(unittest.TestCase):
         target.write_text(f"{message}\n")
         run(["git", "add", "change.txt"], cwd=self.worker)
         run(["git", "commit", "-m", message], cwd=self.worker)
+
+    def make_upstream_commit(self, message: str) -> None:
+        target = self.upstream_worker / "upstream.txt"
+        target.write_text(f"{message}\n")
+        run(["git", "add", "upstream.txt"], cwd=self.upstream_worker)
+        run(["git", "commit", "-m", message], cwd=self.upstream_worker)
+        run(["git", "push", "origin", "agent-1"], cwd=self.upstream_worker)
 
     def run_helper(self) -> subprocess.CompletedProcess[str]:
         script = textwrap.dedent(
@@ -94,7 +110,7 @@ class PushBranchWithRetriesTests(unittest.TestCase):
         )
         return subprocess.run(["bash", "-lc", script], capture_output=True, text=True)
 
-    def test_stops_after_three_failed_retries(self) -> None:
+    def test_stops_retrying_on_permanent_push_failure(self) -> None:
         self.make_worker_commit("reject me")
         hook = self.origin / "hooks" / "pre-receive"
         hook.write_text("#!/usr/bin/env bash\nexit 1\n")
@@ -103,8 +119,19 @@ class PushBranchWithRetriesTests(unittest.TestCase):
         result = self.run_helper()
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.count("Push failed, rebasing and retrying"), 3)
-        self.assertIn("ERROR: push failed after 3 retries", result.stdout)
+        self.assertNotIn("Push failed, rebasing and retrying", result.stdout)
+        self.assertIn("ERROR: git push failed permanently for branch agent-1", result.stdout)
+        self.assertIn("remote rejected", result.stdout)
+
+    def test_retries_non_fast_forward_failures(self) -> None:
+        self.make_upstream_commit("upstream change")
+        self.make_worker_commit("local change")
+
+        result = self.run_helper()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count("Push failed, rebasing and retrying"), 1)
+        self.assertNotIn("ERROR: git push failed permanently", result.stdout)
 
     def test_returns_success_without_retries_when_push_works(self) -> None:
         self.make_worker_commit("allow me")

@@ -18,6 +18,8 @@ GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
 AUTO_RALPH_MAX_ITERATIONS="${AUTO_RALPH_MAX_ITERATIONS:-${MAX_ITERATIONS:-10}}"
 AUTO_RALPH_COMPLETION_PROMISE="${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}"
 
+. /entrypoint-common.sh
+
 mkdir -p "$LOG_DIR"
 
 log() {
@@ -27,27 +29,9 @@ log() {
     return 0
 }
 
-# --- Auth -----------------------------------------------------
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-    log "Auth: using ANTHROPIC_API_KEY"
-elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-    log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
-    if [[ ! -f "$HOME/.claude.json" ]]; then
-        echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
-    fi
-else
-    log "ERROR: No auth configured."
-    log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
-    log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (subscription, from 'claude setup-token')"
-    exit 1
-fi
-
-# --- Merge host Claude config (MCP, plugins, settings) --------
-/setup-claude-config.sh
-
-# --- Git config -----------------------------------------------
-git config --global user.name "$GIT_USER"
-git config --global user.email "$GIT_EMAIL"
+require_auth
+merge_host_claude_config
+configure_git_identity "$GIT_USER" "$GIT_EMAIL"
 
 # --- Repo check -----------------------------------------------
 if [[ ! -d "$REPO_DIR/.git" ]] && [[ ! -f "$REPO_DIR/.git" ]]; then
@@ -58,33 +42,24 @@ fi
 cd "$REPO_DIR"
 log "Repo ready at $REPO_DIR"
 
-log "Preparing repo environment..."
-. /setup-repo-env.sh "$REPO_DIR"
-log "Repo environment ready."
+prepare_repo_environment "$REPO_DIR"
 
 # --- Override project settings for autonomous mode ------------
 # The host repo may have restrictive .claude/settings.local.json
 # Back up original and restore on exit
-SETTINGS_LOCAL=".claude/settings.local.json"
-SETTINGS_BACKUP=""
 RALPH_RULE_FILE=".claude/rules/agentmill-ralph-task.md"
-mkdir -p .claude
-if [[ -f "$SETTINGS_LOCAL" ]]; then
-    SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
-fi
-SETTINGS_JSON='{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"}}'
+backup_project_settings ".claude/settings.local.json"
 if [[ "${RESPAWN:-false}" == "true" ]]; then
-    # Add Stop hook to exit Claude when done, so the respawn loop can restart it
-    SETTINGS_JSON='{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"},"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"kill -TERM $PPID 2>/dev/null; exit 0"}]}]}}'
+    # Respawn mode keeps the same autonomous permissions and only adds a Stop
+    # hook so the parent loop can restart Claude between sessions.
+    SETTINGS_JSON="$(autonomous_settings_json true)"
+else
+    SETTINGS_JSON="$(autonomous_settings_json)"
 fi
-echo "$SETTINGS_JSON" > "$SETTINGS_LOCAL"
+write_project_settings "$SETTINGS_JSON"
 
 restore_settings() {
-    if [[ -n "$SETTINGS_BACKUP" ]]; then
-        echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
-    else
-        rm -f "$SETTINGS_LOCAL"
-    fi
+    restore_project_settings
     rm -f "$RALPH_RULE_FILE"
     return 0
 }

@@ -14,6 +14,8 @@ LOOP_DELAY="${LOOP_DELAY:-5}"  # seconds between iterations
 AUTO_COMMIT="${AUTO_COMMIT:-wip}"  # "off" = no auto-commit, "wip" = safety-net [wip] only, "on" = always commit (legacy)
 PUSH_REBASE_MAX_RETRIES="${PUSH_REBASE_MAX_RETRIES:-3}"
 
+. /entrypoint-common.sh
+
 # — State ————————————————————————————————————————
 ITERATION=0
 SHUTTING_DOWN=false
@@ -38,11 +40,22 @@ push_branch_with_retries() {
     local branch="$1"
     local max_retries="${2:-$PUSH_REBASE_MAX_RETRIES}"
     local retry=0
+    local push_output=""
 
     log "Pushing to upstream (branch: $branch)..."
     while true; do
-        if git push origin "$branch" 2>/dev/null; then
+        if push_output="$(git push --porcelain origin "$branch" 2>&1)"; then
             return 0
+        fi
+
+        if ! push_failure_is_retryable "$push_output"; then
+            log "ERROR: git push failed permanently for branch $branch"
+            while IFS= read -r line; do
+                if [[ -n "$line" ]]; then
+                    log "git push: $line"
+                fi
+            done <<< "$push_output"
+            return 1
         fi
 
         if [[ "$retry" -ge "$max_retries" ]]; then
@@ -66,27 +79,9 @@ push_branch_with_retries() {
     done
 }
 
-# — Auth check ———————————————————————————————————
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-    log "Auth: using ANTHROPIC_API_KEY"
-elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-    log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
-    if [[ ! -f "$HOME/.claude.json" ]]; then
-        echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
-    fi
-else
-    log "ERROR: No auth configured."
-    log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
-    log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (subscription, from 'claude setup-token')"
-    exit 1
-fi
-
-# — Merge host Claude config (MCP, plugins, settings) ———
-/setup-claude-config.sh
-
-# — Git configuration ————————————————————————————
-git config --global user.name "${GIT_USER}-${AGENT_ID}"
-git config --global user.email "$GIT_EMAIL"
+require_auth
+merge_host_claude_config
+configure_git_identity "$GIT_USER" "$GIT_EMAIL" "$AGENT_ID"
 
 # — Workspace setup ——————————————————————————————
 # Three modes, auto-detected:
@@ -155,32 +150,12 @@ else
     exit 1
 fi
 
-log "Preparing repo environment..."
-. /setup-repo-env.sh "$REPO_DIR"
-log "Repo environment ready."
+prepare_repo_environment "$REPO_DIR"
 
 # — Override project settings for autonomous mode ————————
-SETTINGS_LOCAL=".claude/settings.local.json"
-SETTINGS_BACKUP=""
-mkdir -p .claude
-
-if [[ -f "$SETTINGS_LOCAL" ]]; then
-    SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
-fi
-
-echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit","mcp__*"],"defaultMode":"bypassPermissions"}}' \
-    > "$SETTINGS_LOCAL"
-
-restore_settings() {
-    if [[ -n "$SETTINGS_BACKUP" ]]; then
-        echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
-    else
-        rm -f "$SETTINGS_LOCAL"
-    fi
-    return 0
-}
-
-trap 'restore_settings' EXIT
+backup_project_settings ".claude/settings.local.json"
+write_project_settings "$(autonomous_settings_json)"
+trap 'restore_project_settings' EXIT
 
 # — Main loop ————————————————————————————————————
 log "Starting agent loop (model=$MODEL, max_iterations=$MAX_ITERATIONS)"
