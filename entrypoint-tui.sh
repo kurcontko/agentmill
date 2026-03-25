@@ -6,7 +6,7 @@ set -euo pipefail
 # Use Ralph Loop plugin (/ralph-loop) for autonomous iteration,
 # or interact manually - your choice.
 #
-# Usage: docker compose run dashboard
+# Usage: docker compose run watch
 # --------------------------------------------------------------
 
 REPO_DIR="/workspace/repo"

@@ -21,77 +21,119 @@
 
 ## Quick Start
 
+1. **Configure** — copy `.env.example` to `.env`, set `REPO_PATH` and auth
+2. **Write your prompt** — edit `prompts/PROMPT.md` with the task
+3. **Run** — pick a mode below
+4. **Stop** — `docker compose down` (finishes current session, commits WIP, exits cleanly)
+
 ```bash
-# 1. Configure
-cp .env.example .env
-# Edit .env — set REPO_PATH and auth (API key or OAuth token)
-
-# 2. Write your prompt
-# Edit prompts/PROMPT.md with your task
-
-# 3. Run
-REPO_PATH=/path/to/repo docker compose up agent
-
-# 4. Or watch it work in the TUI
-REPO_PATH=/path/to/repo docker compose run dashboard
-
-# 5. Stop gracefully (finishes current session, commits WIP, exits)
-docker compose down
+cp .env.example .env   # then edit REPO_PATH and auth
+nano prompts/PROMPT.md  # describe the task
 ```
 
 ## Authentication
 
-Set one of these in your `.env`:
+Set one of these in `.env`:
 
-- **API Key**: set `ANTHROPIC_API_KEY`
-- **OAuth Token**: run `claude setup-token` on the host, then set `CLAUDE_CODE_OAUTH_TOKEN`
+- **API Key** — set `ANTHROPIC_API_KEY`
+- **OAuth Token** — run `claude setup-token` on the host, set `CLAUDE_CODE_OAUTH_TOKEN`
 
-## Services
+## How to Run
 
-| Service | Mode | Use case |
-|---------|------|----------|
-| `agent` | Headless loop | Background automation — logs to `./logs/` |
-| `agent-1`, `agent-2`, `agent-3` | Multi-agent | Each agent gets its own branch, syncs via rebase |
-| `dashboard` | TUI + auto-ralph | Watch Claude work in real time (autonomous) |
-| `tui` | TUI manual | Interactive Claude session, no automation |
+Pick the mode that fits your workflow:
+
+---
+
+### 1. `headless` — fire and forget
+
+Claude runs in a loop in the background. No UI — output goes to `./logs/`. Restarts automatically on crash. Best for CI, overnight runs, or when you don't need to watch.
 
 ```bash
-# Single agent
-REPO_PATH=/path/to/repo docker compose up agent
+REPO_PATH=/path/to/repo docker compose up headless
+```
 
-# Multi-agent with per-agent prompts
-PROMPT_FILE_1=/prompts/core.md PROMPT_FILE_2=/prompts/tests.md \
+Loop: pull → run Claude → commit → push → wait → repeat.
+
+---
+
+### 2. `watch` — autonomous TUI, you observe
+
+Full Claude Code TUI in your terminal. Claude works autonomously (all tool calls auto-approved) while you watch file edits, tool calls, and reasoning in real time. You're an observer, not a driver.
+
+```bash
+# Single autonomous session, then exit
+REPO_PATH=/path/to/repo docker compose run watch
+
+# With Ralph loop — bounded iteration (runs up to N times, then stops)
+REPO_PATH=/path/to/repo AUTO_RALPH=true AUTO_RALPH_MAX_ITERATIONS=10 \
+  docker compose run watch
+
+# With respawn — restart Claude automatically after each session
+REPO_PATH=/path/to/repo RESPAWN=true docker compose run watch
+```
+
+---
+
+### 3. `interactive` — you drive
+
+Plain Claude Code TUI. No prompt injected, no automation. You type, Claude responds. Same as running `claude` locally, but inside the container with the repo and tools already set up.
+
+```bash
+REPO_PATH=/path/to/repo docker compose run interactive
+```
+
+---
+
+### 4. `agent-1`, `agent-2`, `agent-3` — parallel workers
+
+Multiple headless agents on the same repo. Each pushes to its own branch (`agent-1`, `agent-2`, etc.) and rebases on conflict. Assign different prompts for different roles.
+
+```bash
+# Two agents, different tasks
+PROMPT_FILE_1=/prompts/features.md PROMPT_FILE_2=/prompts/tests.md \
   REPO_PATH=/path/to/repo docker compose up agent-1 agent-2
 
-# Dashboard with Ralph loop
-REPO_PATH=/path/to/repo AUTO_RALPH=true docker compose run dashboard
-
-# Plain interactive TUI
-REPO_PATH=/path/to/repo docker compose run tui
+# Three agents, same branch (rebase on conflict)
+AGENT_BRANCH=main REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agent-3
 ```
 
 ## Configuration
+
+**All modes:**
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
 | `REPO_PATH` | *(required)* | Absolute path to the repo on your host |
 | `ANTHROPIC_API_KEY` | — | API key auth |
 | `CLAUDE_CODE_OAUTH_TOKEN` | — | OAuth token auth (alternative to API key) |
-| `MODEL` | `sonnet` | Claude model to use |
-| `MAX_ITERATIONS` | `0` (infinite) | Stop after N loop iterations |
-| `LOOP_DELAY` | `5` | Seconds between iterations |
+| `MODEL` | `sonnet` | Claude model (`sonnet`, `opus`, etc.) |
 | `PROMPT_FILE` | `/prompts/PROMPT.md` | Prompt file path inside the container |
 | `GIT_USER` | `agentmill` | Git commit author name |
 | `GIT_EMAIL` | `agent@agentmill` | Git commit author email |
 | `AUTO_SETUP` | `true` | Auto-detect and install repo dependencies on start |
 | `REPO_SETUP_COMMAND` | — | Custom bootstrap command (overrides auto-detect) |
 | `EXTRA_PYTHON_TOOLS` | — | Additional pip packages to install (e.g. `ruff pytest`) |
-| `AGENT_BRANCH` | auto | Branch name for multi-agent services (default: `agent-$ID`) |
-| `AUTO_RALPH` | `false` | Auto-start Ralph loop in dashboard |
-| `AUTO_RALPH_MAX_ITERATIONS` | `10` | Ralph loop iteration cap |
-| `RESPAWN` | `false` | Restart TUI after Claude exits |
 
-**Multi-agent only:** `PROMPT_FILE_1`, `PROMPT_FILE_2`, `PROMPT_FILE_3` override prompts per agent.
+**Headless / multi-agent only:**
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `MAX_ITERATIONS` | `0` (infinite) | Stop after N loop iterations |
+| `LOOP_DELAY` | `5` | Seconds between iterations |
+| `AUTO_COMMIT` | `wip` | `wip` = commit uncommitted changes as safety net, `on` = always commit, `off` = never |
+| `AGENT_BRANCH` | auto | Branch name for multi-agent (default: `agent-$ID`) |
+| `PROMPT_FILE_1/2/3` | `PROMPT_FILE` | Per-agent prompt overrides (multi-agent only) |
+
+**Watch / interactive only:**
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `RESPAWN` | `false` | Restart Claude automatically after each session |
+| `LOOP_DELAY` | `5` | Seconds between respawns |
+| `SKIP_PROMPT` | `false` | Skip prompt injection (set automatically for `interactive`) |
+| `AUTO_RALPH` | `false` | Auto-start Ralph loop for bounded autonomous iteration |
+| `AUTO_RALPH_MAX_ITERATIONS` | `10` | Max Ralph loop iterations |
+| `AUTO_RALPH_COMPLETION_PROMISE` | `TASK_COMPLETE` | Token that signals task completion to Ralph |
 
 ## Auto-Setup
 
@@ -103,6 +145,14 @@ When `AUTO_SETUP=true` (default), AgentMill bootstraps the repo's dev environmen
 4. `requirements.txt` → `pip install -r requirements.txt`
 
 The `.venv/bin` is prepended to `PATH`, so tools like `pytest` and `ruff` are available to Claude.
+
+**Recommendation:** Add a `Makefile` to your upstream repo with an `install` target that sets up the full dev environment. Then point AgentMill at it:
+
+```bash
+REPO_SETUP_COMMAND='make install' docker compose up headless
+```
+
+This keeps build logic in the repo where it belongs, and any setup — system deps, virtual envs, code generation — just works.
 
 ## Volumes
 
@@ -116,7 +166,7 @@ The `.venv/bin` is prepended to `PATH`, so tools like `pytest` and `ruff` are av
 
 ## Apple Silicon
 
-If a dependency lacks a Linux `arm64` wheel, force x86 emulation:
+If a dependency lacks a Linux `arm64` wheel, build or force x86 emulation:
 
 ```bash
 DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose build

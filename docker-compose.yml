@@ -22,10 +22,10 @@ x-agent-base: &agent-base
     - ~/.claude/commands:/home/agent/.claude/commands:ro
 
 services:
-# --- Single agent (default) -----------------------------------
-# Mounts repo directly. Simple, no sync overhead.
-# Usage: docker compose up agent
-  agent:
+# --- Headless (default) ---------------------------------------
+# Autonomous loop, no UI. Output goes to ./logs/.
+# Usage: docker compose up headless
+  headless:
     <<: *agent-base
     environment:
       <<: *common-env
@@ -108,10 +108,10 @@ services:
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
 
-# --- TUI dashboard --------------------------------------------
-# Forwards Claude Code's interactive UI to your terminal.
-# Usage: docker compose run dashboard
-  dashboard:
+# --- Watch mode -----------------------------------------------
+# Autonomous Claude TUI forwarded to your terminal. You observe.
+# Usage: docker compose run watch
+  watch:
     <<: *agent-base
     entrypoint: ["/entrypoint-tui.sh"]
     tty: true
@@ -132,10 +132,10 @@ services:
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
 
-# --- TUI manual -----------------------------------------------
-# Plain Claude TUI for manual interactive work. No ralph-loop.
-# Usage: docker compose run tui
-  tui:
+# --- Interactive mode ------------------------------------------
+# Plain Claude TUI. You drive, no automation.
+# Usage: docker compose run interactive
+  interactive:
     <<: *agent-base
     entrypoint: ["/entrypoint-tui.sh"]
     tty: true

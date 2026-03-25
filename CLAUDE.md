@@ -10,9 +10,10 @@ docker build -t agentmill .
 DOCKER_DEFAULT_PLATFORM=linux/amd64 docker build -t agentmill .  # macOS
 
 # Run
-REPO_PATH=/path/to/repo docker compose up agent                    # single agent
+REPO_PATH=/path/to/repo docker compose up headless                  # headless loop
 REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agent-3  # multi-agent
-REPO_PATH=/path/to/repo docker compose run dashboard                # interactive TUI
+REPO_PATH=/path/to/repo docker compose run watch                    # autonomous TUI
+REPO_PATH=/path/to/repo docker compose run interactive              # manual TUI
 
 # Test
 python3 -m unittest tests.test_entrypoint_retry_limit

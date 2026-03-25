@@ -37,5 +37,5 @@ RUN mkdir -p /home/agent/.claude && \
     echo '{"hasCompletedOnboarding":true,"hasTrustDialogAccepted":true,"hasTrustDialogHooksAccepted":true}' > /home/agent/.claude/claude.json && \
     echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep"],"defaultMode":"bypassPermissions"}}' > /home/agent/.claude/settings.json
 
-# Default: headless pipe mode. Use entrypoint-tui.sh for TUI dashboard.
+# Default: headless pipe mode. Use entrypoint-tui.sh for watch/interactive modes.
 ENTRYPOINT ["/entrypoint.sh"]
