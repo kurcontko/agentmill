@@ -1,7 +1,9 @@
 x-common-env: &common-env
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
   CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   MODEL: ${MODEL:-sonnet}
+  CODEX_MODEL: ${CODEX_MODEL:-}
   GIT_USER: ${GIT_USER:-agentmill}
   GIT_EMAIL: ${GIT_EMAIL:-agent@agentmill}
   AUTO_SETUP: ${AUTO_SETUP:-true}
@@ -154,3 +156,77 @@ services:
       - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
+
+# ============================================================
+# Codex services
+# ============================================================
+
+# --- Codex headless agent (single) ----------------------------
+# Runs codex exec in a respawning loop. Same pattern as `agent`.
+# Usage: REPO_PATH=/path/to/repo docker compose up codex-agent
+  codex-agent:
+    <<: *agent-base
+    entrypoint: ["/entrypoint-codex.sh"]
+    environment:
+      <<: *common-env
+      AGENT_ID: "1"
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
+      LOOP_DELAY: ${LOOP_DELAY:-5}
+    volumes:
+      - ./prompts:/prompts
+      - ./logs:/workspace/logs
+      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
+      - ~/.codex:/home/agent/.codex:ro
+
+# --- Codex multi-agent headless --------------------------------
+  codex-agent-1:
+    <<: *agent-base
+    entrypoint: ["/entrypoint-codex.sh"]
+    environment:
+      <<: *common-env
+      AGENT_ID: "1"
+      AGENT_BRANCH: ${AGENT_BRANCH:-}
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
+      LOOP_DELAY: ${LOOP_DELAY:-5}
+      PROMPT_FILE: ${PROMPT_FILE_1:-/prompts/PROMPT.md}
+    volumes:
+      - ./prompts:/prompts
+      - ./logs:/workspace/logs
+      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/upstream
+      - ~/.codex:/home/agent/.codex:ro
+
+  codex-agent-2:
+    <<: *agent-base
+    entrypoint: ["/entrypoint-codex.sh"]
+    environment:
+      <<: *common-env
+      AGENT_ID: "2"
+      AGENT_BRANCH: ${AGENT_BRANCH:-}
+      MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
+      LOOP_DELAY: ${LOOP_DELAY:-5}
+      PROMPT_FILE: ${PROMPT_FILE_2:-/prompts/PROMPT.md}
+    volumes:
+      - ./prompts:/prompts
+      - ./logs:/workspace/logs
+      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/upstream
+      - ~/.codex:/home/agent/.codex:ro
+
+# --- Codex TUI (interactive, with optional respawn) ------------
+# Usage: docker compose run codex-tui
+# Respawn mode: RESPAWN=true docker compose run codex-tui
+  codex-tui:
+    <<: *agent-base
+    entrypoint: ["/entrypoint-codex-tui.sh"]
+    tty: true
+    stdin_open: true
+    restart: "no"
+    environment:
+      <<: *common-env
+      CODEX_APPROVAL: ${CODEX_APPROVAL:-on-request}
+      RESPAWN: ${RESPAWN:-false}
+      LOOP_DELAY: ${LOOP_DELAY:-5}
+    volumes:
+      - ./prompts:/prompts
+      - ./logs:/workspace/logs
+      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
+      - ~/.codex:/home/agent/.codex

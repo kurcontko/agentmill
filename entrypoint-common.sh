@@ -16,6 +16,19 @@ require_auth() {
     fi
 }
 
+require_codex_auth() {
+    if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+        log "Auth: using OPENAI_API_KEY"
+    elif [[ -d "$HOME/.codex" ]]; then
+        log "Auth: using mounted ~/.codex state"
+    else
+        log "ERROR: No Codex auth configured."
+        log "  Option 1: Set OPENAI_API_KEY env var"
+        log "  Option 2: Mount ~/.codex from a host that already ran 'codex --login'"
+        exit 1
+    fi
+}
+
 merge_host_claude_config() {
     /setup-claude-config.sh
 }
