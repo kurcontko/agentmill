@@ -5,7 +5,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENTRYPOINT_SH="$REPO_ROOT/entrypoint.sh"
 
 extract_function() {
-    sed -n "/^$1()/,/^}/p" "$ENTRYPOINT_SH"
+    local func_name="$1"
+    sed -n "/^${func_name}()/,/^}/p" "$ENTRYPOINT_SH"
+    return 0
 }
 
 test_push_branch_with_retries_stops_after_three_retries() {
@@ -17,10 +19,12 @@ test_push_branch_with_retries_stops_after_three_retries() {
 
     log() {
         logs+=("$*")
+        return 0
     }
 
     git() {
-        case "$1" in
+        local cmd="$1"
+        case "$cmd" in
             push)
                 push_calls=$((push_calls + 1))
                 return 1
@@ -30,7 +34,7 @@ test_push_branch_with_retries_stops_after_three_retries() {
                 return 0
                 ;;
             rebase)
-                if [ "${2:-}" = "--abort" ]; then
+                if [[ "${2:-}" = "--abort" ]]; then
                     abort_calls=$((abort_calls + 1))
                     return 0
                 fi
@@ -52,11 +56,11 @@ test_push_branch_with_retries_stops_after_three_retries() {
     local status=$?
     set -e
 
-    [ "$status" -eq 1 ]
-    [ "$push_calls" -eq 4 ]
-    [ "$fetch_calls" -eq 3 ]
-    [ "$rebase_calls" -eq 3 ]
-    [ "$abort_calls" -eq 0 ]
+    [[ "$status" -eq 1 ]]
+    [[ "$push_calls" -eq 4 ]]
+    [[ "$fetch_calls" -eq 3 ]]
+    [[ "$rebase_calls" -eq 3 ]]
+    [[ "$abort_calls" -eq 0 ]]
     printf '%s\n' "${logs[@]}" | grep -Fx 'ERROR: push failed after 3 retries' >/dev/null
 }
 
@@ -69,10 +73,12 @@ test_push_branch_with_retries_aborts_on_rebase_conflict() {
 
     log() {
         logs+=("$*")
+        return 0
     }
 
     git() {
-        case "$1" in
+        local cmd="$1"
+        case "$cmd" in
             push)
                 push_calls=$((push_calls + 1))
                 return 1
@@ -82,7 +88,7 @@ test_push_branch_with_retries_aborts_on_rebase_conflict() {
                 return 0
                 ;;
             rebase)
-                if [ "${2:-}" = "--abort" ]; then
+                if [[ "${2:-}" = "--abort" ]]; then
                     abort_calls=$((abort_calls + 1))
                     return 0
                 fi
@@ -104,11 +110,11 @@ test_push_branch_with_retries_aborts_on_rebase_conflict() {
     local status=$?
     set -e
 
-    [ "$status" -eq 1 ]
-    [ "$push_calls" -eq 1 ]
-    [ "$fetch_calls" -eq 1 ]
-    [ "$rebase_calls" -eq 1 ]
-    [ "$abort_calls" -eq 1 ]
+    [[ "$status" -eq 1 ]]
+    [[ "$push_calls" -eq 1 ]]
+    [[ "$fetch_calls" -eq 1 ]]
+    [[ "$rebase_calls" -eq 1 ]]
+    [[ "$abort_calls" -eq 1 ]]
     printf '%s\n' "${logs[@]}" | grep -Fx 'WARN: Rebase conflict on retry 1/3, will retry next iteration' >/dev/null
 }
 

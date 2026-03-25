@@ -8,29 +8,35 @@ EXTRA_PYTHON_TOOLS="${EXTRA_PYTHON_TOOLS:-}"
 
 repo_log() {
     echo "[repo-setup] $*"
+    return 0
 }
 
 has_pyproject_dev_extra() {
-    [ -f pyproject.toml ] && rg -q '^\[project\.optional-dependencies\]' pyproject.toml && rg -q '^\s*dev\s*=' pyproject.toml
+    [[ -f pyproject.toml ]] && rg -q '^\[project\.optional-dependencies\]' pyproject.toml && rg -q '^\s*dev\s*=' pyproject.toml
+    local rc=$?
+    return "$rc"
 }
 
 has_pyproject_dev_group() {
-    [ -f pyproject.toml ] && rg -q '^\[dependency-groups\]' pyproject.toml && rg -q '^\s*dev\s*=' pyproject.toml
+    [[ -f pyproject.toml ]] && rg -q '^\[dependency-groups\]' pyproject.toml && rg -q '^\s*dev\s*=' pyproject.toml
+    local rc=$?
+    return "$rc"
 }
 
 activate_venv() {
-    if [ -d "$REPO_DIR/.venv/bin" ]; then
+    if [[ -d "$REPO_DIR/.venv/bin" ]]; then
         export PATH="$REPO_DIR/.venv/bin:$PATH"
         repo_log "Using virtualenv at $REPO_DIR/.venv"
     fi
+    return 0
 }
 
 install_extra_python_tools() {
-    if [ -z "$EXTRA_PYTHON_TOOLS" ]; then
+    if [[ -z "$EXTRA_PYTHON_TOOLS" ]]; then
         return
     fi
 
-    if [ ! -x "$REPO_DIR/.venv/bin/python" ]; then
+    if [[ ! -x "$REPO_DIR/.venv/bin/python" ]]; then
         repo_log "Creating virtualenv for extra Python tools"
         python3 -m venv "$REPO_DIR/.venv"
     fi
@@ -41,13 +47,13 @@ install_extra_python_tools() {
 
 cd "$REPO_DIR"
 
-if [ "$AUTO_SETUP" != "true" ]; then
+if [[ "$AUTO_SETUP" != "true" ]]; then
     repo_log "Auto setup disabled"
     activate_venv
     return 0 2>/dev/null || exit 0
 fi
 
-if [ -n "$REPO_SETUP_COMMAND" ]; then
+if [[ -n "$REPO_SETUP_COMMAND" ]]; then
     repo_log "Running custom setup command"
     eval "$REPO_SETUP_COMMAND"
     activate_venv
@@ -56,8 +62,8 @@ if [ -n "$REPO_SETUP_COMMAND" ]; then
     return 0 2>/dev/null || exit 0
 fi
 
-if [ -f pyproject.toml ]; then
-    if [ -f uv.lock ] && command -v uv >/dev/null 2>&1; then
+if [[ -f pyproject.toml ]]; then
+    if [[ -f uv.lock ]] && command -v uv >/dev/null 2>&1; then
         uv_args=(sync --frozen)
         if has_pyproject_dev_extra; then
             uv_args+=(--extra dev)
@@ -67,18 +73,18 @@ if [ -f pyproject.toml ]; then
         fi
         repo_log "Running: uv ${uv_args[*]}"
         uv "${uv_args[@]}"
-    elif [ -f poetry.lock ] && command -v poetry >/dev/null 2>&1; then
+    elif [[ -f poetry.lock ]] && command -v poetry >/dev/null 2>&1; then
         repo_log "Running: poetry install"
         poetry config virtualenvs.in-project true 2>/dev/null || true
         poetry install --no-interaction
-    elif [ -f poetry.lock ]; then
+    elif [[ -f poetry.lock ]]; then
         # Poetry lockfile exists but poetry not installed — install it, then use it
         repo_log "Installing Poetry and running: poetry install"
         python3 -m pip install --no-cache-dir poetry
         poetry config virtualenvs.in-project true 2>/dev/null || true
         poetry install --no-interaction
     else
-        if [ ! -d .venv ]; then
+        if [[ ! -d .venv ]]; then
             repo_log "Creating virtualenv"
             python3 -m venv .venv
         fi
@@ -91,8 +97,8 @@ if [ -f pyproject.toml ]; then
             python -m pip install --no-cache-dir -e .
         fi
     fi
-elif [ -f requirements.txt ]; then
-    if [ ! -d .venv ]; then
+elif [[ -f requirements.txt ]]; then
+    if [[ ! -d .venv ]]; then
         repo_log "Creating virtualenv"
         python3 -m venv .venv
     fi
