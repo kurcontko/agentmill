@@ -1,0 +1,11 @@
+{
+  "dataset": "princeton-nlp/SWE-bench_Lite",
+  "split": "test",
+  "provider": "local",
+  "model": "openai/gpt-oss-120b",
+  "max_iterations": 2,
+  "timeout_seconds": 900,
+  "total_tasks": 10,
+  "input_cost_per_m": 0.0,
+  "output_cost_per_m": 0.0
+}
