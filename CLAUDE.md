@@ -5,27 +5,32 @@ Docker-based framework for running autonomous AI agents (Claude Code) in respawn
 ## Commands
 
 ```bash
-# Build
-docker build -t agentmill .
-DOCKER_DEFAULT_PLATFORM=linux/amd64 docker build -t agentmill .  # macOS
+# CLI (recommended) — run from any git repo
+agentmill run                          # headless single agent
+agentmill run --agents 3               # multi-agent
+agentmill watch --ralph                # autonomous TUI
+agentmill tui                          # interactive TUI
+agentmill stop                         # stop agents
+agentmill status                       # list running agents
 
-# Run
-REPO_PATH=/path/to/repo docker compose up headless                  # headless loop
-REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agent-3  # multi-agent
-REPO_PATH=/path/to/repo docker compose run watch                    # autonomous TUI
-REPO_PATH=/path/to/repo docker compose run interactive              # manual TUI
+# Docker Compose (advanced)
+docker build -t agentmill .
+REPO_PATH=/path/to/repo docker compose up headless
+REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agent-3
+REPO_PATH=/path/to/repo docker compose run watch
 
 # Test
 python3 -m unittest tests.test_entrypoint_retry_limit
 bash tests/test_entrypoint_push_retry.sh
 
 # Lint
-shellcheck entrypoint.sh entrypoint-tui.sh
+shellcheck entrypoint.sh entrypoint-tui.sh bin/agentmill
 ```
 
 ## Architecture
 
 ```
+bin/agentmill          # CLI wrapper — run agents from any git repo
 entrypoint.sh          # Claude headless agent loop
 entrypoint-tui.sh      # Claude interactive TUI mode
 setup-repo-env.sh      # Auto-bootstrap repo (uv/poetry/pip detection)

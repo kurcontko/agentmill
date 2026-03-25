@@ -1,0 +1,495 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# AgentMill CLI — run autonomous agents from any git repo
+# Usage: agentmill run | tui | watch | stop | status | build | version
+
+VERSION="0.1.0"
+IMAGE="${AGENTMILL_IMAGE:-agentmill}"
+
+# ── Helpers ────────────────────────────────────────────────────
+
+die()  { echo "agentmill: error: $*" >&2; exit 1; }
+info() { echo "agentmill: $*"; }
+
+# Cross-platform md5 (macOS vs Linux)
+hash_string() {
+    if command -v md5sum &>/dev/null; then
+        echo -n "$1" | md5sum | cut -c1-8
+    elif command -v md5 &>/dev/null; then
+        echo -n "$1" | md5 -q | cut -c1-8
+    else
+        # Fallback: use cksum
+        echo -n "$1" | cksum | cut -d' ' -f1
+    fi
+}
+
+# Cross-platform realpath fallback
+resolve_path() {
+    if command -v realpath &>/dev/null; then
+        realpath "$1"
+    else
+        cd "$1" && pwd
+    fi
+}
+
+# ── Repo Detection ────────────────────────────────────────────
+
+detect_repo() {
+    if [[ -n "${OPT_REPO:-}" ]]; then
+        REPO_PATH="$(resolve_path "$OPT_REPO")"
+    else
+        REPO_PATH="$(git rev-parse --show-toplevel 2>/dev/null)" \
+            || die "not inside a git repository (use --repo PATH)"
+    fi
+    [[ -d "$REPO_PATH/.git" ]] || [[ -f "$REPO_PATH/.git" ]] \
+        || die "not a git repository: $REPO_PATH"
+    PROJECT_SLUG="$(hash_string "$REPO_PATH")"
+}
+
+# ── Config File Parsing ───────────────────────────────────────
+# Reads .agentmill.yml from repo root. Simple flat key: value format.
+# CLI flags always take priority.
+
+load_config() {
+    local config_file="$REPO_PATH/.agentmill.yml"
+    [[ -f "$config_file" ]] || return 0
+
+    info "loading config from .agentmill.yml"
+
+    # Only set if not already set by CLI flags (${VAR:-} is empty)
+    : "${OPT_MODEL:=$(sed -n 's/^model: *//p' "$config_file" | head -1)}"
+    : "${OPT_PROMPT:=$(sed -n 's/^prompt: *//p' "$config_file" | head -1)}"
+    : "${OPT_MAX_ITERATIONS:=$(sed -n 's/^max_iterations: *//p' "$config_file" | head -1)}"
+    : "${OPT_LOOP_DELAY:=$(sed -n 's/^loop_delay: *//p' "$config_file" | head -1)}"
+    : "${OPT_AUTO_SETUP:=$(sed -n 's/^auto_setup: *//p' "$config_file" | head -1)}"
+    : "${OPT_SETUP_COMMAND:=$(sed -n 's/^setup_command: *//p' "$config_file" | head -1)}"
+    : "${OPT_AGENTS:=$(sed -n 's/^agents: *//p' "$config_file" | head -1)}"
+    : "${OPT_BRANCH:=$(sed -n 's/^branch: *//p' "$config_file" | head -1)}"
+    : "${OPT_IMAGE_CFG:=$(sed -n 's/^image: *//p' "$config_file" | head -1)}"
+}
+
+# ── Claude Config Mounts ──────────────────────────────────────
+# Mirror docker-compose.yml: mount host Claude configs into container
+
+build_claude_mounts() {
+    CLAUDE_MOUNTS=()
+    local home="${HOME}"
+
+    # ~/.claude.json → host claude config
+    if [[ -f "$home/.claude.json" ]]; then
+        CLAUDE_MOUNTS+=(-v "$home/.claude.json:/home/agent/.host-claude.json:ro")
+    fi
+
+    # ~/.claude/settings.json → host settings
+    if [[ -f "$home/.claude/settings.json" ]]; then
+        CLAUDE_MOUNTS+=(-v "$home/.claude/settings.json:/home/agent/.claude/settings.host.json:ro")
+    fi
+
+    # ~/.claude/plugins → host plugins
+    if [[ -d "$home/.claude/plugins" ]]; then
+        CLAUDE_MOUNTS+=(-v "$home/.claude/plugins:/home/agent/.host-plugins:ro")
+    fi
+
+    # ~/.claude/commands → host commands
+    if [[ -d "$home/.claude/commands" ]]; then
+        CLAUDE_MOUNTS+=(-v "$home/.claude/commands:/home/agent/.claude/commands:ro")
+    fi
+}
+
+# ── Prompt Resolution ─────────────────────────────────────────
+# Priority: --prompt flag > .agentmill/prompt.md > built-in /prompts/PROMPT.md
+
+resolve_prompt() {
+    PROMPT_MOUNTS=()
+    PROMPT_FILE_ENV="/prompts/PROMPT.md"  # default: baked into image
+
+    if [[ -n "${OPT_PROMPT:-}" ]]; then
+        # Resolve relative to repo root
+        local prompt_path
+        if [[ "$OPT_PROMPT" = /* ]]; then
+            prompt_path="$OPT_PROMPT"
+        else
+            prompt_path="$REPO_PATH/$OPT_PROMPT"
+        fi
+        [[ -f "$prompt_path" ]] || die "prompt file not found: $prompt_path"
+
+        local prompt_dir prompt_name
+        prompt_dir="$(cd "$(dirname "$prompt_path")" && pwd)"
+        prompt_name="$(basename "$prompt_path")"
+        PROMPT_MOUNTS+=(-v "$prompt_dir:/prompts:ro")
+        PROMPT_FILE_ENV="/prompts/$prompt_name"
+
+    elif [[ -f "$REPO_PATH/.agentmill/prompt.md" ]]; then
+        PROMPT_MOUNTS+=(-v "$REPO_PATH/.agentmill:/prompts:ro")
+        PROMPT_FILE_ENV="/prompts/prompt.md"
+    fi
+    # else: use built-in /prompts/PROMPT.md from the image
+}
+
+# ── Auth Check ────────────────────────────────────────────────
+
+check_auth() {
+    if [[ -z "${ANTHROPIC_API_KEY:-}" ]] && [[ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+        die "set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in your environment"
+    fi
+}
+
+# ── Container Name ────────────────────────────────────────────
+
+container_name() {
+    local agent_id="${1:-1}"
+    echo "agentmill-${PROJECT_SLUG}-${agent_id}"
+}
+
+# ── Build Common Docker Args ──────────────────────────────────
+
+build_common_args() {
+    local agent_id="${1:-1}"
+
+    DOCKER_ARGS=(
+        --name "$(container_name "$agent_id")"
+        --rm
+    )
+
+    # Auth
+    [[ -n "${ANTHROPIC_API_KEY:-}" ]] && DOCKER_ARGS+=(-e "ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY")
+    [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] && DOCKER_ARGS+=(-e "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN")
+
+    # Core env vars
+    DOCKER_ARGS+=(
+        -e "MODEL=${OPT_MODEL:-sonnet}"
+        -e "AGENT_ID=$agent_id"
+        -e "MAX_ITERATIONS=${OPT_MAX_ITERATIONS:-0}"
+        -e "LOOP_DELAY=${OPT_LOOP_DELAY:-5}"
+        -e "PROMPT_FILE=$PROMPT_FILE_ENV"
+        -e "AUTO_SETUP=${OPT_AUTO_SETUP:-true}"
+        -e "GIT_USER=${GIT_USER:-agentmill}"
+        -e "GIT_EMAIL=${GIT_EMAIL:-agent@agentmill}"
+    )
+
+    # Optional env vars
+    [[ -n "${OPT_SETUP_COMMAND:-}" ]] && DOCKER_ARGS+=(-e "REPO_SETUP_COMMAND=$OPT_SETUP_COMMAND")
+    [[ -n "${OPT_BRANCH:-}" ]] && DOCKER_ARGS+=(-e "AGENT_BRANCH=$OPT_BRANCH")
+    [[ -n "${EXTRA_PYTHON_TOOLS:-}" ]] && DOCKER_ARGS+=(-e "EXTRA_PYTHON_TOOLS=$EXTRA_PYTHON_TOOLS")
+
+    # Extra user-specified env vars
+    for env_pair in "${EXTRA_ENVS[@]+"${EXTRA_ENVS[@]}"}"; do
+        DOCKER_ARGS+=(-e "$env_pair")
+    done
+
+    # Logs directory — inside the repo at .agentmill/logs/
+    local logs_dir="$REPO_PATH/.agentmill/logs"
+    mkdir -p "$logs_dir"
+    DOCKER_ARGS+=(-v "$logs_dir:/workspace/logs")
+
+    # Prompt mounts
+    DOCKER_ARGS+=("${PROMPT_MOUNTS[@]+"${PROMPT_MOUNTS[@]}"}")
+
+    # Claude config mounts
+    DOCKER_ARGS+=("${CLAUDE_MOUNTS[@]+"${CLAUDE_MOUNTS[@]}"}")
+}
+
+# ── Subcommand: run ───────────────────────────────────────────
+
+cmd_run() {
+    local num_agents="${OPT_AGENTS:-1}"
+    check_auth
+    detect_repo
+    load_config
+    num_agents="${OPT_AGENTS:-1}"
+    build_claude_mounts
+    resolve_prompt
+
+    if [[ "$num_agents" -gt 1 ]]; then
+        run_multi_agent "$num_agents"
+    else
+        run_single_agent
+    fi
+}
+
+run_single_agent() {
+    build_common_args 1
+
+    # Single agent: mount repo at /workspace/repo
+    DOCKER_ARGS+=(-v "$REPO_PATH:/workspace/repo")
+
+    local name
+    name="$(container_name 1)"
+    info "starting agent in $(basename "$REPO_PATH") (container: $name)"
+
+    if [[ "${OPT_DETACH:-false}" == "true" ]]; then
+        docker run -d "${DOCKER_ARGS[@]}" "$IMAGE"
+        info "agent running in background. Use 'agentmill status' to check, 'agentmill stop' to stop."
+    else
+        docker run "${DOCKER_ARGS[@]}" "$IMAGE"
+    fi
+}
+
+run_multi_agent() {
+    local num_agents="$1"
+
+    info "starting $num_agents agents in $(basename "$REPO_PATH")"
+
+    for i in $(seq 1 "$num_agents"); do
+        build_common_args "$i"
+
+        # Multi-agent: mount repo at /workspace/upstream
+        DOCKER_ARGS+=(-v "$REPO_PATH:/workspace/upstream")
+
+        # Set agent branch if not explicitly set
+        if [[ -z "${OPT_BRANCH:-}" ]]; then
+            DOCKER_ARGS+=(-e "AGENT_BRANCH=agent-$i")
+        fi
+
+        local name
+        name="$(container_name "$i")"
+        info "starting agent-$i (container: $name)"
+        docker run -d "${DOCKER_ARGS[@]}" "$IMAGE"
+    done
+
+    info "$num_agents agents running. Use 'agentmill status' to check, 'agentmill stop' to stop."
+}
+
+# ── Subcommand: tui ───────────────────────────────────────────
+
+cmd_tui() {
+    check_auth
+    detect_repo
+    load_config
+    build_claude_mounts
+    resolve_prompt
+    build_common_args 1
+
+    DOCKER_ARGS+=(
+        -v "$REPO_PATH:/workspace/repo"
+        --entrypoint /entrypoint-tui.sh
+        -e "SKIP_PROMPT=true"
+        -e "AUTO_RALPH=false"
+        -e "RESPAWN=false"
+    )
+
+    if [[ -t 0 ]]; then
+        DOCKER_ARGS+=(-it)
+    else
+        die "tui requires an interactive terminal"
+    fi
+
+    info "starting interactive TUI in $(basename "$REPO_PATH")"
+    docker run "${DOCKER_ARGS[@]}" "$IMAGE"
+}
+
+# ── Subcommand: watch ─────────────────────────────────────────
+
+cmd_watch() {
+    check_auth
+    detect_repo
+    load_config
+    build_claude_mounts
+    resolve_prompt
+    build_common_args 1
+
+    DOCKER_ARGS+=(
+        -v "$REPO_PATH:/workspace/repo"
+        --entrypoint /entrypoint-tui.sh
+        -e "AUTO_RALPH=${OPT_RALPH:-false}"
+        -e "RESPAWN=${OPT_RESPAWN:-false}"
+        -e "AUTO_RALPH_MAX_ITERATIONS=${OPT_RALPH_MAX_ITERATIONS:-${OPT_MAX_ITERATIONS:-10}}"
+        -e "AUTO_RALPH_COMPLETION_PROMISE=${OPT_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}"
+    )
+
+    if [[ -t 0 ]]; then
+        DOCKER_ARGS+=(-it)
+    else
+        die "watch requires an interactive terminal"
+    fi
+
+    info "starting watch mode in $(basename "$REPO_PATH")"
+    docker run "${DOCKER_ARGS[@]}" "$IMAGE"
+}
+
+# ── Subcommand: stop ──────────────────────────────────────────
+
+cmd_stop() {
+    detect_repo
+    local pattern="agentmill-${PROJECT_SLUG}-"
+    local containers
+    containers="$(docker ps -q --filter "name=$pattern" 2>/dev/null)"
+
+    if [[ -z "$containers" ]]; then
+        info "no running agents for $(basename "$REPO_PATH")"
+        return 0
+    fi
+
+    info "stopping agents for $(basename "$REPO_PATH")..."
+    echo "$containers" | xargs docker stop
+    info "done."
+}
+
+# ── Subcommand: status ────────────────────────────────────────
+
+cmd_status() {
+    detect_repo
+    local pattern="agentmill-${PROJECT_SLUG}-"
+    local output
+    output="$(docker ps --filter "name=$pattern" --format "table {{.Names}}\t{{.Status}}\t{{.RunningFor}}" 2>/dev/null)"
+
+    if [[ -z "$output" ]] || [[ "$(echo "$output" | wc -l)" -le 1 ]]; then
+        info "no running agents for $(basename "$REPO_PATH")"
+        return 0
+    fi
+
+    echo "$output"
+}
+
+# ── Subcommand: build ─────────────────────────────────────────
+
+cmd_build() {
+    local build_path="${1:-.}"
+    [[ -f "$build_path/Dockerfile" ]] || die "no Dockerfile found in $build_path"
+    info "building agentmill image from $build_path..."
+    docker build -t agentmill "$build_path"
+    info "image built: agentmill"
+}
+
+# ── Subcommand: version ──────────────────────────────────────
+
+cmd_version() {
+    echo "agentmill $VERSION"
+}
+
+# ── Usage ─────────────────────────────────────────────────────
+
+usage() {
+    cat <<'EOF'
+agentmill — run autonomous AI agents from any git repo
+
+Usage:
+  agentmill run [options]       Start headless agent(s)
+  agentmill tui [options]       Interactive TUI (you drive)
+  agentmill watch [options]     Autonomous TUI (you observe)
+  agentmill stop                Stop running agents for this repo
+  agentmill status              Show running agents for this repo
+  agentmill build [path]        Build the Docker image
+  agentmill version             Print version
+
+Options:
+  --agents N            Number of agents (default: 1, >1 = multi-agent)
+  --model MODEL         Claude model (default: sonnet)
+  --prompt FILE         Prompt file path, relative to repo root
+  --max-iterations N    Max loop iterations (default: 0 = infinite)
+  --loop-delay N        Seconds between iterations (default: 5)
+  --setup-command CMD   Custom repo setup command
+  --auto-setup BOOL     Enable/disable auto dependency setup (default: true)
+  --branch BRANCH       Git branch for agent work
+  --image IMAGE         Docker image (default: agentmill)
+  --repo PATH           Repo path (default: git root of current directory)
+  --detach, -d          Run in background (run subcommand)
+  --env KEY=VALUE       Extra environment variable (repeatable)
+  --ralph               Enable Ralph Loop (watch subcommand)
+  --respawn             Restart TUI on exit (watch subcommand)
+
+Environment:
+  ANTHROPIC_API_KEY          API key (required, or use OAuth token)
+  CLAUDE_CODE_OAUTH_TOKEN    OAuth token (alternative to API key)
+  AGENTMILL_IMAGE            Docker image override
+  GIT_USER                   Git committer name (default: agentmill)
+  GIT_EMAIL                  Git committer email (default: agent@agentmill)
+  EXTRA_PYTHON_TOOLS         Extra pip packages to install in agent venv
+
+Config file:
+  Place .agentmill.yml in your repo root for per-project defaults.
+  CLI flags always override config file values.
+
+Examples:
+  cd my-project && agentmill run
+  agentmill run --agents 3 --model opus --prompt tasks/fix-bugs.md
+  agentmill watch --ralph --max-iterations 10
+  agentmill tui --model opus
+  agentmill stop
+EOF
+}
+
+# ── Argument Parsing ──────────────────────────────────────────
+
+OPT_MODEL=""
+OPT_PROMPT=""
+OPT_MAX_ITERATIONS=""
+OPT_LOOP_DELAY=""
+OPT_AUTO_SETUP=""
+OPT_SETUP_COMMAND=""
+OPT_AGENTS=""
+OPT_BRANCH=""
+OPT_IMAGE_CFG=""
+OPT_REPO=""
+OPT_DETACH="false"
+OPT_RALPH=""
+OPT_RESPAWN=""
+OPT_RALPH_MAX_ITERATIONS=""
+OPT_RALPH_COMPLETION_PROMISE=""
+EXTRA_ENVS=()
+
+SUBCOMMAND=""
+BUILD_PATH=""
+
+parse_args() {
+    [[ $# -eq 0 ]] && { usage; exit 0; }
+
+    SUBCOMMAND="$1"
+    shift
+
+    case "$SUBCOMMAND" in
+        run|tui|watch|stop|status|version) ;;
+        build)
+            BUILD_PATH="${1:-.}"
+            return
+            ;;
+        -h|--help|help)
+            usage
+            exit 0
+            ;;
+        *)
+            die "unknown command: $SUBCOMMAND (try 'agentmill --help')"
+            ;;
+    esac
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --agents)       OPT_AGENTS="$2"; shift 2 ;;
+            --model)        OPT_MODEL="$2"; shift 2 ;;
+            --prompt)       OPT_PROMPT="$2"; shift 2 ;;
+            --max-iterations) OPT_MAX_ITERATIONS="$2"; shift 2 ;;
+            --loop-delay)   OPT_LOOP_DELAY="$2"; shift 2 ;;
+            --setup-command) OPT_SETUP_COMMAND="$2"; shift 2 ;;
+            --auto-setup)   OPT_AUTO_SETUP="$2"; shift 2 ;;
+            --branch)       OPT_BRANCH="$2"; shift 2 ;;
+            --image)        IMAGE="$2"; shift 2 ;;
+            --repo)         OPT_REPO="$2"; shift 2 ;;
+            --detach|-d)    OPT_DETACH="true"; shift ;;
+            --ralph)        OPT_RALPH="true"; shift ;;
+            --respawn)      OPT_RESPAWN="true"; shift ;;
+            --ralph-max-iterations) OPT_RALPH_MAX_ITERATIONS="$2"; shift 2 ;;
+            --ralph-completion-promise) OPT_RALPH_COMPLETION_PROMISE="$2"; shift 2 ;;
+            --env)          EXTRA_ENVS+=("$2"); shift 2 ;;
+            -h|--help)      usage; exit 0 ;;
+            *)              die "unknown option: $1 (try 'agentmill --help')" ;;
+        esac
+    done
+
+    # Apply image from config if not set by flag
+    [[ -z "$IMAGE" || "$IMAGE" == "agentmill" ]] && [[ -n "${OPT_IMAGE_CFG:-}" ]] && IMAGE="$OPT_IMAGE_CFG"
+}
+
+# ── Main ──────────────────────────────────────────────────────
+
+parse_args "$@"
+
+case "$SUBCOMMAND" in
+    run)     cmd_run ;;
+    tui)     cmd_tui ;;
+    watch)   cmd_watch ;;
+    stop)    cmd_stop ;;
+    status)  cmd_status ;;
+    build)   cmd_build "$BUILD_PATH" ;;
+    version) cmd_version ;;
+esac
