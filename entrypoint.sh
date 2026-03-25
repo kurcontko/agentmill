@@ -350,7 +350,7 @@ check_progress_updated() {
     local before_hash="$1"
     local after_hash
     if [ -f PROGRESS.md ]; then
-        after_hash="$(md5sum PROGRESS.md | cut -d' ' -f1)"
+        after_hash="$(sha256sum PROGRESS.md | cut -d' ' -f1)"
     else
         after_hash="none"
     fi
@@ -562,7 +562,7 @@ while true; do
 
     # Snapshot PROGRESS.md hash for quality gate
     if [ -f PROGRESS.md ]; then
-        PROGRESS_HASH_BEFORE="$(md5sum PROGRESS.md | cut -d' ' -f1)"
+        PROGRESS_HASH_BEFORE="$(sha256sum PROGRESS.md | cut -d' ' -f1)"
     else
         PROGRESS_HASH_BEFORE="none"
     fi

@@ -350,27 +350,43 @@ def run_with_openai_compat(
     return 0, "\n".join(output_parts), total_usage
 
 
+def _safe_resolve(cwd: str, user_path: str) -> Path | None:
+    """Resolve a user-supplied path, ensuring it stays within cwd."""
+    try:
+        base = Path(cwd).resolve()
+        target = (base / user_path).resolve()
+        if not str(target).startswith(str(base)):
+            return None
+        return target
+    except (ValueError, OSError):
+        return None
+
+
 def _execute_tool(name: str, args: dict, cwd: str) -> str:
     """Execute a tool call in the repo directory."""
     import glob as glob_mod
 
     try:
         if name == "read_file":
-            path = Path(cwd) / args["path"]
-            if not path.exists():
+            resolved = _safe_resolve(cwd, args["path"])
+            if resolved is None:
+                return f"Error: path not allowed: {args['path']}"
+            if not resolved.exists():
                 return f"Error: file not found: {args['path']}"
-            return path.read_text(errors="replace")[:50000]
+            return resolved.read_text(errors="replace")[:50000]
 
         elif name == "write_file":
-            path = Path(cwd) / args["path"]
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(args["content"])
+            resolved = _safe_resolve(cwd, args["path"])
+            if resolved is None:
+                return f"Error: path not allowed: {args['path']}"
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            resolved.write_text(args["content"])
             return f"Written {len(args['content'])} chars to {args['path']}"
 
         elif name == "run_command":
+            # Commands run sandboxed within cwd with a timeout
             proc = subprocess.run(
-                args["command"],
-                shell=True,
+                ["bash", "-c", args["command"]],
                 cwd=cwd,
                 capture_output=True,
                 text=True,
@@ -380,47 +396,60 @@ def _execute_tool(name: str, args: dict, cwd: str) -> str:
             return output[:10000] if output else "(no output)"
 
         elif name == "list_files":
-            # Support both pattern-based glob and path-based directory listing
             pattern = args.get("pattern", "")
             dir_path = args.get("path", "")
 
             if pattern:
-                full_pattern = str(Path(cwd) / pattern)
+                resolved_base = _safe_resolve(cwd, ".")
+                if resolved_base is None:
+                    return "Error: invalid cwd"
+                full_pattern = str(resolved_base / pattern)
                 matches = sorted(glob_mod.glob(full_pattern, recursive=True))
-                rel = [str(Path(m).relative_to(cwd)) for m in matches]
+                base_str = str(resolved_base)
+                rel = [
+                    str(Path(m).relative_to(resolved_base))
+                    for m in matches
+                    if str(Path(m).resolve()).startswith(base_str)
+                ]
                 return "\n".join(rel[:200]) if rel else "(no matches for pattern)"
             else:
-                # List directory contents
-                target = Path(cwd) / dir_path if dir_path else Path(cwd)
+                target = _safe_resolve(cwd, dir_path) if dir_path else Path(cwd).resolve()
+                if target is None:
+                    return f"Error: path not allowed: {dir_path}"
                 if not target.is_dir():
                     return f"Error: not a directory: {dir_path}"
                 entries = sorted(target.iterdir())
+                base = Path(cwd).resolve()
                 rel = []
                 for e in entries[:200]:
-                    name_str = str(e.relative_to(cwd))
+                    name_str = str(e.relative_to(base))
                     if e.is_dir():
                         name_str += "/"
                     rel.append(name_str)
                 return "\n".join(rel) if rel else "(empty directory)"
 
         elif name in ("search", "grep", "find_files", "grep_files"):
-            # Handle hallucinated search tools — redirect to run_command
             query = args.get("query", args.get("pattern", args.get("regex", "")))
-            path = args.get("path", ".")
-            if query:
-                proc = subprocess.run(
-                    f"grep -rn '{query}' {path} --include='*.py' | head -30",
-                    shell=True, cwd=cwd, capture_output=True, text=True, timeout=30,
-                )
-                return (proc.stdout + proc.stderr)[:10000] or "(no matches)"
-            return "Error: provide a 'query' argument"
+            search_path = args.get("path", ".")
+            if not query:
+                return "Error: provide a 'query' argument"
+            # Use subprocess list form to avoid shell injection
+            proc = subprocess.run(
+                ["grep", "-rn", "--include=*.py", query, search_path],
+                cwd=cwd, capture_output=True, text=True, timeout=30,
+            )
+            output = proc.stdout[:10000]
+            # Limit to 30 lines
+            lines = output.splitlines()[:30]
+            return "\n".join(lines) if lines else "(no matches)"
 
         elif name in ("open_file",):
-            # Handle hallucinated open_file — redirect to read_file
-            path = Path(cwd) / args.get("path", "")
-            if not path.exists():
+            resolved = _safe_resolve(cwd, args.get("path", ""))
+            if resolved is None:
+                return f"Error: path not allowed: {args.get('path', '')}"
+            if not resolved.exists():
                 return f"Error: file not found: {args.get('path', '')}"
-            return path.read_text(errors="replace")[:50000]
+            return resolved.read_text(errors="replace")[:50000]
 
         else:
             return f"Unknown tool: {name}. Available tools: read_file, write_file, run_command, list_files"

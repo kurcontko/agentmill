@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y \
     expect \
     && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g @anthropic-ai/claude-code opencode-ai
+RUN npm install -g --ignore-scripts @anthropic-ai/claude-code opencode-ai
 
 # Non-root user (Claude Code refuses --dangerously-skip-permissions as root)
 RUN useradd -m -s /bin/bash agent
