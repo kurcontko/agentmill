@@ -247,6 +247,31 @@ def _run_local(
     return result
 
 
+def clone_and_checkout(task: dict, work_dir: Path) -> Path:
+    """Clone a repo at a specific commit. Returns the repo directory."""
+    instance_id = task["instance_id"]
+    repo_dir = work_dir / "repo"
+    logger.info(f"[{instance_id}] Cloning {task['repo']} @ {task['base_commit'][:8]}")
+    subprocess.run(
+        ["git", "clone", "--quiet", f"https://github.com/{task['repo']}.git", str(repo_dir)],
+        check=True, capture_output=True, timeout=300,
+    )
+    subprocess.run(
+        ["git", "checkout", task["base_commit"]],
+        cwd=repo_dir, check=True, capture_output=True,
+    )
+    return repo_dir
+
+
+def capture_diff(repo_dir: Path, base_commit: str) -> str:
+    """Capture the git diff from base_commit to current state."""
+    proc = subprocess.run(
+        ["git", "diff", base_commit],
+        cwd=repo_dir, capture_output=True, text=True,
+    )
+    return proc.stdout
+
+
 def write_predictions(results: list[TaskResult], output_path: Path, model_name: str) -> None:
     """Write results as SWE-bench compatible JSONL predictions file."""
     with open(output_path, "w") as f:

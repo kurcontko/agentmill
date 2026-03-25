@@ -47,6 +47,8 @@ from shared.providers import (
 from shared.task_runner import (
     BenchmarkConfig,
     TaskResult,
+    capture_diff,
+    clone_and_checkout,
     print_summary,
     run_task_docker,
     write_metrics,
@@ -137,27 +139,15 @@ def run_task_provider(
     instance_id = task["instance_id"]
     result = TaskResult(instance_id=instance_id)
     work_dir = Path(tempfile.mkdtemp(prefix=f"swe_evo_{instance_id}_"))
-    repo_dir = work_dir / "repo"
 
     try:
-        logger.info(f"[{instance_id}] Cloning {task['repo']} @ {task['base_commit'][:8]}")
-        subprocess.run(
-            ["git", "clone", "--quiet", f"https://github.com/{task['repo']}.git", str(repo_dir)],
-            check=True, capture_output=True, timeout=300,
-        )
-        subprocess.run(
-            ["git", "checkout", task["base_commit"]],
-            cwd=repo_dir, check=True, capture_output=True,
-        )
+        repo_dir = clone_and_checkout(task, work_dir)
 
         start = time.monotonic()
         total_usage = {"input_tokens": 0, "output_tokens": 0}
 
         for iteration in range(1, max_iterations + 1):
-            current_diff = subprocess.run(
-                ["git", "diff", task["base_commit"]],
-                cwd=repo_dir, capture_output=True, text=True,
-            ).stdout
+            current_diff = capture_diff(repo_dir, task["base_commit"])
 
             prompt = build_evo_prompt(task, iteration, current_diff)
 
@@ -172,11 +162,7 @@ def run_task_provider(
                 result.error = output[:500]
                 break
 
-        diff_proc = subprocess.run(
-            ["git", "diff", task["base_commit"]],
-            cwd=repo_dir, capture_output=True, text=True,
-        )
-        result.model_patch = diff_proc.stdout
+        result.model_patch = capture_diff(repo_dir, task["base_commit"])
         result.elapsed_seconds = time.monotonic() - start
         result.exit_code = 0
 

@@ -57,6 +57,8 @@ from shared.providers import (
 from shared.task_runner import (
     BenchmarkConfig,
     TaskResult,
+    capture_diff,
+    clone_and_checkout,
     print_summary,
     run_task_docker,
     write_metrics,
@@ -111,19 +113,9 @@ def run_task_with_provider(
     result = TaskResult(instance_id=instance_id)
 
     work_dir = Path(tempfile.mkdtemp(prefix=f"swe_lite_{instance_id}_"))
-    repo_dir = work_dir / "repo"
 
     try:
-        # Clone repo at base_commit
-        logger.info(f"[{instance_id}] Cloning {task['repo']} @ {task['base_commit'][:8]}")
-        subprocess.run(
-            ["git", "clone", "--quiet", f"https://github.com/{task['repo']}.git", str(repo_dir)],
-            check=True, capture_output=True, timeout=300,
-        )
-        subprocess.run(
-            ["git", "checkout", task["base_commit"]],
-            cwd=repo_dir, check=True, capture_output=True,
-        )
+        repo_dir = clone_and_checkout(task, work_dir)
 
         # Build prompt
         prompt = f"""Fix the following GitHub issue in this repository.
@@ -181,11 +173,7 @@ Available tools: read_file, write_file, run_command, list_files.
                 break
 
         # Capture final diff
-        diff_proc = subprocess.run(
-            ["git", "diff", task["base_commit"]],
-            cwd=repo_dir, capture_output=True, text=True,
-        )
-        result.model_patch = diff_proc.stdout
+        result.model_patch = capture_diff(repo_dir, task["base_commit"])
         result.elapsed_seconds = time.monotonic() - start
         result.exit_code = 0
 
