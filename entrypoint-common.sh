@@ -38,6 +38,7 @@ prepare_repo_environment() {
     local repo_dir="$1"
 
     log "Preparing repo environment..."
+    # shellcheck disable=SC1091
     . /setup-repo-env.sh "$repo_dir"
     log "Repo environment ready."
 }
@@ -66,16 +67,48 @@ write_project_settings() {
 }
 
 autonomous_settings_json() {
-    local include_stop_hook="${1:-false}"
-
-    if [[ "$include_stop_hook" == "true" ]]; then
-        # Keep the same autonomous tool allowlist in respawn mode; the only
-        # difference here is the Stop hook that exits Claude between sessions.
-        printf '%s\n' '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit","mcp__*"],"defaultMode":"bypassPermissions"},"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"kill -TERM $PPID 2>/dev/null; exit 0"}]}]}}'
-        return 0
-    fi
-
     printf '%s\n' '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit","mcp__*"],"defaultMode":"bypassPermissions"}}'
+}
+
+# Start a background process that polls for the done sentinel file.
+# When found, it either signals a target PID or the current process group.
+start_sentinel_watcher() {
+    local target_pid="$1"
+    local signal_mode="${2:-pid}"
+    local poll_interval="${3:-1}"
+    local done_file="${DONE_FILE:-/tmp/.agentmill-done}"
+    local signal_flag_file="${SENTINEL_SIGNAL_FLAG_FILE:-/tmp/.agentmill-sentinel-signal}"
+
+    (
+        while kill -0 "$target_pid" 2>/dev/null; do
+            if [[ -f "$done_file" ]]; then
+                sleep 2  # let Claude finish writing
+                case "$signal_mode" in
+                    pid)
+                        kill -TERM "$target_pid" 2>/dev/null || true
+                        ;;
+                    process_group)
+                        : > "$signal_flag_file"
+                        kill -TERM 0 2>/dev/null || true
+                        ;;
+                    *)
+                        echo "Unknown sentinel watcher mode: $signal_mode" >&2
+                        ;;
+                esac
+                break
+            fi
+            sleep "$poll_interval"
+        done
+    ) &
+    SENTINEL_WATCHER_PID=$!
+}
+
+stop_sentinel_watcher() {
+    if [[ -n "${SENTINEL_WATCHER_PID:-}" ]]; then
+        kill "$SENTINEL_WATCHER_PID" 2>/dev/null || true
+        wait "$SENTINEL_WATCHER_PID" 2>/dev/null || true
+        unset SENTINEL_WATCHER_PID
+    fi
 }
 
 push_failure_is_retryable() {

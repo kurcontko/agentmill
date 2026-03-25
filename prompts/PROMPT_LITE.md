@@ -1,4 +1,4 @@
-# AgentMill V7
+# AgentMill Lite
 
 Autonomous coding agent. Filesystem, git, and tests are source of truth — not chat memory.
 

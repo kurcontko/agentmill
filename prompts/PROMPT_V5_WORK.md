@@ -1,4 +1,4 @@
-# AgentMill Prompt V5
+# AgentMill Prompt 
 
 This prompt is designed for long-running autonomous coding loops and operator-managed parallel agent teams.
 It follows the operating model from Anthropic's engineering write-up on building a compiler with parallel Claude agents: fresh sessions, durable on-disk state, strong verifiers, disciplined task splitting, and careful coordination.

@@ -15,9 +15,12 @@ PROMPT_FILE="${PROMPT_FILE:-/prompts/PROMPT.md}"
 MODEL="${MODEL:-sonnet}"
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
+DONE_FILE="${DONE_FILE:-/tmp/.agentmill-done}"
+SENTINEL_SIGNAL_FLAG_FILE="${SENTINEL_SIGNAL_FLAG_FILE:-/tmp/.agentmill-sentinel-signal}"
 AUTO_RALPH_MAX_ITERATIONS="${AUTO_RALPH_MAX_ITERATIONS:-${MAX_ITERATIONS:-10}}"
 AUTO_RALPH_COMPLETION_PROMISE="${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}"
 
+# shellcheck source=/entrypoint-common.sh
 . /entrypoint-common.sh
 
 mkdir -p "$LOG_DIR"
@@ -50,14 +53,7 @@ prepare_repo_environment "$REPO_DIR"
 # Back up original and restore on exit
 RALPH_RULE_FILE=".claude/rules/agentmill-ralph-task.md"
 backup_project_settings ".claude/settings.local.json"
-if [[ "${RESPAWN:-false}" == "true" ]]; then
-    # Respawn mode keeps the same autonomous permissions and only adds a Stop
-    # hook so the parent loop can restart Claude between sessions.
-    SETTINGS_JSON="$(autonomous_settings_json true)"
-else
-    SETTINGS_JSON="$(autonomous_settings_json)"
-fi
-write_project_settings "$SETTINGS_JSON"
+write_project_settings "$(autonomous_settings_json)"
 
 restore_settings() {
     restore_project_settings
@@ -98,7 +94,18 @@ cleanup() {
     SHUTTING_DOWN=true
     return 0
 }
-trap 'cleanup; restore_settings' SIGTERM SIGINT
+
+handle_signal() {
+    if [[ -f "$SENTINEL_SIGNAL_FLAG_FILE" ]]; then
+        rm -f "$SENTINEL_SIGNAL_FLAG_FILE"
+        log "Sentinel requested session restart."
+        return 0
+    fi
+
+    cleanup
+    restore_settings
+}
+trap handle_signal SIGTERM SIGINT
 
 # --- Launch Claude Code TUI -----------------------------------
 RESPAWN="${RESPAWN:-false}"
@@ -116,11 +123,28 @@ while true; do
     ITERATION=$((ITERATION + 1))
     log "Launching Claude TUI (model=$MODEL, iteration=$ITERATION)"
 
+    # Clear done sentinel from previous iteration
+    rm -f "$DONE_FILE"
+    rm -f "$SENTINEL_SIGNAL_FLAG_FILE"
+
+    # Claude stays in the foreground for TTY support. The watcher sits
+    # in the background and terminates the process group on completion.
+    start_sentinel_watcher "$$" process_group
+
     if [[ "${SKIP_PROMPT:-false}" == "true" ]]; then
         # Manual mode: launch Claude directly, no expect wrapper
         claude --model "$MODEL" || true
     else
         /auto-trust.exp || true
+    fi
+
+    stop_sentinel_watcher
+
+    # Check if agent signaled task completion via done file
+    if [[ -f "$DONE_FILE" ]]; then
+        log "Agent signaled done (found $DONE_FILE)"
+    else
+        log "WARN: Agent exited without signaling done (no $DONE_FILE)"
     fi
 
     # Safety-net: commit any leftover changes

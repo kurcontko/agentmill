@@ -13,7 +13,9 @@ GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
 LOOP_DELAY="${LOOP_DELAY:-5}"  # seconds between iterations
 AUTO_COMMIT="${AUTO_COMMIT:-wip}"  # "off" = no auto-commit, "wip" = safety-net [wip] only, "on" = always commit (legacy)
 PUSH_REBASE_MAX_RETRIES="${PUSH_REBASE_MAX_RETRIES:-3}"
+DONE_FILE="${DONE_FILE:-/tmp/.agentmill-done}"
 
+# shellcheck source=/entrypoint-common.sh
 . /entrypoint-common.sh
 
 # — State ————————————————————————————————————————
@@ -180,6 +182,9 @@ while true; do
         exit 1
     fi
 
+    # Clear done sentinel from previous iteration
+    rm -f "$DONE_FILE"
+
     # Run Claude
     log "Running Claude (session log: $SESSION_LOG)..."
     PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
@@ -188,11 +193,22 @@ while true; do
     claude --dangerously-skip-permissions \
         -p "$PROMPT_CONTENT" \
         --model "$MODEL" \
-        2>&1 | tee "$SESSION_LOG"
+        > >(tee "$SESSION_LOG") 2>&1 &
+    CLAUDE_PID=$!
+    start_sentinel_watcher "$CLAUDE_PID"
+    wait "$CLAUDE_PID" 2>/dev/null
     CLAUDE_EXIT=$?
+    stop_sentinel_watcher
     set -e
 
     log "Claude exited with code $CLAUDE_EXIT"
+
+    # Check if agent signaled task completion via done file
+    if [[ -f "$DONE_FILE" ]]; then
+        log "Agent signaled done (found $DONE_FILE)"
+    else
+        log "WARN: Agent exited without signaling done (no $DONE_FILE)"
+    fi
 
     # Commit any changes (controlled by AUTO_COMMIT flag)
     if [[ -n "$(git status --porcelain)" ]]; then
