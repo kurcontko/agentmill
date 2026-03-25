@@ -6,7 +6,7 @@ set -euo pipefail
 # Use Ralph Loop plugin (/ralph-loop) for autonomous iteration,
 # or interact manually - your choice.
 #
-# Usage: docker compose run dashboard
+# Usage: docker compose run watch
 # --------------------------------------------------------------
 
 REPO_DIR="/workspace/repo"
@@ -15,8 +15,13 @@ PROMPT_FILE="${PROMPT_FILE:-/prompts/PROMPT.md}"
 MODEL="${MODEL:-sonnet}"
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
+DONE_FILE="${DONE_FILE:-/tmp/.agentmill-done}"
+SENTINEL_SIGNAL_FLAG_FILE="${SENTINEL_SIGNAL_FLAG_FILE:-/tmp/.agentmill-sentinel-signal}"
 AUTO_RALPH_MAX_ITERATIONS="${AUTO_RALPH_MAX_ITERATIONS:-${MAX_ITERATIONS:-10}}"
 AUTO_RALPH_COMPLETION_PROMISE="${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}"
+
+# shellcheck source=/entrypoint-common.sh
+. /entrypoint-common.sh
 
 mkdir -p "$LOG_DIR"
 
@@ -25,32 +30,15 @@ log() {
     msg="[agentmill $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
     echo "$msg"
     echo "$msg" >> "$LOG_DIR/agent.log"
+    return 0
 }
 
-# --- Auth -----------------------------------------------------
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-    log "Auth: using ANTHROPIC_API_KEY"
-elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
-    log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
-    if [[ ! -f "$HOME/.claude.json" ]]; then
-        echo '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
-    fi
-else
-    log "ERROR: No auth configured."
-    log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
-    log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (subscription, from 'claude setup-token')"
-    exit 1
-fi
-
-# --- Merge host Claude config (MCP, plugins, settings) --------
-/setup-claude-config.sh
-
-# --- Git config -----------------------------------------------
-git config --global user.name "$GIT_USER"
-git config --global user.email "$GIT_EMAIL"
+require_auth
+merge_host_claude_config
+configure_git_identity "$GIT_USER" "$GIT_EMAIL"
 
 # --- Repo check -----------------------------------------------
-if [[ ! -d "$REPO_DIR/.git" ]]; then
+if [[ ! -d "$REPO_DIR/.git" ]] && [[ ! -f "$REPO_DIR/.git" ]]; then
     log "ERROR: No repo found at $REPO_DIR. Set REPO_PATH in .env."
     exit 1
 fi
@@ -58,29 +46,17 @@ fi
 cd "$REPO_DIR"
 log "Repo ready at $REPO_DIR"
 
-log "Preparing repo environment..."
-. /setup-repo-env.sh "$REPO_DIR"
-log "Repo environment ready."
+prepare_repo_environment "$REPO_DIR"
 
 # --- Override project settings for autonomous mode ------------
 # The host repo may have restrictive .claude/settings.local.json
 # Back up original and restore on exit
-SETTINGS_LOCAL=".claude/settings.local.json"
-SETTINGS_BACKUP=""
 RALPH_RULE_FILE=".claude/rules/agentmill-ralph-task.md"
-mkdir -p .claude
-if [[ -f "$SETTINGS_LOCAL" ]]; then
-    SETTINGS_BACKUP="$(cat "$SETTINGS_LOCAL")"
-fi
-# NOSONAR — autonomous agent container requires full tool permissions
-echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit"],"defaultMode":"bypassPermissions"}}' > "$SETTINGS_LOCAL"
+backup_project_settings ".claude/settings.local.json"
+write_project_settings "$(autonomous_settings_json)"
 
 restore_settings() {
-    if [[ -n "$SETTINGS_BACKUP" ]]; then
-        echo "$SETTINGS_BACKUP" > "$SETTINGS_LOCAL"
-    else
-        rm -f "$SETTINGS_LOCAL"
-    fi
+    restore_project_settings
     rm -f "$RALPH_RULE_FILE"
     return 0
 }
@@ -88,12 +64,12 @@ trap restore_settings EXIT
 
 # --- Build initial prompt -------------------------------------
 INITIAL_PROMPT=""
-if [[ -f "$PROMPT_FILE" ]]; then
+if [[ "${SKIP_PROMPT:-false}" != "true" ]] && [[ -f "$PROMPT_FILE" ]]; then
     INITIAL_PROMPT="$(cat "$PROMPT_FILE")"
     log "Loaded prompt from $PROMPT_FILE"
 fi
 
-if [[ "${AUTO_RALPH:-false}" = "true" && -n "$INITIAL_PROMPT" ]]; then
+if [[ "${AUTO_RALPH:-false}" == "true" ]] && [[ -n "$INITIAL_PROMPT" ]]; then
     mkdir -p "$(dirname "$RALPH_RULE_FILE")"
     cat > "$RALPH_RULE_FILE" <<EOF
 # AgentMill Ralph Task
@@ -111,12 +87,83 @@ EOF
     log "Ralph Loop limits: max_iterations=$AUTO_RALPH_MAX_ITERATIONS completion_promise=$AUTO_RALPH_COMPLETION_PROMISE"
 fi
 
+# --- Graceful shutdown -----------------------------------------
+SHUTTING_DOWN=false
+cleanup() {
+    log "Received shutdown signal. Finishing current session..."
+    SHUTTING_DOWN=true
+    return 0
+}
+
+handle_signal() {
+    if [[ -f "$SENTINEL_SIGNAL_FLAG_FILE" ]]; then
+        rm -f "$SENTINEL_SIGNAL_FLAG_FILE"
+        log "Sentinel requested session restart."
+        return 0
+    fi
+
+    cleanup
+    restore_settings
+}
+trap handle_signal SIGTERM SIGINT
+
 # --- Launch Claude Code TUI -----------------------------------
-log "Launching Claude TUI (model=$MODEL)"
+RESPAWN="${RESPAWN:-false}"
+LOOP_DELAY="${LOOP_DELAY:-5}"
+ITERATION=0
+
 if [[ -n "$INITIAL_PROMPT" ]]; then
-    log "Starting interactive session with prompt from $PROMPT_FILE."
+    log "Starting session with prompt from $PROMPT_FILE."
     export CLAUDE_INITIAL_PROMPT="$INITIAL_PROMPT"
 else
     unset CLAUDE_INITIAL_PROMPT
 fi
-exec /auto-trust.exp
+
+while true; do
+    ITERATION=$((ITERATION + 1))
+    log "Launching Claude TUI (model=$MODEL, iteration=$ITERATION)"
+
+    # Clear done sentinel from previous iteration
+    rm -f "$DONE_FILE"
+    rm -f "$SENTINEL_SIGNAL_FLAG_FILE"
+
+    # Claude stays in the foreground for TTY support. The watcher sits
+    # in the background and terminates the process group on completion.
+    start_sentinel_watcher "$$" process_group
+
+    if [[ "${SKIP_PROMPT:-false}" == "true" ]]; then
+        # Manual mode: launch Claude directly, no expect wrapper
+        claude --model "$MODEL" || true
+    else
+        /auto-trust.exp || true
+    fi
+
+    stop_sentinel_watcher
+
+    # Check if agent signaled task completion via done file
+    if [[ -f "$DONE_FILE" ]]; then
+        log "Agent signaled done (found $DONE_FILE)"
+    else
+        log "WARN: Agent exited without signaling done (no $DONE_FILE)"
+    fi
+
+    # Safety-net: commit any leftover changes
+    if [[ -n "$(git status --porcelain 2>/dev/null)" ]]; then
+        log "Committing leftover changes from iteration $ITERATION..."
+        git add -A
+        git commit -m "[wip] tui session $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))" || true
+    fi
+
+    if [[ "$RESPAWN" != "true" ]]; then
+        log "Respawn disabled. Exiting."
+        break
+    fi
+
+    if [[ "$SHUTTING_DOWN" == true ]]; then
+        log "Shutdown requested. Exiting."
+        break
+    fi
+
+    log "Claude exited. Restarting in ${LOOP_DELAY}s..."
+    sleep "$LOOP_DELAY"
+done

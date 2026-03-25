@@ -5,8 +5,8 @@
 <h1 align="center">AgentMill</h1>
 
 <p align="center">
-  A Docker container that runs Claude CLI in a respawning loop.<br>
-  Give it a git repo and a prompt — it clones, works, commits, pushes, and repeats.<br>
+  A Docker container that runs Claude Code in a respawning loop.<br>
+  Point it at a repo and a prompt — it works, commits, pushes, and repeats.<br>
   <strong>Tasks go in, code comes out.</strong>
 </p>
 
@@ -21,172 +21,153 @@
 
 ## Quick Start
 
+1. **Configure** — copy `.env.example` to `.env`, set `REPO_PATH` and auth
+2. **Write your prompt** — edit `prompts/PROMPT.md` with the task
+3. **Run** — pick a mode below
+4. **Stop** — `docker compose down` (finishes current session, commits WIP, exits cleanly)
+
 ```bash
-# 1. Configure
-cp .env.example .env
-# Edit .env — set auth (see below) and other options
-
-# 2. Write your prompt
-# Edit prompts/PROMPT.md with your task
-
-# 3. Run with a remote repo
-REPO_URL=https://github.com/you/your-repo.git docker compose up
-
-# 4. OR run with a local repo
-# Place/clone your repo in ./repo, then:
-docker compose up
-
-# 5. Monitor
-tail -f logs/agent.log
-
-# 6. Stop gracefully
-docker compose down
+cp .env.example .env   # then edit REPO_PATH and auth
+nano prompts/PROMPT.md  # describe the task
 ```
 
 ## Authentication
 
-Two options — use whichever you prefer:
+Set one of these in `.env`:
 
-**Option A: API Key**
-Set `ANTHROPIC_API_KEY` in your `.env` file. That's it.
+- **API Key** — set `ANTHROPIC_API_KEY`
+- **OAuth Token** — run `claude setup-token` on the host, set `CLAUDE_CODE_OAUTH_TOKEN`
 
-**Option B: Claude Subscription (OAuth)**
-Log in on your host machine first, then the container picks up your session automatically:
-```bash
-claude login
-# The docker-compose.yml already mounts ~/.claude into the container
-```
-Leave `ANTHROPIC_API_KEY` blank in `.env` when using this method.
+## How to Run
 
-## TUI Dashboard Mode
+Pick the mode that fits your workflow:
 
-Want to **see** what the agent is doing? Run the dashboard service — it forwards Claude Code's full interactive TUI to your terminal. Same UI as running `claude` locally, but autonomous (all tool calls auto-approved).
+---
+
+### 1. `headless` — fire and forget
+
+Claude runs in a loop in the background. No UI — output goes to `./logs/`. Restarts automatically on crash. Best for CI, overnight runs, or when you don't need to watch.
 
 ```bash
-# Launch with TUI — you see the full Claude Code interface
-docker compose run dashboard
-
-# Same env vars apply:
-MODEL=opus MAX_ITERATIONS=3 docker compose run dashboard
+REPO_PATH=/path/to/repo docker compose up headless
 ```
 
-The TUI is purely a **monitoring window** — Claude works autonomously while you watch tool calls, file edits, and reasoning in real time. You can scroll, review output, or just let it run.
+Loop: pull → run Claude → commit → push → wait → repeat.
 
-For headless/background operation, use the default `agent` service instead:
+---
+
+### 2. `watch` — autonomous TUI, you observe
+
+Full Claude Code TUI in your terminal. Claude works autonomously (all tool calls auto-approved) while you watch file edits, tool calls, and reasoning in real time. You're an observer, not a driver.
+
 ```bash
-docker compose up       # headless, logs to ./logs/
+# Single autonomous session, then exit
+REPO_PATH=/path/to/repo docker compose run watch
+
+# With Ralph loop — bounded iteration (runs up to N times, then stops)
+REPO_PATH=/path/to/repo AUTO_RALPH=true AUTO_RALPH_MAX_ITERATIONS=10 \
+  docker compose run watch
+
+# With respawn — restart Claude automatically after each session
+REPO_PATH=/path/to/repo RESPAWN=true docker compose run watch
 ```
 
-## How It Works
+---
 
-Each iteration of the loop:
+### 3. `interactive` — you drive
 
-1. `git pull --rebase` to get latest changes
-2. Run Claude with full autonomy (`--dangerously-skip-permissions`)
-3. Commit all changes with a timestamp
-4. Push to origin (retries on conflict)
-5. Log the session to `./logs/`
-6. Repeat
+Plain Claude Code TUI. No prompt injected, no automation. You type, Claude responds. Same as running `claude` locally, but inside the container with the repo and tools already set up.
 
-**Headless mode** (`agent` service): uses `-p` pipe mode, no UI, output goes to logs.
-**TUI mode** (`dashboard` service): forwards Claude's interactive terminal UI to your terminal.
+```bash
+REPO_PATH=/path/to/repo docker compose run interactive
+```
 
-The container restarts automatically on crash (`restart: unless-stopped`).
+---
+
+### 4. `agent-1`, `agent-2`, `agent-3` — parallel workers
+
+Multiple headless agents on the same repo. Each pushes to its own branch (`agent-1`, `agent-2`, etc.) and rebases on conflict. Assign different prompts for different roles.
+
+```bash
+# Two agents, different tasks
+PROMPT_FILE_1=/prompts/features.md PROMPT_FILE_2=/prompts/tests.md \
+  REPO_PATH=/path/to/repo docker compose up agent-1 agent-2
+
+# Three agents, same branch (rebase on conflict)
+AGENT_BRANCH=main REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agent-3
+```
 
 ## Configuration
 
+**All modes:**
+
 | Env Var | Default | Description |
 |---------|---------|-------------|
-| `ANTHROPIC_API_KEY` | — | API key (or use subscription auth via `~/.claude` mount) |
-| `REPO_URL` | — | Git repo URL to clone |
-| `MODEL` | `sonnet` | Claude model to use |
-| `MAX_ITERATIONS` | `0` (infinite) | Stop after N iterations |
-| `LOOP_DELAY` | `5` | Seconds between iterations |
+| `REPO_PATH` | *(required)* | Absolute path to the repo on your host |
+| `ANTHROPIC_API_KEY` | — | API key auth |
+| `CLAUDE_CODE_OAUTH_TOKEN` | — | OAuth token auth (alternative to API key) |
+| `MODEL` | `sonnet` | Claude model (`sonnet`, `opus`, etc.) |
+| `PROMPT_FILE` | `/prompts/PROMPT.md` | Prompt file path inside the container |
 | `GIT_USER` | `agentmill` | Git commit author name |
 | `GIT_EMAIL` | `agent@agentmill` | Git commit author email |
-| `PROMPT_FILE` | `/prompts/PROMPT.md` | Path to prompt file inside container |
-| `AUTO_SETUP` | `true` | Auto-bootstrap repo-local dev environment on container start |
-| `REPO_SETUP_COMMAND` | — | Custom repo bootstrap command, run in repo root before Claude starts |
-| `EXTRA_PYTHON_TOOLS` | — | Extra Python CLI tools to install into repo `.venv` (for example `ruff pytest`) |
-| `AUTO_RALPH_MAX_ITERATIONS` | `10` | Ralph loop cap for dashboard auto-start |
-| `AUTO_RALPH_COMPLETION_PROMISE` | `TASK_COMPLETE` | Exact `<promise>...</promise>` token Ralph watches for |
+| `AUTO_SETUP` | `true` | Auto-detect and install repo dependencies on start |
+| `REPO_SETUP_COMMAND` | — | Custom bootstrap command (overrides auto-detect) |
+| `EXTRA_PYTHON_TOOLS` | — | Additional pip packages to install (e.g. `ruff pytest`) |
 
-## Repo Setup Contract
+**Headless / multi-agent only:**
 
-For consistency across repositories, AgentMill now uses this setup order when a container starts:
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `MAX_ITERATIONS` | `0` (infinite) | Stop after N loop iterations |
+| `LOOP_DELAY` | `5` | Seconds between iterations |
+| `AUTO_COMMIT` | `wip` | `wip` = commit uncommitted changes as safety net, `on` = always commit, `off` = never |
+| `AGENT_BRANCH` | auto | Branch name for multi-agent (default: `agent-$ID`) |
+| `PROMPT_FILE_1/2/3` | `PROMPT_FILE` | Per-agent prompt overrides (multi-agent only) |
 
-1. If `REPO_SETUP_COMMAND` is set, run that in the repo root.
-2. Else if `pyproject.toml` and `uv.lock` exist, run `uv sync --frozen` and include the `dev` extra and `dev` dependency group when present.
-3. Else if `pyproject.toml` exists, create `.venv` and install the project with `pip`, including `.[dev]` when present.
-4. Else if `requirements.txt` exists, create `.venv` and install it.
+**Watch / interactive only:**
 
-After setup, AgentMill prepends `./.venv/bin` to `PATH`, so repo-local tools like `pytest`, `ruff`, and project CLIs are available to Claude.
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `RESPAWN` | `false` | Restart Claude automatically after each session |
+| `LOOP_DELAY` | `5` | Seconds between respawns |
+| `SKIP_PROMPT` | `false` | Skip prompt injection (set automatically for `interactive`) |
+| `AUTO_RALPH` | `false` | Auto-start Ralph loop for bounded autonomous iteration |
+| `AUTO_RALPH_MAX_ITERATIONS` | `10` | Max Ralph loop iterations |
+| `AUTO_RALPH_COMPLETION_PROMISE` | `TASK_COMPLETE` | Token that signals task completion to Ralph |
 
-Recommended standard for repos:
+## Auto-Setup
 
-- Python repos: declare dev tools in `pyproject.toml` and commit `uv.lock`
-- Non-standard repos: set `REPO_SETUP_COMMAND`
-- Missing one-off Python tools: use `EXTRA_PYTHON_TOOLS`
+When `AUTO_SETUP=true` (default), AgentMill bootstraps the repo's dev environment:
 
-Example:
+1. `REPO_SETUP_COMMAND` if set, otherwise:
+2. `pyproject.toml` + `uv.lock` → `uv sync --frozen`
+3. `pyproject.toml` alone → `pip install .`
+4. `requirements.txt` → `pip install -r requirements.txt`
 
-```bash
-REPO_PATH=/path/to/repo \
-REPO_SETUP_COMMAND='uv sync --frozen --extra dev --group dev' \
-EXTRA_PYTHON_TOOLS='ruff pytest' \
-docker-compose run --rm dashboard
-```
+The `.venv/bin` is prepended to `PATH`, so tools like `pytest` and `ruff` are available to Claude.
 
-Dashboard with Ralph auto-start and bounded looping:
-
-```bash
-REPO_PATH=/path/to/repo \
-EXTRA_PYTHON_TOOLS='ruff' \
-AUTO_RALPH=true \
-AUTO_RALPH_MAX_ITERATIONS=10 \
-AUTO_RALPH_COMPLETION_PROMISE=TASK_COMPLETE \
-docker-compose run --rm \
-  -e PROMPT_FILE=/prompts/PROMPT_V5_WORK.md \
-  dashboard
-```
-
-## Apple Silicon
-
-On a MacBook with Colima, containers usually run as Linux `arm64`, not macOS ARM. That is fine for most Python tooling, including `pytest`, `uv`, and `ruff`, as long as Linux `arm64` wheels exist.
-
-If a dependency has no Linux `arm64` wheel or fails to build natively, force x86_64 emulation for that run:
+**Recommendation:** Add a `Makefile` to your upstream repo with an `install` target that sets up the full dev environment. Then point AgentMill at it:
 
 ```bash
-DOCKER_DEFAULT_PLATFORM=linux/amd64 docker-compose build dashboard
-DOCKER_DEFAULT_PLATFORM=linux/amd64 docker-compose run --rm dashboard
+REPO_SETUP_COMMAND='make install' docker compose up headless
 ```
 
-Use that only when needed because it is slower than native `arm64`.
+This keeps build logic in the repo where it belongs, and any setup — system deps, virtual envs, code generation — just works.
 
 ## Volumes
 
-| Host Path | Container Path | Purpose |
-|-----------|---------------|---------|
-| `./prompts` | `/prompts` | Agent prompt file |
+| Host | Container | Purpose |
+|------|-----------|---------|
+| `./prompts` | `/prompts` | Agent prompt files |
 | `./logs` | `/workspace/logs` | Session logs |
-| `./repo` | `/upstream` | Optional: local repo to clone from |
-| `~/.claude` | `/root/.claude` | Optional: subscription auth from `claude login` |
+| `$REPO_PATH` | `/workspace/repo` or `/workspace/upstream` | Target repository |
+| `~/.claude.json` | `/home/agent/.host-claude.json` | Host Claude config (read-only) |
+| `~/.claude/settings.json` | `/home/agent/.claude/settings.host.json` | Host settings (read-only) |
 
-## Private Repos
+## Apple Silicon
 
-For private repos over HTTPS, embed credentials in the URL:
+If a dependency lacks a Linux `arm64` wheel, build or force x86 emulation:
 
 ```bash
-REPO_URL=https://TOKEN@github.com/you/private-repo.git
+DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose build
 ```
-
-For SSH, mount your SSH key:
-
-```yaml
-# Add to docker-compose.yml under volumes:
-- ~/.ssh:/root/.ssh:ro
-```
-
-## Stopping
-
-`docker compose down` sends SIGTERM. AgentMill finishes its current Claude session, commits any pending changes, then exits cleanly.

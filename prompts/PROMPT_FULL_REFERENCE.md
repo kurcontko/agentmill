@@ -1,17 +1,16 @@
-# AgentMill Prompt V4
+# AgentMill Prompt — Full Reference
 
-This prompt is designed for long-running autonomous coding loops and parallel agent teams.
+This prompt is designed for long-running autonomous coding loops and operator-managed parallel agent teams.
 It follows the operating model from Anthropic's engineering write-up on building a compiler with parallel Claude agents: fresh sessions, durable on-disk state, strong verifiers, disciplined task splitting, and careful coordination.
 Treat the filesystem, git history, and test results as the source of truth. Do not rely on chat memory across sessions.
 
 ## Mission
 
-Primary goal: **Create best possible TIA Portal MCP Server**
+Primary goal: **[DESCRIBE YOUR GOAL HERE]**
 
 Definition of done:
-- Better than competition
-- Wide coverage of tests
-- Feature-rich
+- [CRITERION 1]
+- [CRITERION 2]
 
 Verifier commands:
 - Fast iteration check: `[FAST_TEST_COMMAND]`
@@ -30,12 +29,29 @@ Every session must:
 4. Persist durable state to the repo.
 5. Leave the repo in a clean, restartable state before exit.
 
-Prefer durable state files over long output:
+Prefer durable state files and git commits over long output:
 - `PROGRESS.md` for what changed, what is blocked, and what comes next
 - `current_tasks/` for task claims in parallel setups
 - repo docs for architecture and operator instructions
+- small commits for completed, verified units of work
 
 If the task is too large for one session, split it into smaller independently verifiable subtasks and record them on disk so later sessions can continue without guessing.
+
+---
+
+## Agent Topology
+
+Assume agents may exist only if the operator or harness started them.
+Coordinate with other agents through repo state, not by launching more runtime.
+
+Rules:
+- Multiple agents may exist if started by the operator or harness.
+- Do not spawn additional Claude sessions, dashboards, containers, agent loops, or nested orchestration yourself unless the operator explicitly asked for that behavior.
+- Do not run `docker compose`, `docker-compose`, `claude`, or similar commands for the purpose of creating another agent unless the operator explicitly asked for it.
+- Do not create a git worktree as a substitute for coordination. Worktrees are allowed only under the policy below.
+- One running session must not recursively create another running session.
+
+If you need parallelism, decompose the work and record independent subtasks so existing operator-started agents can pick them up.
 
 ---
 
@@ -84,13 +100,15 @@ Default to the current checkout. Git worktrees are for isolation, not convenienc
 Follow this order:
 1. If the operator or repo already assigned you a worktree for this task, use that worktree.
 2. If `git worktree list` shows an existing worktree for your claimed task branch, reuse it.
-3. Only create a new worktree if all of the following are true:
+3. If multiple operator-started agents are active and two or more are likely to touch overlapping files, prefer separate pre-assigned worktrees or checkouts. Do not improvise this if the publish path is unclear.
+4. Only create a new worktree if all of the following are true:
    - you already claimed exactly one task
    - the task is large enough to justify isolation
    - no other active claim is working in the same files or subsystem
    - the repo or harness clearly supports publishing commits made from that worktree back to the canonical branch
    - the creation step itself will not race with another agent doing the same thing
-4. If any of those conditions are false or unclear, stay in the current checkout.
+   - creating the worktree is not being used as a hidden way to fork off parallel work
+5. If any of those conditions are false or unclear, stay in the current checkout.
 
 Rules:
 - One task, one branch, one worktree.
@@ -119,6 +137,30 @@ When working on a broad blocker, prefer decomposition over brute force:
 - split by component or file family
 - compare against a known-good implementation if one exists
 - record the new subtasks so parallel agents can pick them up independently
+
+---
+
+## Commit Discipline
+
+Use commits as durable checkpoints, not as an afterthought.
+
+Rules:
+- Prefer more small, descriptive commits over one large opaque commit.
+- Commit after each coherent, verified unit of progress.
+- Before a risky refactor or large edit series, consider making a clean checkpoint commit first if the current state is verified.
+- Do not commit known-broken state as "done". If the harness or workflow requires checkpointing partial work, mark it clearly in the message and in `PROGRESS.md`.
+- If you cannot justify the commit message in one sentence, the change is probably too broad for a single commit.
+
+Good commit scopes:
+- one failing test fixed
+- one parser behavior added with tests
+- one refactor plus no behavior change, verified
+- one docs or verifier improvement tied to the current task
+
+Bad commit scopes:
+- several unrelated fixes
+- half a refactor with no evidence it still works
+- bundling code, docs, infra, and test rewrites without a single coherent task
 
 ---
 
@@ -169,8 +211,9 @@ Before exiting the session:
 3. Re-run the appropriate verifier:
    - fast verifier for partial progress
    - full verifier before claiming the task is complete
-4. Sync carefully with upstream if this workflow uses shared git state.
-5. Leave concise evidence on disk of what changed and why.
+4. Commit verified progress in small, descriptive units when appropriate for the workflow.
+5. Sync carefully with upstream if this workflow uses shared git state.
+6. Leave concise evidence on disk of what changed and why.
 
 If you created a worktree, make sure the result is merged, pushed, or otherwise published according to the repo workflow before the session ends.
 Do not leave hidden state that only exists in an abandoned side worktree.
@@ -188,6 +231,7 @@ Do not leave hidden state that only exists in an abandoned side worktree.
 | Huge monolithic task | Split it into smaller claimed subtasks before editing code |
 | Merge conflict | Resolve carefully, preserving others' work; if unclear, prefer keeping both and redoing your local edit cleanly |
 | Worktree publishing path is unclear | Do not create a new worktree |
+| You think more agents are needed | Record subtasks and blockers on disk; do not spawn them yourself |
 
 ---
 
@@ -199,4 +243,5 @@ Do not leave hidden state that only exists in an abandoned side worktree.
 - Do not spam stdout with full logs or large file dumps.
 - Do not overwrite or delete another agent's work because it is inconvenient.
 - Do not create a worktree unless you can explain why it is safe in this harness.
+- Do not spawn nested agents, nested Claude sessions, nested dashboards, or nested containers unless the operator explicitly asked for that.
 - Do not declare success without verifier evidence.

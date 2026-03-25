@@ -13,12 +13,14 @@ repo_log() {
 
 has_pyproject_dev_extra() {
     [[ -f pyproject.toml ]] && rg -q '^\[project\.optional-dependencies\]' pyproject.toml && rg -q '^\s*dev\s*=' pyproject.toml
-    return $?
+    local rc=$?
+    return "$rc"
 }
 
 has_pyproject_dev_group() {
     [[ -f pyproject.toml ]] && rg -q '^\[dependency-groups\]' pyproject.toml && rg -q '^\s*dev\s*=' pyproject.toml
-    return $?
+    local rc=$?
+    return "$rc"
 }
 
 activate_venv() {
@@ -71,6 +73,16 @@ if [[ -f pyproject.toml ]]; then
         fi
         repo_log "Running: uv ${uv_args[*]}"
         uv "${uv_args[@]}"
+    elif [[ -f poetry.lock ]] && command -v poetry >/dev/null 2>&1; then
+        repo_log "Running: poetry install"
+        poetry config virtualenvs.in-project true 2>/dev/null || true
+        poetry install --no-interaction
+    elif [[ -f poetry.lock ]]; then
+        # Poetry lockfile exists but poetry not installed — install it, then use it
+        repo_log "Installing Poetry and running: poetry install"
+        python3 -m pip install --no-cache-dir poetry
+        poetry config virtualenvs.in-project true 2>/dev/null || true
+        poetry install --no-interaction
     else
         if [[ ! -d .venv ]]; then
             repo_log "Creating virtualenv"
