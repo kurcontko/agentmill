@@ -10,6 +10,10 @@ HOST_SETTINGS="/home/agent/.claude/settings.host.json"
 TARGET_SETTINGS="/home/agent/.claude/settings.json"
 HOST_PLUGINS="/home/agent/.host-plugins"
 TARGET_PLUGINS="/home/agent/.claude/plugins"
+HOST_SKILLS="/home/agent/.host-skills"
+TARGET_SKILLS="/home/agent/.claude/skills"
+HOST_AGENTS="/home/agent/.host-agents"
+TARGET_AGENTS="/home/agent/.claude/agents"
 DEFAULT_TRUSTED_PATHS="/workspace/repo /workspace/upstream"
 
 # --- Merge ~/.claude.json (MCP servers, plugins) ----------------------------
@@ -65,6 +69,22 @@ for path in '$DEFAULT_TRUSTED_PATHS'.split():
             project[key] = val
     project['hasTrustDialogAccepted'] = True
     project['hasTrustDialogHooksAccepted'] = True
+
+    # Auto-enable project .mcp.json servers so agents skip trust prompts
+    mcp_json = os.path.join(path, '.mcp.json')
+    if os.path.isfile(mcp_json):
+        try:
+            mcp_data = json.load(open(mcp_json))
+            mcp_servers = mcp_data.get('mcpServers', {})
+            enabled = project.get('enabledMcpjsonServers', [])
+            for name in mcp_servers:
+                if name not in enabled:
+                    enabled.append(name)
+            if enabled:
+                project['enabledMcpjsonServers'] = enabled
+        except (json.JSONDecodeError, OSError):
+            pass
+
     projects[path] = project
 
 target['projects'] = projects
@@ -95,9 +115,20 @@ target_allow = perms.get('allow', [])
 perms['allow'] = list(set(target_allow + host_allow))
 target['permissions'] = perms
 target['skipDangerousModePermissionPrompt'] = True
+target['enableAllProjectMcpServers'] = True
 
 if 'enabledPlugins' in host:
     target['enabledPlugins'] = host['enabledPlugins']
+
+# Forward hooks from host settings
+if 'hooks' in host:
+    target['hooks'] = host['hooks']
+
+# Forward env vars from host settings
+if 'env' in host:
+    target_env = target.get('env', {})
+    target_env.update(host['env'])
+    target['env'] = target_env
 
 json.dump(target, open('$TARGET_SETTINGS', 'w'), indent=2)
 " 2>/dev/null || true
@@ -150,4 +181,16 @@ for marketplace in marketplaces.values():
 json.dump(marketplaces, open('$MARKETPLACES', 'w'), indent=2)
 " 2>/dev/null || true
     fi
+fi
+
+# --- Copy user skills ----------------------------------------------------------
+if [[ -d "$HOST_SKILLS" ]] && [[ "$(ls -A "$HOST_SKILLS" 2>/dev/null)" ]]; then
+    mkdir -p "$TARGET_SKILLS"
+    cp -a "$HOST_SKILLS"/. "$TARGET_SKILLS"/ 2>/dev/null || true
+fi
+
+# --- Copy user agents ----------------------------------------------------------
+if [[ -d "$HOST_AGENTS" ]] && [[ "$(ls -A "$HOST_AGENTS" 2>/dev/null)" ]]; then
+    mkdir -p "$TARGET_AGENTS"
+    cp -a "$HOST_AGENTS"/. "$TARGET_AGENTS"/ 2>/dev/null || true
 fi

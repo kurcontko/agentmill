@@ -9,6 +9,15 @@ x-common-env: &common-env
   EXTRA_PYTHON_TOOLS: ${EXTRA_PYTHON_TOOLS:-}
   AUTO_RALPH_MAX_ITERATIONS: ${AUTO_RALPH_MAX_ITERATIONS:-10}
   AUTO_RALPH_COMPLETION_PROMISE: ${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}
+  # Container hardening: disable auto-updater, telemetry, error reporting
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+  DISABLE_COST_WARNINGS: "1"
+  GIT_TERMINAL_PROMPT: "0"
+  # Forward host proxy/TLS settings when set
+  HTTP_PROXY: ${HTTP_PROXY:-}
+  HTTPS_PROXY: ${HTTPS_PROXY:-}
+  NO_PROXY: ${NO_PROXY:-}
+  NODE_EXTRA_CA_CERTS: ${NODE_EXTRA_CA_CERTS:-}
 
 x-agent-base: &agent-base
   build: .
@@ -20,6 +29,8 @@ x-agent-base: &agent-base
     - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
     - ~/.claude/plugins:/home/agent/.host-plugins:ro
     - ~/.claude/commands:/home/agent/.claude/commands:ro
+    - ~/.claude/skills:/home/agent/.host-skills:ro
+    - ~/.claude/agents:/home/agent/.host-agents:ro
 
 services:
 # --- Headless (default) ---------------------------------------
@@ -40,6 +51,8 @@ services:
       - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
+      - ~/.claude/skills:/home/agent/.host-skills:ro
+      - ~/.claude/agents:/home/agent/.host-agents:ro
 
 # --- Multi-agent: independent clones --------------------------
 # Mounts repo as upstream. Each agent clones into its own
@@ -71,6 +84,8 @@ services:
       - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
+      - ~/.claude/skills:/home/agent/.host-skills:ro
+      - ~/.claude/agents:/home/agent/.host-agents:ro
 
   agent-2:
     <<: *agent-base
@@ -89,6 +104,8 @@ services:
       - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
+      - ~/.claude/skills:/home/agent/.host-skills:ro
+      - ~/.claude/agents:/home/agent/.host-agents:ro
 
   agent-3:
     <<: *agent-base
@@ -107,6 +124,8 @@ services:
       - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
+      - ~/.claude/skills:/home/agent/.host-skills:ro
+      - ~/.claude/agents:/home/agent/.host-agents:ro
 
 # --- Watch mode -----------------------------------------------
 # Autonomous Claude TUI forwarded to your terminal. You observe.
@@ -131,6 +150,8 @@ services:
       - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
+      - ~/.claude/skills:/home/agent/.host-skills:ro
+      - ~/.claude/agents:/home/agent/.host-agents:ro
 
 # --- Interactive mode ------------------------------------------
 # Plain Claude TUI. You drive, no automation.
@@ -154,3 +175,5 @@ services:
       - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
       - ~/.claude/plugins:/home/agent/.host-plugins:ro
       - ~/.claude/commands:/home/agent/.claude/commands:ro
+      - ~/.claude/skills:/home/agent/.host-skills:ro
+      - ~/.claude/agents:/home/agent/.host-agents:ro
