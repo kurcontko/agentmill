@@ -1,0 +1,30 @@
+# TASK.md — Copy this into your target repo and edit it
+
+## Mission
+
+Add input validation to the user registration endpoint so that malformed
+requests return clear 400 errors instead of crashing with a 500.
+
+## Definition of Done
+
+- Email field rejects values without `@` and a valid domain
+- Password field enforces minimum 8 characters, at least one digit
+- Username field rejects empty strings and strings over 64 characters
+- All validation errors return JSON with a human-readable `message` field
+- Existing passing tests still pass
+
+## Verifier Commands
+
+```bash
+# Fast check (runs in < 10s — agent uses this between edits)
+python -m pytest tests/test_registration.py -x -q
+
+# Full check (runs once before final commit)
+python -m pytest --tb=short
+```
+
+## Context
+
+- Registration handler is in `src/api/auth.py`, function `register_user`
+- Pydantic is already a dependency — prefer field validators over manual checks
+- Do not change the database schema

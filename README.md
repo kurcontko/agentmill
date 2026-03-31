@@ -19,16 +19,26 @@
   <a href="https://github.com/ossf/scorecard"><img src="https://api.scorecard.dev/projects/github.com/kurcontko/agentmill/badge" alt="OpenSSF Scorecard"></a>
 </p>
 
+## 30-Second Start
+
+```bash
+git clone https://github.com/kurcontko/agentmill.git && cd agentmill
+cp .env.example .env && echo "ANTHROPIC_API_KEY=sk-..." >> .env
+cp prompts/TASK.md.example /path/to/your/repo/TASK.md  # edit this with your task
+REPO_PATH=/path/to/your/repo docker compose run watch
+```
+
 ## Quick Start
 
-1. **Configure** — copy `.env.example` to `.env`, set `REPO_PATH` and auth
-2. **Write your prompt** — edit `prompts/PROMPT.md` with the task
+1. **Configure** — `cp .env.example .env`, set your API key and `REPO_PATH`
+2. **Define the task** — copy `prompts/TASK.md.example` into your target repo as `TASK.md`, fill it in
 3. **Run** — pick a mode below
 4. **Stop** — `docker compose down` (finishes current session, commits WIP, exits cleanly)
 
 ```bash
-cp .env.example .env   # then edit REPO_PATH and auth
-nano prompts/PROMPT.md  # describe the task
+cp .env.example .env                                    # set API key + REPO_PATH
+cp prompts/TASK.md.example /path/to/your/repo/TASK.md   # describe what you want done
+REPO_PATH=/path/to/your/repo docker compose run watch   # go
 ```
 
 ## Authentication
@@ -96,6 +106,19 @@ PROMPT_FILE_1=/prompts/features.md PROMPT_FILE_2=/prompts/tests.md \
 # Three agents, same branch (rebase on conflict)
 AGENT_BRANCH=main REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agent-3
 ```
+
+## Prompt Architecture
+
+AgentMill separates **what to do** from **how to work**:
+
+| File | Where it lives | What it does | Edit it? |
+|------|---------------|--------------|----------|
+| `TASK.md` | Your target repo root | Describes the task, success criteria, test commands | **Yes** — this is the main thing you customize |
+| `prompts/PROMPT.md` | AgentMill repo | Agent operating instructions (orient/claim/execute loop) | Rarely — only to change agent behavior |
+| `prompts/PROMPT_LITE.md` | AgentMill repo | Simpler agent instructions, good for single-agent use | Rarely |
+| `examples/tasks/*.md` | AgentMill repo | Ready-made TASK.md templates (bugfix, feature, refactor, tests) | Copy one as your starting point |
+
+**Most users only need to create a `TASK.md`** in their repo. See [`examples/tasks/`](examples/tasks/) for templates.
 
 ## Configuration
 
