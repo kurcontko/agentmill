@@ -23,15 +23,7 @@ AUTO_RALPH_COMPLETION_PROMISE="${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}"
 # shellcheck source=/entrypoint-common.sh
 . /entrypoint-common.sh
 
-mkdir -p "$LOG_DIR"
-
-log() {
-    local msg
-    msg="[agentmill $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
-    echo "$msg"
-    echo "$msg" >> "$LOG_DIR/agent.log"
-    return 0
-}
+# log() provided by entrypoint-common.sh
 
 require_auth
 merge_host_claude_config
