@@ -29,15 +29,7 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
-# — Logging helper ———————————————————————————————
-mkdir -p "$LOG_DIR"
-
-log() {
-    local msg
-    msg="[agentmill:agent-${AGENT_ID} $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
-    echo "$msg"
-    echo "$msg" >> "$LOG_DIR/agent-${AGENT_ID}.log"
-}
+# LOG_DIR already initialized by entrypoint-common.sh
 
 push_branch_with_retries() {
     local branch="$1"
