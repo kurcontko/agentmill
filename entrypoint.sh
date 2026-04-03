@@ -23,54 +23,28 @@ ITERATION=0
 SHUTTING_DOWN=false
 
 # — Graceful shutdown ————————————————————————————
-cleanup() {
-    echo "[agentmill] Received shutdown signal. Finishing current session..."
-    SHUTTING_DOWN=true
-}
+cleanup() { log "Received shutdown signal. Finishing current session..."; SHUTTING_DOWN=true; }
 trap cleanup SIGTERM SIGINT
 
 # LOG_DIR already initialized by entrypoint-common.sh
 
 push_branch_with_retries() {
-    local branch="$1"
-    local max_retries="${2:-$PUSH_REBASE_MAX_RETRIES}"
-    local retry=0
-    local push_output=""
+    local branch="$1" max_retries="${2:-$PUSH_REBASE_MAX_RETRIES}" retry=0 push_output
 
     log "Pushing to upstream (branch: $branch)..."
     while true; do
-        if push_output="$(git push --porcelain origin "$branch" 2>&1)"; then
-            return 0
-        fi
+        if push_output="$(git push --porcelain origin "$branch" 2>&1)"; then return 0; fi
 
         if ! push_failure_is_retryable "$push_output"; then
-            log "ERROR: git push failed permanently for branch $branch"
-            while IFS= read -r line; do
-                if [[ -n "$line" ]]; then
-                    log "git push: $line"
-                fi
-            done <<< "$push_output"
+            log "ERROR: git push failed permanently: $push_output"
             return 1
         fi
-
-        if [[ "$retry" -ge "$max_retries" ]]; then
-            log "ERROR: push failed after $max_retries retries"
-            return 1
-        fi
+        [[ "$retry" -lt "$max_retries" ]] || { log "ERROR: push failed after $max_retries retries"; return 1; }
 
         retry=$((retry + 1))
-        log "Push failed, rebasing and retrying ($retry/$max_retries)..."
-
-        if ! git fetch origin; then
-            log "ERROR: git fetch failed during push retry $retry/$max_retries"
-            return 1
-        fi
-
-        if ! git rebase "origin/$branch" 2>/dev/null; then
-            git rebase --abort 2>/dev/null || true
-            log "WARN: Rebase conflict on retry $retry/$max_retries, will retry next iteration"
-            return 1
-        fi
+        log "Push rejected, rebasing and retrying ($retry/$max_retries)..."
+        git fetch origin || { log "ERROR: git fetch failed on retry $retry"; return 1; }
+        git rebase "origin/$branch" 2>/dev/null || { git rebase --abort 2>/dev/null || true; log "WARN: Rebase conflict on retry $retry"; return 1; }
     done
 }
 
@@ -78,39 +52,17 @@ require_auth
 merge_host_claude_config
 configure_git_identity "$GIT_USER" "$GIT_EMAIL" "$AGENT_ID"
 
-# — Workspace setup ——————————————————————————————
-# Three modes, auto-detected:
-#
-#   1. Single agent (default)
-#      Mount: REPO_PATH -> /workspace/repo
-#      Agent works directly in the mounted repo.
-#
-#   2. Multi-agent: independent clones
-#      Mount: REPO_PATH -> /workspace/upstream (read-only)
-#      Each agent clones into /workspace/repo-$AGENT_ID.
-#      Sync via git push/pull to upstream.
-#
-#   3. Multi-agent: pre-created worktrees
-#      Mount: host worktree -> /workspace/repo
-#      Host creates worktrees beforehand; each agent gets its own mount.
-#      From the agent's perspective, this looks like mode 1.
-
+# — Workspace setup: auto-detect single/multi-agent/worktree mode —
 UPSTREAM_DIR="/workspace/upstream"
 REPO_DIR="/workspace/repo"
 
 if [[ -d "$UPSTREAM_DIR/.git" ]] || [[ -f "$UPSTREAM_DIR/HEAD" ]]; then
-    # Mode 2: upstream mounted — clone into isolated workspace
-    # Each agent gets its own clone. Sync via git push/pull.
-    # Default branch: agent-$AGENT_ID (safe to push to non-bare upstream
-    # as long as the branch isn't checked out on the host).
+    # Multi-agent: clone upstream into isolated workspace per agent
     REPO_DIR="/workspace/repo-${AGENT_ID}"
     : "${AGENT_BRANCH:=agent-${AGENT_ID}}"
     MULTI_AGENT=true
 
     log "Multi-agent mode: agent-${AGENT_ID} on branch ${AGENT_BRANCH}"
-
-    # Allow pushing to non-bare upstream (agents push to their own branches,
-    # not the checked-out branch, so this is safe).
     git -C "$UPSTREAM_DIR" config receive.denyCurrentBranch updateInstead 2>/dev/null || true
 
     if [[ ! -d "$REPO_DIR/.git" ]]; then
@@ -122,7 +74,6 @@ if [[ -d "$UPSTREAM_DIR/.git" ]] || [[ -f "$UPSTREAM_DIR/HEAD" ]]; then
         git fetch origin
     fi
 
-    # Create or checkout agent branch from upstream's HEAD
     UPSTREAM_HEAD="$(git -C "$UPSTREAM_DIR" rev-parse HEAD)"
     if git show-ref --verify --quiet "refs/heads/$AGENT_BRANCH"; then
         git checkout "$AGENT_BRANCH"
@@ -135,7 +86,6 @@ if [[ -d "$UPSTREAM_DIR/.git" ]] || [[ -f "$UPSTREAM_DIR/HEAD" ]]; then
     log "Repo ready at $REPO_DIR (branch: $(git branch --show-current))"
 
 elif [[ -d "$REPO_DIR/.git" ]] || [[ -f "$REPO_DIR/.git" ]]; then
-    # Mode 1 or 3: direct mount (single agent or pre-created worktree)
     MULTI_AGENT=false
     : "${AGENT_BRANCH:=main}"
     cd "$REPO_DIR"
@@ -167,17 +117,9 @@ while true; do
 
     log "==== Iteration $ITERATION ===="
 
-    # Check for prompt file
-    if [[ ! -f "$PROMPT_FILE" ]]; then
-        log "ERROR: Prompt file not found at $PROMPT_FILE"
-        log "Mount your prompt file or set PROMPT_FILE env var."
-        exit 1
-    fi
-
-    # Clear done sentinel from previous iteration
+    [[ -f "$PROMPT_FILE" ]] || { log "ERROR: Prompt file not found at $PROMPT_FILE"; exit 1; }
     rm -f "$DONE_FILE"
 
-    # Run Claude
     log "Running Claude (session log: $SESSION_LOG)..."
     PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
 
@@ -195,50 +137,27 @@ while true; do
 
     log "Claude exited with code $CLAUDE_EXIT"
 
-    # Check if agent signaled task completion via done file
-    if [[ -f "$DONE_FILE" ]]; then
-        log "Agent signaled done (found $DONE_FILE)"
-    else
-        log "WARN: Agent exited without signaling done (no $DONE_FILE)"
-    fi
+    if [[ -f "$DONE_FILE" ]]; then log "Agent signaled done"; else log "WARN: Agent exited without signaling done"; fi
 
-    # Commit any changes (controlled by AUTO_COMMIT flag)
+    # Commit changes (controlled by AUTO_COMMIT)
     if [[ -n "$(git status --porcelain)" ]]; then
-        # Check if the agent already committed during this iteration
         LAST_COMMIT_TIME="$(git log -1 --format='%ct' 2>/dev/null || echo 0)"
         AGENT_COMMITTED=false
-        if [[ "$LAST_COMMIT_TIME" -ge "$ITER_START_TIME" ]] 2>/dev/null; then
-            AGENT_COMMITTED=true
-        fi
+        [[ "$LAST_COMMIT_TIME" -ge "$ITER_START_TIME" ]] 2>/dev/null && AGENT_COMMITTED=true
 
         case "$AUTO_COMMIT" in
-            off)
-                log "Auto-commit disabled. Uncommitted changes left in working tree."
-                ;;
+            off) log "Auto-commit disabled." ;;
             wip)
                 if [[ "$AGENT_COMMITTED" == true ]]; then
-                    # Agent made its own commits — only safety-net the leftovers
-                    if [[ -n "$(git status --porcelain)" ]]; then
-                        log "Safety-net: committing leftover uncommitted changes as [wip]..."
-                        git add -A
-                        git commit -m "[wip] agent-${AGENT_ID}: uncommitted leftovers from iteration $ITERATION"
-                    fi
+                    # Safety-net leftovers only
+                    [[ -n "$(git status --porcelain)" ]] && { git add -A; git commit -m "[wip] agent-${AGENT_ID}: leftovers from iteration $ITERATION"; }
                 else
-                    # Agent didn't commit at all — save everything as wip
-                    log "Safety-net: agent made no commits, saving work as [wip]..."
-                    git add -A
-                    git commit -m "[wip] agent-${AGENT_ID}: iteration $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))"
-                fi
-                ;;
+                    git add -A; git commit -m "[wip] agent-${AGENT_ID}: iteration $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))"
+                fi ;;
             on|*)
-                log "Committing changes..."
-                git add -A
-                git commit -m "agent-${AGENT_ID}: iteration $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))"
-                log "Changes committed."
-                ;;
+                git add -A; git commit -m "agent-${AGENT_ID}: iteration $ITERATION ($(date -u '+%Y-%m-%d %H:%M:%S UTC'))" ;;
         esac
 
-        # Multi-agent: push agent branch to upstream
         if [[ "$MULTI_AGENT" == true ]] && ! push_branch_with_retries "$AGENT_BRANCH"; then
             log "WARN: Skipping push for iteration $ITERATION"
         fi
