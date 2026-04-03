@@ -119,8 +119,8 @@ class PushBranchWithRetriesTests(unittest.TestCase):
         result = self.run_helper()
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertNotIn("Push failed, rebasing and retrying", result.stdout)
-        self.assertIn("ERROR: git push failed permanently for branch agent-1", result.stdout)
+        self.assertNotIn("Push rejected, rebasing and retrying", result.stdout)
+        self.assertIn("ERROR: git push failed permanently:", result.stdout)
         self.assertIn("remote rejected", result.stdout)
 
     def test_retries_non_fast_forward_failures(self) -> None:
@@ -130,7 +130,7 @@ class PushBranchWithRetriesTests(unittest.TestCase):
         result = self.run_helper()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(result.stdout.count("Push failed, rebasing and retrying"), 1)
+        self.assertEqual(result.stdout.count("Push rejected, rebasing and retrying"), 1)
         self.assertNotIn("ERROR: git push failed permanently", result.stdout)
 
     def test_returns_success_without_retries_when_push_works(self) -> None:
@@ -139,7 +139,7 @@ class PushBranchWithRetriesTests(unittest.TestCase):
         result = self.run_helper()
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn("Push failed, rebasing and retrying", result.stdout)
+        self.assertNotIn("Push rejected, rebasing and retrying", result.stdout)
         self.assertNotIn("ERROR: push failed after 3 retries", result.stdout)
 
 
