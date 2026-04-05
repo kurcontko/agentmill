@@ -4,6 +4,8 @@
 logs/
 .claude/
 .docs/
+.DS_Store
+worktrees/
 
 # Secrets & credentials
 *.pem
