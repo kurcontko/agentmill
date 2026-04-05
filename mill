@@ -1,0 +1,327 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+    cat <<'EOF'
+mill — AgentMill CLI
+
+Usage:
+  mill run   <repo> [--model M] [--iterations N] [--prompt FILE] [--delay S] [--auto-commit MODE] [-d]
+  mill watch <repo> [--model M] [--prompt FILE] [--ralph] [--respawn]
+  mill multi <repo> [N] [-d] [--model M] [--iterations N]
+  mill shell <repo>                 Interactive Claude session
+  mill ps                           Show running containers
+  mill status                       Show agent iteration status
+  mill logs   [agent-id] [--session]  Tail agent or session logs
+  mill build  [--platform PLAT]     Build the container image
+  mill stop                         Stop all running services
+  mill memory  [topic] [--search Q]  View or search agent memory
+  mill history [--tail N]           Show iteration results log
+  mill clean                        Remove log and status files
+  mill init                         Create .env and starter prompt
+
+Environment:
+  ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN must be set (or in .env).
+
+Examples:
+  mill run ~/projects/myapp
+  mill run ~/projects/myapp --model opus --iterations 5 -d
+  mill watch ~/projects/myapp --ralph
+  mill multi ~/projects/myapp 2
+  mill status
+EOF
+    exit "${1:-0}"
+}
+
+# Parse .env file if it exists (handles KEY=value, KEY="value", KEY='value')
+load_env() {
+    [[ -f "$MILL_DIR/.env" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%%\#*}"                         # strip comments
+        [[ "$line" =~ ^[[:space:]]*$ ]] && continue # skip blank lines
+        [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
+        local key="${BASH_REMATCH[1]}" val="${BASH_REMATCH[2]}"
+        val="${val#\"}" val="${val%\"}"              # strip double quotes
+        val="${val#\'}" val="${val%\'}"              # strip single quotes
+        val="${val%"${val##*[! ]}"}"                 # trim trailing spaces
+        [[ -z "${!key:-}" ]] && export "$key=$val"
+    done < "$MILL_DIR/.env"
+}
+
+compose() {
+    if docker compose version >/dev/null 2>&1; then
+        docker compose -f "$MILL_DIR/docker-compose.yml" "$@"
+    else
+        docker-compose -f "$MILL_DIR/docker-compose.yml" "$@"
+    fi
+}
+
+require_repo() {
+    [[ -n "${1:-}" ]] || { echo "Error: repo path required" >&2; usage 1; }
+    local repo="$1"
+    [[ "$repo" == /* ]] || repo="$PWD/$repo"
+    [[ -d "$repo/.git" ]] || [[ -f "$repo/.git" ]] || { echo "Error: $repo is not a git repo" >&2; exit 1; }
+    export REPO_PATH="$repo"
+}
+
+cmd_run() {
+    local repo="" model="" iterations="" prompt="" delay="" auto_commit="" detach=false
+    [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --model)       model="$2"; shift 2 ;;
+            --iterations)  iterations="$2"; shift 2 ;;
+            --prompt)      prompt="$2"; shift 2 ;;
+            --delay)       delay="$2"; shift 2 ;;
+            --auto-commit) auto_commit="$2"; shift 2 ;;
+            -d|--detach)   detach=true; shift ;;
+            *) repo="${repo:-$1}"; shift ;;
+        esac
+    done
+    require_repo "$repo"
+    [[ -n "$model" ]]       && export MODEL="$model"
+    [[ -n "$iterations" ]]  && export MAX_ITERATIONS="$iterations"
+    [[ -n "$prompt" ]]      && export PROMPT_FILE="$prompt"
+    [[ -n "$delay" ]]       && export LOOP_DELAY="$delay"
+    [[ -n "$auto_commit" ]] && export AUTO_COMMIT="$auto_commit"
+
+    local up_args=(up)
+    [[ "$detach" == true ]] && up_args+=(-d)
+    up_args+=(headless)
+    compose "${up_args[@]}"
+}
+
+cmd_watch() {
+    local repo="" ralph=false respawn=false prompt="" model=""
+    [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --ralph)   ralph=true; shift ;;
+            --respawn) respawn=true; shift ;;
+            --prompt)  prompt="$2"; shift 2 ;;
+            --model)   model="$2"; shift 2 ;;
+            *) repo="${repo:-$1}"; shift ;;
+        esac
+    done
+    require_repo "$repo"
+    [[ "$ralph" == true ]]   && export AUTO_RALPH=true
+    [[ "$respawn" == true ]] && export RESPAWN=true
+    [[ -n "$prompt" ]]       && export PROMPT_FILE="$prompt"
+    [[ -n "$model" ]]        && export MODEL="$model"
+    compose run watch
+}
+
+cmd_multi() {
+    local repo="${1:-}"; shift || true
+    local count="${1:-3}"; shift || true
+    local detach=false model="" iterations=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -d|--detach)   detach=true; shift ;;
+            --model)       model="$2"; shift 2 ;;
+            --iterations)  iterations="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    require_repo "$repo"
+    [[ "$count" -ge 1 && "$count" -le 10 ]] || { echo "Error: agent count must be 1-10" >&2; exit 1; }
+    [[ -n "$model" ]]      && export MODEL="$model"
+    [[ -n "$iterations" ]] && export MAX_ITERATIONS="$iterations"
+    local services=""
+    for i in $(seq 1 "$count"); do services+="agent-$i "; done
+    local up_args=(up)
+    [[ "$detach" == true ]] && up_args+=(-d)
+    # shellcheck disable=SC2086
+    compose "${up_args[@]}" $services
+}
+
+cmd_shell() {
+    require_repo "${1:-}"
+    compose run interactive
+}
+
+cmd_status() {
+    local log_dir="$MILL_DIR/logs" found=false
+    if [[ ! -d "$log_dir" ]]; then echo "No logs directory found."; exit 0; fi
+
+    printf "%-8s  %-10s  %-12s  %-30s  %s\n" "AGENT" "PROGRESS" "STATE" "DETAIL" "TIMESTAMP"
+    printf "%-8s  %-10s  %-12s  %-30s  %s\n" "-----" "--------" "-----" "------" "---------"
+
+    for f in "$log_dir"/status-*.json; do
+        [[ -f "$f" ]] || continue
+        found=true
+        local line agent="" iter="" max_iter="" state="" detail="" ts="" progress=""
+        line="$(<"$f")"
+        [[ "$line" =~ \"agent\":\"([^\"]+)\" ]]          && agent="${BASH_REMATCH[1]}"
+        [[ "$line" =~ \"iteration\":([0-9]+) ]]           && iter="${BASH_REMATCH[1]}"
+        [[ "$line" =~ \"max_iterations\":([0-9]+) ]]      && max_iter="${BASH_REMATCH[1]}"
+        [[ "$line" =~ \"state\":\"([^\"]+)\" ]]           && state="${BASH_REMATCH[1]}"
+        [[ "$line" =~ \"detail\":\"([^\"]+)\" ]]          && detail="${BASH_REMATCH[1]}"
+        [[ "$line" =~ \"timestamp\":\"([^\"]+)\" ]]       && ts="${BASH_REMATCH[1]}"
+        if [[ -n "$max_iter" && "$max_iter" -gt 0 ]]; then
+            progress="${iter}/${max_iter}"
+        else
+            progress="${iter}/inf"
+        fi
+        printf "%-8s  %-10s  %-12s  %-30s  %s\n" "$agent" "$progress" "$state" "$detail" "$ts"
+    done
+
+    [[ "$found" == true ]] || echo "No agent status files found."
+}
+
+cmd_ps() { compose ps; }
+
+cmd_logs() {
+    local agent_id="${1:-1}" session=false
+    [[ "${1:-}" == "--session" ]] && { session=true; agent_id="${2:-1}"; }
+    [[ "${2:-}" == "--session" ]] && session=true
+
+    if [[ "$session" == true ]]; then
+        # Show latest session log for this agent
+        local latest
+        latest="$(find "$MILL_DIR/logs" -maxdepth 1 -name 'session_*_iter*.log' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+        if [[ -n "$latest" ]]; then
+            echo "=== $(basename "$latest") ==="
+            tail -f "$latest"
+        else
+            echo "No session logs found." >&2; exit 1
+        fi
+    else
+        local logfile="$MILL_DIR/logs/agent-${agent_id}.log"
+        if [[ -f "$logfile" ]]; then
+            tail -f "$logfile"
+        else
+            echo "No log file at $logfile" >&2
+            echo "Available logs:" >&2
+            ls "$MILL_DIR/logs/"agent-*.log 2>/dev/null || echo "  (none)"
+            exit 1
+        fi
+    fi
+}
+
+cmd_build() {
+    local platform=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --platform) platform="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    if [[ -n "$platform" ]]; then
+        DOCKER_DEFAULT_PLATFORM="$platform" docker build -t agentmill "$MILL_DIR"
+    else
+        docker build -t agentmill "$MILL_DIR"
+    fi
+}
+
+cmd_stop() { compose down; }
+
+cmd_init() {
+    if [[ ! -f "$MILL_DIR/.env" ]]; then
+        cp "$MILL_DIR/.env.example" "$MILL_DIR/.env"
+        echo "Created .env from .env.example — edit it to set your auth key and REPO_PATH."
+    else
+        echo ".env already exists."
+    fi
+    mkdir -p "$MILL_DIR/prompts"
+    if [[ ! -f "$MILL_DIR/prompts/PROMPT.md" ]]; then
+        cat > "$MILL_DIR/prompts/PROMPT.md" <<'PROMPT'
+# AgentMill Task
+
+Read `TASK.md` for your mission. If it doesn't exist, read `PROGRESS.md` and pick the next item.
+
+**Run `touch /tmp/.agentmill-done` when finished.**
+PROMPT
+        echo "Created prompts/PROMPT.md — customize it for your workflow."
+    else
+        echo "prompts/PROMPT.md already exists."
+    fi
+}
+
+cmd_memory() {
+    local memory_dir="$MILL_DIR/memory" topic="" search=""
+    # Also check REPO_PATH/memory if set
+    [[ -n "${REPO_PATH:-}" && -d "$REPO_PATH/memory" ]] && memory_dir="$REPO_PATH/memory"
+    [[ -d "$memory_dir" ]] || { echo "No memory directory found."; exit 0; }
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --search) search="$2"; shift 2 ;;
+            *) topic="${topic:-$1}"; shift ;;
+        esac
+    done
+
+    if [[ -n "$search" ]]; then
+        echo "Searching memory for: $search"
+        grep -rn "$search" "$memory_dir"/*.md 2>/dev/null || echo "No matches."
+    elif [[ -n "$topic" ]]; then
+        local file="$memory_dir/${topic}.md"
+        if [[ -f "$file" ]]; then
+            cat "$file"
+        else
+            echo "No memory for topic: $topic"
+            echo "Available topics:"
+            find "$memory_dir" -name '*.md' -exec basename {} .md \; 2>/dev/null | sort
+        fi
+    else
+        echo "Memory topics:"
+        find "$memory_dir" -name '*.md' -exec basename {} .md \; 2>/dev/null | sort
+        local total
+        total="$(find "$memory_dir" -name '*.md' -exec cat {} + 2>/dev/null | grep -c '^---$' || echo 0)"
+        echo ""
+        echo "Total entries: $((total / 2))"
+    fi
+}
+
+cmd_history() {
+    local results_log="$MILL_DIR/logs/results.tsv" tail_n=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --tail) tail_n="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+
+    [[ -f "$results_log" ]] || { echo "No results log found. Run some iterations first."; exit 0; }
+
+    if [[ -n "$tail_n" ]]; then
+        # Header + last N lines
+        head -1 "$results_log"
+        tail -n "$tail_n" "$results_log"
+    else
+        cat "$results_log"
+    fi | column -t -s $'\t'
+}
+
+cmd_clean() {
+    local log_dir="$MILL_DIR/logs"
+    [[ -d "$log_dir" ]] || { echo "Nothing to clean."; return 0; }
+    local count
+    count="$(find "$log_dir" -maxdepth 1 -type f | wc -l | tr -d ' ')"
+    rm -f "$log_dir"/status-*.json "$log_dir"/agent-*.log "$log_dir"/session_*.log
+    echo "Cleaned $count log files from $log_dir"
+}
+
+# --- Main ---
+load_env
+
+case "${1:-}" in
+    run)    shift; cmd_run "$@" ;;
+    watch)  shift; cmd_watch "$@" ;;
+    multi)  shift; cmd_multi "$@" ;;
+    shell)  shift; cmd_shell "$@" ;;
+    ps)     shift; cmd_ps "$@" ;;
+    status) shift; cmd_status "$@" ;;
+    logs)   shift; cmd_logs "$@" ;;
+    build)  shift; cmd_build "$@" ;;
+    stop)   shift; cmd_stop "$@" ;;
+    memory) shift; cmd_memory "$@" ;;
+    history) shift; cmd_history "$@" ;;
+    clean)  shift; cmd_clean "$@" ;;
+    init)   shift; cmd_init "$@" ;;
+    -h|--help|help) usage 0 ;;
+    "") usage 0 ;;
+    *)  echo "Unknown command: $1" >&2; usage 1 ;;
+esac

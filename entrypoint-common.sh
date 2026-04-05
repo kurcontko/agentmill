@@ -106,3 +106,103 @@ push_failure_is_retryable() {
     esac
     return 1
 }
+
+# --- Shared markdown memory layer ---
+# Append-only, lock-guarded, per-topic .md files in a shared memory/ directory.
+# Safe for multi-agent concurrent writes. Uses flock (Linux) or mkdir (macOS/portable).
+
+MEMORY_DIR="${MEMORY_DIR:-/workspace/memory}"
+
+# Portable exclusive lock: flock if available, mkdir fallback
+_lock_acquire() {
+    local lockpath="$1" timeout="${2:-5}" i=0
+    if command -v flock >/dev/null 2>&1; then
+        exec 200>"$lockpath"
+        flock -x -w "$timeout" 200
+        return $?
+    fi
+    # mkdir-based fallback (atomic on POSIX)
+    while ! mkdir "$lockpath.d" 2>/dev/null; do
+        i=$((i + 1))
+        [[ "$i" -ge "$((timeout * 10))" ]] && return 1
+        sleep 0.1
+    done
+}
+
+_lock_release() {
+    local lockpath="$1"
+    if command -v flock >/dev/null 2>&1; then
+        exec 200>&-
+    else
+        rmdir "$lockpath.d" 2>/dev/null || true
+    fi
+}
+
+memory_init() {
+    mkdir -p "$MEMORY_DIR"
+}
+
+# memory_write <topic> <content> [agent_id]
+# Appends a timestamped entry to memory/<topic>.md under exclusive lock.
+memory_write() {
+    local topic="$1" content="$2" agent="${3:-${AGENT_ID:-unknown}}"
+    local file="$MEMORY_DIR/${topic}.md"
+    local lock="$MEMORY_DIR/.${topic}.lock"
+    memory_init
+
+    if _lock_acquire "$lock" 5; then
+        printf '\n---\nagent: %s\ntimestamp: %s\n---\n%s\n' \
+            "$agent" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$content" >> "$file"
+        _lock_release "$lock"
+    else
+        log "WARN: memory lock timeout for $topic"
+        return 1
+    fi
+}
+
+# memory_read <topic> [tail_lines]
+# Reads memory/<topic>.md (no lock needed for reads).
+memory_read() {
+    local topic="$1" lines="${2:-50}"
+    local file="$MEMORY_DIR/${topic}.md"
+    [[ -f "$file" ]] || { echo "(no memory for topic: $topic)"; return 0; }
+    tail -n "$lines" "$file"
+}
+
+# memory_list — show all topics
+memory_list() {
+    memory_init
+    find "$MEMORY_DIR" -name '*.md' -exec basename {} .md \; 2>/dev/null | sort
+}
+
+# memory_search <pattern> — grep across all memory files
+memory_search() {
+    memory_init
+    grep -rl "$1" "$MEMORY_DIR"/*.md 2>/dev/null | while read -r f; do
+        echo "=== $(basename "$f" .md) ==="
+        grep -n "$1" "$f"
+    done
+}
+
+# --- Iteration log (Karpathy autoresearch pattern) ---
+# Append-only TSV: iteration | agent | timestamp | files_changed | commits | status | description
+RESULTS_LOG="${RESULTS_LOG:-/workspace/logs/results.tsv}"
+
+results_log_init() {
+    mkdir -p "$(dirname "$RESULTS_LOG")"
+    [[ -f "$RESULTS_LOG" ]] || printf 'iteration\tagent\ttimestamp\tfiles_changed\tcommits\tstatus\tdescription\n' > "$RESULTS_LOG"
+}
+
+# results_log_append <iteration> <agent> <files_changed> <commits> <status> <description>
+results_log_append() {
+    local iter="$1" agent="$2" files="$3" commits="$4" status="$5" desc="$6"
+    local lock="${RESULTS_LOG}.lock"
+    results_log_init
+    if _lock_acquire "$lock" 5; then
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+            "$iter" "$agent" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$files" "$commits" "$status" "$desc" >> "$RESULTS_LOG"
+        _lock_release "$lock"
+    else
+        log "WARN: results log lock timeout"
+    fi
+}
