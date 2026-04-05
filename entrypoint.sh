@@ -117,7 +117,11 @@ while true; do
 
     log "==== Iteration $ITERATION ===="
 
-    [[ -f "$PROMPT_FILE" ]] || { log "ERROR: Prompt file not found at $PROMPT_FILE"; exit 1; }
+    [[ -f "$PROMPT_FILE" ]] || {
+        log "ERROR: Prompt file not found at $PROMPT_FILE"
+        log "Mount your prompt file or set PROMPT_FILE env var."
+        exit 1
+    }
     rm -f "$DONE_FILE"
 
     log "Running Claude (session log: $SESSION_LOG)..."

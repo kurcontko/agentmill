@@ -3,7 +3,7 @@ set -euo pipefail
 
 # AgentMill TUI Mode — interactive or autonomous (Ralph Loop)
 REPO_DIR="/workspace/repo"
-LOG_DIR="/workspace/logs"
+export LOG_DIR="/workspace/logs"
 PROMPT_FILE="${PROMPT_FILE:-/prompts/PROMPT.md}"
 MODEL="${MODEL:-sonnet}"
 GIT_USER="${GIT_USER:-agentmill}"
@@ -22,7 +22,11 @@ require_auth
 merge_host_claude_config
 configure_git_identity "$GIT_USER" "$GIT_EMAIL"
 
-[[ -d "$REPO_DIR/.git" ]] || [[ -f "$REPO_DIR/.git" ]] || { log "ERROR: No repo at $REPO_DIR"; exit 1; }
+[[ -d "$REPO_DIR/.git" ]] || [[ -f "$REPO_DIR/.git" ]] || {
+    log "ERROR: No repo found at $REPO_DIR."
+    log "Set REPO_PATH in .env."
+    exit 1
+}
 
 cd "$REPO_DIR"
 log "Repo ready at $REPO_DIR"

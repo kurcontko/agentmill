@@ -13,19 +13,20 @@ TARGET_AGENTS="/home/agent/.claude/agents"
 
 # --- Merge ~/.claude.json and settings.json in one Python pass ----------------
 python3 << 'PYEOF' 2>/dev/null || true
-import json, re, os
+import json, os
 
 def load(path):
-    return json.load(open(path)) if os.path.exists(path) else {}
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as handle:
+            return json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 def save(path, data):
-    json.dump(data, open(path, "w"), indent=2)
-
-def rewrite_plugin_paths(data):
-    """Replace any host home dir paths with container path."""
-    s = json.dumps(data)
-    s = re.sub(r'"[^"]*?/\.claude/plugins/', '"/home/agent/.claude/plugins/', s)
-    return json.loads(s)
+    with open(path, "w") as handle:
+        json.dump(data, handle, indent=2)
 
 # --- claude.json: merge MCP servers and trusted project config ----------------
 host_cfg = load(os.environ.get("HOST_CONFIG", "/home/agent/.host-claude.json"))
