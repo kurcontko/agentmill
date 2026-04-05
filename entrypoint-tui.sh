@@ -21,6 +21,7 @@ AUTO_RALPH_COMPLETION_PROMISE="${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}"
 require_auth
 merge_host_claude_config
 configure_git_identity "$GIT_USER" "$GIT_EMAIL"
+memory_init
 
 [[ -d "$REPO_DIR/.git" ]] || [[ -f "$REPO_DIR/.git" ]] || { log "ERROR: No repo at $REPO_DIR"; exit 1; }
 

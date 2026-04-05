@@ -50,6 +50,7 @@ x-repo-volumes: &repo-volumes
   - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
   - ./prompts:/prompts
   - ./logs:/workspace/logs
+  - ./memory:/workspace/memory
   - ~/.claude.json:/home/agent/.host-claude.json:ro
   - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
   - ~/.claude/plugins:/home/agent/.host-plugins:ro
@@ -61,6 +62,7 @@ x-upstream-volumes: &upstream-volumes
   - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/upstream
   - ./prompts:/prompts
   - ./logs:/workspace/logs
+  - ./memory:/workspace/memory
   - ~/.claude.json:/home/agent/.host-claude.json:ro
   - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
   - ~/.claude/plugins:/home/agent/.host-plugins:ro

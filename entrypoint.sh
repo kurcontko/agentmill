@@ -50,6 +50,8 @@ push_branch_with_retries() {
 
 require_auth
 merge_host_claude_config
+results_log_init
+memory_init
 configure_git_identity "$GIT_USER" "$GIT_EMAIL" "$AGENT_ID"
 
 # — Workspace setup: auto-detect single/multi-agent/worktree mode —
@@ -139,6 +141,10 @@ while true; do
 
     if [[ -f "$DONE_FILE" ]]; then log "Agent signaled done"; else log "WARN: Agent exited without signaling done"; fi
 
+    # Capture iteration metrics for results log
+    ITER_FILES_CHANGED="$(git diff --name-only HEAD 2>/dev/null | wc -l | tr -d ' ')"
+    ITER_COMMITS_BEFORE="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
+
     # Commit changes (controlled by AUTO_COMMIT)
     if [[ -n "$(git status --porcelain)" ]]; then
         LAST_COMMIT_TIME="$(git log -1 --format='%ct' 2>/dev/null || echo 0)"
@@ -164,6 +170,16 @@ while true; do
     else
         log "No changes to commit."
     fi
+
+    # Log iteration results (Karpathy autoresearch pattern)
+    ITER_COMMITS_AFTER="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
+    ITER_NEW_COMMITS=$((ITER_COMMITS_AFTER - ITER_COMMITS_BEFORE))
+    ITER_STATUS="kept"
+    [[ "$ITER_FILES_CHANGED" -eq 0 && "$ITER_NEW_COMMITS" -eq 0 ]] && ITER_STATUS="noop"
+    [[ "$CLAUDE_EXIT" -ne 0 ]] && ITER_STATUS="error"
+    ITER_DESC="exit=$CLAUDE_EXIT"
+    [[ -f "$DONE_FILE" ]] && ITER_DESC="done"
+    results_log_append "$ITERATION" "$AGENT_ID" "$ITER_FILES_CHANGED" "$ITER_NEW_COMMITS" "$ITER_STATUS" "$ITER_DESC"
 
     # Check iteration limit
     if [[ "$MAX_ITERATIONS" -gt 0 ]] && [[ "$ITERATION" -ge "$MAX_ITERATIONS" ]]; then
