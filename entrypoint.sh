@@ -125,6 +125,14 @@ while true; do
     log "Running Claude (session log: $SESSION_LOG)..."
     PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
 
+    # Inject iteration context from previous run (Karpathy pattern: carry forward)
+    if [[ "$ITERATION" -gt 1 ]]; then
+        ITER_CTX="$(iteration_context)"
+        PROMPT_CONTENT="$(cat "$ITER_CTX")
+
+$PROMPT_CONTENT"
+    fi
+
     set +e
     claude --dangerously-skip-permissions \
         -p "$PROMPT_CONTENT" \

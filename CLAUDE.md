@@ -16,6 +16,8 @@ Docker-based framework for running autonomous AI agents (Claude Code) in respawn
 ./mill memory                              # list memory topics
 ./mill memory decisions                    # read a memory topic
 ./mill memory --search "pattern"           # search across memory
+./mill memory decisions --clear            # clear a memory topic
+./mill diff                                # show recent changes across iterations
 ./mill logs 1                              # tail agent-1 logs
 ./mill build                               # build container image
 ./mill stop                                # stop all services

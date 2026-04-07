@@ -184,6 +184,56 @@ memory_search() {
     done
 }
 
+# memory_clear <topic> — remove a topic file (with lock)
+memory_clear() {
+    local topic="$1"
+    local file="$MEMORY_DIR/${topic}.md"
+    local lock="$MEMORY_DIR/.${topic}.lock"
+    [[ -f "$file" ]] || { echo "(no memory for topic: $topic)"; return 0; }
+    if _lock_acquire "$lock" 5; then
+        rm -f "$file"
+        _lock_release "$lock"
+    else
+        log "WARN: memory lock timeout clearing $topic"
+        return 1
+    fi
+}
+
+# memory_summary — one-line-per-topic overview (for iteration context)
+memory_summary() {
+    memory_init
+    local file
+    for file in "$MEMORY_DIR"/*.md; do
+        [[ -f "$file" ]] || continue
+        local topic count
+        topic="$(basename "$file" .md)"
+        count="$(grep -c '^---$' "$file" 2>/dev/null || echo 0)"
+        count=$(( count / 2 ))
+        printf '  [[%s]] (%d entries)\n' "$topic" "$count"
+    done
+}
+
+# iteration_context — generate context from previous iteration for next run
+# Writes to /tmp/.agentmill-iter-context.md
+iteration_context() {
+    local ctx="/tmp/.agentmill-iter-context.md"
+    {
+        echo "## Previous Iteration Context"
+        echo ""
+        echo "### Recent commits"
+        git log --oneline -5 2>/dev/null || echo "(none)"
+        echo ""
+        echo "### Memory topics"
+        memory_summary
+        echo ""
+        if [[ -f "$RESULTS_LOG" ]]; then
+            echo "### Last result"
+            tail -1 "$RESULTS_LOG"
+        fi
+    } > "$ctx"
+    echo "$ctx"
+}
+
 # --- Iteration log (Karpathy autoresearch pattern) ---
 # Append-only TSV: iteration | agent | timestamp | files_changed | commits | status | description
 RESULTS_LOG="${RESULTS_LOG:-/workspace/logs/results.tsv}"
