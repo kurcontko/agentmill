@@ -17,8 +17,9 @@ Usage:
   mill logs   [agent-id] [--session]  Tail agent or session logs
   mill build  [--platform PLAT]     Build the container image
   mill stop                         Stop all running services
-  mill memory  [topic] [--search Q]  View or search agent memory
+  mill memory  [topic] [--search Q] [--clear]  View, search, or clear memory
   mill history [--tail N]           Show iteration results log
+  mill diff    [N]                  Show last N commits + uncommitted changes
   mill clean                        Remove log and status files
   mill init                         Create .env and starter prompt
 
@@ -181,7 +182,7 @@ cmd_logs() {
     if [[ "$session" == true ]]; then
         # Show latest session log for this agent
         local latest
-        latest="$(find "$MILL_DIR/logs" -maxdepth 1 -name 'session_*_iter*.log' -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+        latest="$(ls -t "$MILL_DIR/logs"/session_*_iter*.log 2>/dev/null | head -1)"
         if [[ -n "$latest" ]]; then
             echo "=== $(basename "$latest") ==="
             tail -f "$latest"
@@ -241,38 +242,45 @@ PROMPT
 }
 
 cmd_memory() {
-    local memory_dir="$MILL_DIR/memory" topic="" search=""
-    # Also check REPO_PATH/memory if set
+    local memory_dir="$MILL_DIR/memory" topic="" search="" clear=false
     [[ -n "${REPO_PATH:-}" && -d "$REPO_PATH/memory" ]] && memory_dir="$REPO_PATH/memory"
     [[ -d "$memory_dir" ]] || { echo "No memory directory found."; exit 0; }
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --search) search="$2"; shift 2 ;;
+            --clear)  clear=true; shift ;;
             *) topic="${topic:-$1}"; shift ;;
         esac
     done
 
-    if [[ -n "$search" ]]; then
-        echo "Searching memory for: $search"
+    if [[ "$clear" == true && -n "$topic" ]]; then
+        rm -f "$memory_dir/${topic}.md" "$memory_dir/.${topic}.lock"
+        echo "Cleared memory: $topic"
+    elif [[ -n "$search" ]]; then
         grep -rn "$search" "$memory_dir"/*.md 2>/dev/null || echo "No matches."
     elif [[ -n "$topic" ]]; then
-        local file="$memory_dir/${topic}.md"
-        if [[ -f "$file" ]]; then
-            cat "$file"
-        else
-            echo "No memory for topic: $topic"
-            echo "Available topics:"
-            find "$memory_dir" -name '*.md' -exec basename {} .md \; 2>/dev/null | sort
-        fi
+        [[ -f "$memory_dir/${topic}.md" ]] && cat "$memory_dir/${topic}.md" || echo "No memory for: $topic"
     else
         echo "Memory topics:"
-        find "$memory_dir" -name '*.md' -exec basename {} .md \; 2>/dev/null | sort
-        local total
-        total="$(find "$memory_dir" -name '*.md' -exec cat {} + 2>/dev/null | grep -c '^---$' || echo 0)"
-        echo ""
-        echo "Total entries: $((total / 2))"
+        for f in "$memory_dir"/*.md; do
+            [[ -f "$f" ]] || continue
+            local name count
+            name="$(basename "$f" .md)"
+            count="$(grep -c '^---$' "$f" 2>/dev/null || echo 0)"
+            printf '  [[%s]] (%d entries)\n' "$name" "$(( count / 2 ))"
+        done
     fi
+}
+
+cmd_diff() {
+    local repo="${REPO_PATH:-}" n="${1:-5}"
+    [[ -n "$repo" ]] || { echo "Set REPO_PATH or pass it via 'mill run <repo>' first." >&2; exit 1; }
+    echo "=== Last $n commits ==="
+    git -C "$repo" log --oneline -"$n" --stat 2>/dev/null || echo "(no git history)"
+    echo ""
+    echo "=== Uncommitted changes ==="
+    git -C "$repo" diff --stat 2>/dev/null || echo "(clean)"
 }
 
 cmd_history() {
@@ -298,10 +306,8 @@ cmd_history() {
 cmd_clean() {
     local log_dir="$MILL_DIR/logs"
     [[ -d "$log_dir" ]] || { echo "Nothing to clean."; return 0; }
-    local count
-    count="$(find "$log_dir" -maxdepth 1 -type f | wc -l | tr -d ' ')"
-    rm -f "$log_dir"/status-*.json "$log_dir"/agent-*.log "$log_dir"/session_*.log
-    echo "Cleaned $count log files from $log_dir"
+    rm -f "$log_dir"/status-*.json "$log_dir"/agent-*.log "$log_dir"/session_*.log "$log_dir"/results.tsv
+    echo "Cleaned logs from $log_dir"
 }
 
 # --- Main ---
@@ -319,6 +325,7 @@ case "${1:-}" in
     stop)   shift; cmd_stop "$@" ;;
     memory) shift; cmd_memory "$@" ;;
     history) shift; cmd_history "$@" ;;
+    diff)   shift; cmd_diff "$@" ;;
     clean)  shift; cmd_clean "$@" ;;
     init)   shift; cmd_init "$@" ;;
     -h|--help|help) usage 0 ;;
