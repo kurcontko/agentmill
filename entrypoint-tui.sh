@@ -21,6 +21,7 @@ AUTO_RALPH_COMPLETION_PROMISE="${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}"
 MODEL_RAW="$MODEL"
 MODEL="$(resolve_model "$MODEL_RAW")"
 [[ "$MODEL" != "$MODEL_RAW" ]] && log "Resolved MODEL '$MODEL_RAW' -> '$MODEL'"
+log_claude_version "$MODEL"
 
 # log() provided by entrypoint-common.sh
 
@@ -96,7 +97,7 @@ while true; do
     start_sentinel_watcher "$$" process_group
 
     if [[ "${SKIP_PROMPT:-false}" == "true" ]]; then
-        claude --model "$MODEL" || true
+        claude || true
     else
         /auto-trust.exp || true
     fi

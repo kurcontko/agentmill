@@ -23,6 +23,7 @@ DONE_FILE="${DONE_FILE:-/tmp/.agentmill-done}"
 MODEL_RAW="$MODEL"
 MODEL="$(resolve_model "$MODEL_RAW")"
 [[ "$MODEL" != "$MODEL_RAW" ]] && log "Resolved MODEL '$MODEL_RAW' -> '$MODEL'"
+log_claude_version "$MODEL"
 
 # — State ————————————————————————————————————————
 ITERATION=0
@@ -142,7 +143,6 @@ $PROMPT_CONTENT"
     set +e
     claude --dangerously-skip-permissions \
         -p "$PROMPT_CONTENT" \
-        --model "$MODEL" \
         > >(tee "$SESSION_LOG") 2>&1 &
     CLAUDE_PID=$!
     start_sentinel_watcher "$CLAUDE_PID"
