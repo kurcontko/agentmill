@@ -16,6 +16,12 @@ AUTO_RALPH_COMPLETION_PROMISE="${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}"
 # shellcheck source=/entrypoint-common.sh
 . /entrypoint-common.sh
 
+# Resolve friendly aliases (opus / sonnet / haiku / opus-4.7 / etc.) to full
+# Claude model IDs — see resolve_model() in entrypoint-common.sh for rationale.
+MODEL_RAW="$MODEL"
+MODEL="$(resolve_model "$MODEL_RAW")"
+[[ "$MODEL" != "$MODEL_RAW" ]] && log "Resolved MODEL '$MODEL_RAW' -> '$MODEL'"
+
 # log() provided by entrypoint-common.sh
 
 require_auth
