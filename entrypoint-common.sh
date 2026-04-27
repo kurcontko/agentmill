@@ -66,6 +66,44 @@ resolve_model() {
     printf '%s' "$input"
 }
 
+# Log the installed Claude Code CLI version + warn loudly if it's older than
+# the floor that knows about the requested MODEL. Stale CLIs ship with stale
+# alias tables and capability metadata and silently downshift to older models
+# — this turns the silent failure into a visible WARN.
+#
+# Refs: https://github.com/anthropics/claude-code/issues/50810
+log_claude_version() {
+    local model="${1:-}"
+    local raw version major minor patch
+    raw="$(claude --version 2>/dev/null | head -1 || true)"
+    version="$(printf '%s' "$raw" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+    if [[ -z "$version" ]]; then
+        log_warn "Could not parse claude CLI version (output: '$raw')"
+        return 0
+    fi
+    log "Claude Code CLI version: $version"
+
+    # Floor checks — bump these as new model lines ship.
+    # Format: "<model-substring>:<min-major>.<min-minor>.<min-patch>"
+    local floor_pairs=(
+        "claude-opus-4-7:2.1.111"
+    )
+    IFS='.' read -r major minor patch <<<"$version"
+    for pair in "${floor_pairs[@]}"; do
+        local m="${pair%%:*}"
+        local floor="${pair##*:}"
+        local fmajor fminor fpatch
+        IFS='.' read -r fmajor fminor fpatch <<<"$floor"
+        if [[ "$model" == *"$m"* ]]; then
+            if (( major < fmajor )) \
+                || ( (( major == fmajor )) && (( minor < fminor )) ) \
+                || ( (( major == fmajor )) && (( minor == fminor )) && (( patch < fpatch )) ); then
+                log_warn "claude CLI $version is older than the floor $floor for model '$m' — silent downshift likely. Bump CLAUDE_CODE_VERSION in Dockerfile and rebuild."
+            fi
+        fi
+    done
+}
+
 require_auth() {
     if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
         log "Auth: using ANTHROPIC_API_KEY"
