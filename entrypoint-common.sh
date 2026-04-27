@@ -11,6 +11,12 @@ log() {
     echo "$msg" >> "$LOG_DIR/agent-${id}.log"
 }
 
+# Greppable error/warn helpers (clax convention): one line, literal ERROR/WARN
+# token + reason. Use these so `grep -E '^.*ERROR' logs/agent-*.log` finds every
+# real failure regardless of phrasing.
+log_error() { log "ERROR $*"; }
+log_warn()  { log "WARN $*";  }
+
 require_auth() {
     if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
         log "Auth: using ANTHROPIC_API_KEY"
@@ -199,6 +205,72 @@ memory_clear() {
     fi
 }
 
+# --- Standard memory topics (long-running-Claude conventions) ---
+# These are plain memory topics, but documented as first-class so prompts can
+# rely on them existing. Adopted from smsharma/clax CLAUDE.md.
+#
+#   failed_approaches.md — dead ends with one-line reason (read at Orient,
+#                          prevents re-trying what's already known broken)
+#   in_progress.md       — flock-guarded task-claim file for multi-agent
+#   open_questions.md    — research worklist
+#   contradictions.md    — sources that disagree
+#   findings.md          — primary research notes (verbatim quotes)
+#   sources.md           — deduplicated URL list
+#   decisions.md         — methodology / scope decisions
+
+# failed_approaches_append <one-line-summary> <reason>
+# Appends a structured failed-approach entry. Use when an approach is abandoned.
+failed_approaches_append() {
+    local summary="$1" reason="${2:-no reason given}"
+    memory_write failed_approaches "$(printf -- '- **%s**\n  reason: %s' "$summary" "$reason")"
+}
+
+# --- Task-claim file (multi-agent coordination) ---
+# Single file: one line per active claim, format:
+#   <iso-timestamp>\t<agent-id>\t<task-id>
+# Atomic via flock; readers can `grep <task-id> in_progress.md` before claiming.
+
+CLAIMS_FILE="${CLAIMS_FILE:-${MEMORY_DIR:-/workspace/memory}/in_progress.md}"
+
+claim_task() {
+    local task="$1" agent="${2:-${AGENT_ID:-unknown}}"
+    local lock="${CLAIMS_FILE}.lock"
+    memory_init
+    [[ -f "$CLAIMS_FILE" ]] || printf '# In-progress task claims\n\n' > "$CLAIMS_FILE"
+    if _lock_acquire "$lock" 5; then
+        if grep -qF "	${task}" "$CLAIMS_FILE" 2>/dev/null; then
+            _lock_release "$lock"
+            log_warn "claim_task: '$task' already claimed"
+            return 1
+        fi
+        printf '%s\t%s\t%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$agent" "$task" >> "$CLAIMS_FILE"
+        _lock_release "$lock"
+    else
+        log_warn "claim_task: lock timeout"
+        return 1
+    fi
+}
+
+release_task() {
+    local task="$1"
+    local lock="${CLAIMS_FILE}.lock"
+    [[ -f "$CLAIMS_FILE" ]] || return 0
+    if _lock_acquire "$lock" 5; then
+        local tmp; tmp="$(mktemp)"
+        grep -vF "	${task}" "$CLAIMS_FILE" > "$tmp" || true
+        mv "$tmp" "$CLAIMS_FILE"
+        _lock_release "$lock"
+    else
+        log_warn "release_task: lock timeout"
+        return 1
+    fi
+}
+
+list_claims() {
+    [[ -f "$CLAIMS_FILE" ]] || { echo "(no active claims)"; return 0; }
+    grep -v '^#\|^$' "$CLAIMS_FILE" || true
+}
+
 # memory_summary — one-line-per-topic overview (for iteration context)
 memory_summary() {
     memory_init
@@ -207,7 +279,7 @@ memory_summary() {
         [[ -f "$file" ]] || continue
         local topic count
         topic="$(basename "$file" .md)"
-        count="$(grep -c '^---$' "$file" 2>/dev/null || echo 0)"
+        count="$(grep -c '^---$' "$file" 2>/dev/null)" || count=0
         count=$(( count / 2 ))
         printf '  [[%s]] (%d entries)\n' "$topic" "$count"
     done
@@ -226,6 +298,16 @@ iteration_context() {
         echo "### Memory topics"
         memory_summary
         echo ""
+        if [[ -f "${MEMORY_DIR:-/workspace/memory}/failed_approaches.md" ]]; then
+            echo "### Recent failed approaches (do not retry)"
+            tail -20 "${MEMORY_DIR:-/workspace/memory}/failed_approaches.md"
+            echo ""
+        fi
+        if [[ -f "$CLAIMS_FILE" ]] && [[ -s "$CLAIMS_FILE" ]]; then
+            echo "### Tasks currently claimed by other agents"
+            list_claims
+            echo ""
+        fi
         if [[ -f "$RESULTS_LOG" ]]; then
             echo "### Last result"
             tail -1 "$RESULTS_LOG"
