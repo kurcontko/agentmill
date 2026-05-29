@@ -9,6 +9,7 @@ harness="$TMPDIR/harness"
 repo="$TMPDIR/repo"
 mkdir -p "$harness" "$TMPDIR/bin"
 cp "$REPO_ROOT/mill" "$REPO_ROOT/docker-compose.yml" "$harness/"
+cp -R "$REPO_ROOT/agents" "$REPO_ROOT/scripts" "$harness/"
 chmod +x "$harness/mill"
 
 git init -q -b main "$repo"
@@ -99,5 +100,18 @@ grep -q 'agent-1:' "$OVERRIDE_COPY"
 grep -q 'agent-2:' "$OVERRIDE_COPY"
 grep -q 'network_mode: "none"' "$OVERRIDE_COPY"
 grep -q 'HTTP_PROXY: "http://agentmill-egress-proxy' "$OVERRIDE_COPY"
+
+printf 'AGENTMILL_NETWORK=allow\n' > "$harness/.env"
+rm -f "$OVERRIDE_COPY"
+PATH="$TMPDIR/bin:$PATH" "$harness/mill" run "$repo" --agent coder --iterations 1 -d
+[[ ! -f "$OVERRIDE_COPY" ]]
+
+printf '' > "$harness/.env"
+set +e
+PATH="$TMPDIR/bin:$PATH" "$harness/mill" run "$repo" --agent coder --iterations 1 -d 2>"$TMPDIR/profile-allowlist-missing.err"
+profile_missing_rc=$?
+set -e
+[[ "$profile_missing_rc" -ne 0 ]] || { echo "expected coder profile allowlist without egress allowlist to fail" >&2; exit 1; }
+grep -q 'AGENTMILL_NETWORK=allowlist requires AGENTMILL_EGRESS_ALLOWLIST' "$TMPDIR/profile-allowlist-missing.err"
 
 echo "PASS test_mill_network_policy"

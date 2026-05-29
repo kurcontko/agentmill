@@ -157,7 +157,8 @@ Built-in roles:
 
 Profiles can set the prompt, model, branch pattern, max iterations, wall-clock
 limit, log-size limit, profile level, commit mode, completion gate, verifier
-command, network label, and MCP allowlist. CLI flags still win over profile defaults.
+command, network label, and MCP allowlist. Non-empty env values from `.env` or
+the shell win over profile defaults, and CLI flags win over both.
 See `docs/PROFILES.md` for the full field list.
 
 ## Workspace Isolation

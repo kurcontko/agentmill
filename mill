@@ -330,14 +330,16 @@ list_profile_names() {
 }
 
 profile_exports() {
-    local role="$1" agent_id="${2:-1}" suffix="${3:-}" file
+    local role="$1" agent_id="${2:-1}" suffix="${3:-}" mode="${4:-}" file
+    local -a args=()
     file="$(profile_file "$role")"
-    python3 "$MILL_DIR/scripts/profile-env.py" "$file" --role "$role" --agent-id "$agent_id" --suffix "$suffix"
+    [[ "$mode" == "--defaults" ]] && args+=(--defaults)
+    python3 "$MILL_DIR/scripts/profile-env.py" "$file" --role "$role" --agent-id "$agent_id" --suffix "$suffix" "${args[@]}"
 }
 
 apply_agent_profile() {
     local role="$1" agent_id="${2:-1}" suffix="${3:-}"
-    eval "$(profile_exports "$role" "$agent_id" "$suffix")"
+    eval "$(profile_exports "$role" "$agent_id" "$suffix" --defaults)"
 }
 
 profile_requires_clone() {

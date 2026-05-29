@@ -33,6 +33,16 @@ assert_contains "$suffix_exports" "export MAX_LOG_BYTES_3=52428800"
 assert_contains "$suffix_exports" "export AGENTMILL_COMPLETION_GATE_3=coder_verified"
 assert_contains "$suffix_exports" "export AGENTMILL_CODER_OPEN_QUESTIONS_MAX_3=0"
 
+default_exports="$(python3 "$REPO_ROOT/scripts/profile-env.py" "$REPO_ROOT/agents/coder.toml" --role coder --agent-id 1 --defaults)"
+assert_contains "$default_exports" "export AGENTMILL_ROLE=coder"
+assert_contains "$default_exports" 'if [[ -z "${AGENTMILL_NETWORK:-}" ]]; then export AGENTMILL_NETWORK=allowlist; fi'
+assert_contains "$default_exports" 'if [[ -z "${MODEL:-}" ]]; then export MODEL=sonnet; fi'
+
+suffix_default_exports="$(python3 "$REPO_ROOT/scripts/profile-env.py" "$REPO_ROOT/agents/coder.toml" --role coder --agent-id 3 --suffix _3 --defaults)"
+assert_contains "$suffix_default_exports" "export AGENTMILL_ROLE_3=coder"
+assert_contains "$suffix_default_exports" 'if [[ -z "${AGENTMILL_NETWORK_3:-}" && -z "${AGENTMILL_NETWORK:-}" ]]; then export AGENTMILL_NETWORK_3=allowlist; fi'
+assert_contains "$suffix_default_exports" 'if [[ -z "${MODEL_3:-}" && -z "${MODEL:-}" ]]; then export MODEL_3=sonnet; fi'
+
 tmp_profile="$(mktemp)"
 cat > "$tmp_profile" <<'TOML'
 prompt_file = "/prompts/PROMPT.md"

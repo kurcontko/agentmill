@@ -136,12 +136,26 @@ def shell_export(name: str, value: str) -> str:
     return f"export {name}={shlex.quote(value)}"
 
 
+def shell_default_export(name: str, value: str, fallback_name: str | None = None) -> str:
+    if fallback_name:
+        return (
+            f'if [[ -z "${{{name}:-}}" && -z "${{{fallback_name}:-}}" ]]; '
+            f"then export {name}={shlex.quote(value)}; fi"
+        )
+    return f'if [[ -z "${{{name}:-}}" ]]; then export {name}={shlex.quote(value)}; fi'
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("profile", type=Path)
     parser.add_argument("--role", required=True)
     parser.add_argument("--agent-id", default="1")
     parser.add_argument("--suffix", default="")
+    parser.add_argument(
+        "--defaults",
+        action="store_true",
+        help="emit conditional exports so existing env values override profile fields",
+    )
     args = parser.parse_args()
 
     data = load_profile(args.profile)
@@ -154,7 +168,11 @@ def main() -> int:
         if key not in data:
             continue
         value = normalize_value(key, data[key], role, agent_id)
-        print(shell_export(f"{env_name}{suffix}", value))
+        target = f"{env_name}{suffix}"
+        if args.defaults:
+            print(shell_default_export(target, value, env_name if suffix else None))
+        else:
+            print(shell_export(target, value))
     return 0
 
 

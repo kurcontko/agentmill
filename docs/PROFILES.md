@@ -57,8 +57,9 @@ is explicit.
 
 List fields render as comma-separated env vars. Boolean forwarding fields render
 as `true` or `false`. `refactor_loc_target` and
-`refactor_max_loc_delta` may be negative integers. CLI flags still override
-profile defaults.
+`refactor_max_loc_delta` may be negative integers. Profiles are defaults:
+non-empty values from `.env` or the shell override profile fields, and CLI
+flags override both.
 
 Typed completion gates are fail-closed. `coder_verified` requires a done
 signal, a successful `verifier_command`, and unresolved open questions at or
