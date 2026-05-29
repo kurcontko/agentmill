@@ -1,4 +1,4 @@
-FROM node:20-slim@sha256:17281e8d1dc4d671976c6b89a12f47a44c2f390b63a989e2e327631041f544fd
+FROM node:22-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732
 COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /uvx /usr/local/bin/
 
 # Pin Claude Code CLI version. Floor is v2.1.111 — earlier versions ship with
@@ -32,7 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
-    && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "opencode-ai@${OPENCODE_VERSION}" "@openai/codex@${CODEX_CLI_VERSION}" "@qwen-code/qwen-code@${QWEN_CODE_VERSION}" "@google/gemini-cli@${GEMINI_CLI_VERSION}" pnpm yarn \
+    && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "opencode-ai@${OPENCODE_VERSION}" "@openai/codex@${CODEX_CLI_VERSION}" "@qwen-code/qwen-code@${QWEN_CODE_VERSION}" "@google/gemini-cli@${GEMINI_CLI_VERSION}" pnpm \
     && userdel -r node \
     && useradd -m -s /bin/bash -u 1000 agent
 
