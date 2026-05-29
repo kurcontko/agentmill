@@ -10,6 +10,7 @@ repo="$TMPDIR/repo"
 mkdir -p "$harness/logs" "$TMPDIR/bin"
 cp "$REPO_ROOT/mill" "$REPO_ROOT/docker-compose.yml" "$harness/"
 chmod +x "$harness/mill"
+printf 'REPO_PATH=%s\nMODEL=opus\nMODEL=gpt-5.5' "$repo" > "$harness/.env"
 
 git init -q -b main "$repo"
 git -C "$repo" config user.name Test

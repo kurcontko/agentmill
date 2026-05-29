@@ -69,8 +69,11 @@ load_env() {
         val="${val#\"}" val="${val%\"}"              # strip double quotes
         val="${val#\'}" val="${val%\'}"              # strip single quotes
         val="${val%"${val##*[! ]}"}"                 # trim trailing spaces
-        [[ -z "${!key:-}" ]] && export "$key=$val"
+        if [[ -z "${!key:-}" ]]; then
+            export "$key=$val"
+        fi
     done < "$MILL_DIR/.env"
+    return 0
 }
 
 compose() {
