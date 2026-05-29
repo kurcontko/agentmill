@@ -24,6 +24,7 @@ x-common-env: &common-env
   AGENTMILL_CODEX_DEFAULT_MODEL: ${AGENTMILL_CODEX_DEFAULT_MODEL:-gpt-5.3-codex}
   AGENTMILL_CODEX_SANDBOX: ${AGENTMILL_CODEX_SANDBOX:-}
   AGENTMILL_CODEX_APPROVAL_POLICY: ${AGENTMILL_CODEX_APPROVAL_POLICY:-}
+  AGENTMILL_HOST_CODEX_HOME: ${AGENTMILL_HOST_CODEX_HOME:-/home/agent/.host-codex}
   AGENTMILL_QWEN_COMMAND: ${AGENTMILL_QWEN_COMMAND:-qwen}
   AGENTMILL_QWEN_REQUIRE_AUTH: ${AGENTMILL_QWEN_REQUIRE_AUTH:-true}
   AGENTMILL_QWEN_OUTPUT_FORMAT: ${AGENTMILL_QWEN_OUTPUT_FORMAT:-stream-json}
@@ -330,6 +331,7 @@ x-repo-volumes: &repo-volumes
   - ~/.claude/commands:/home/agent/.host-commands:ro
   - ~/.claude/skills:/home/agent/.host-skills:ro
   - ~/.claude/agents:/home/agent/.host-agents:ro
+  - ~/.codex:/home/agent/.host-codex:ro
 
 x-upstream-volumes: &upstream-volumes
   - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/upstream
@@ -343,6 +345,7 @@ x-upstream-volumes: &upstream-volumes
   - ~/.claude/commands:/home/agent/.host-commands:ro
   - ~/.claude/skills:/home/agent/.host-skills:ro
   - ~/.claude/agents:/home/agent/.host-agents:ro
+  - ~/.codex:/home/agent/.host-codex:ro
 
 x-upstream-ro-volumes: &upstream-ro-volumes
   - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/upstream:ro
@@ -356,6 +359,7 @@ x-upstream-ro-volumes: &upstream-ro-volumes
   - ~/.claude/commands:/home/agent/.host-commands:ro
   - ~/.claude/skills:/home/agent/.host-skills:ro
   - ~/.claude/agents:/home/agent/.host-agents:ro
+  - ~/.codex:/home/agent/.host-codex:ro
 
 x-tui-base: &tui-base
   <<: *agent-base

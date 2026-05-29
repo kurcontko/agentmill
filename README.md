@@ -51,6 +51,12 @@ For non-Claude clients, set the provider credential the client expects, such as
 `OPENAI_API_KEY` for Qwen Code, and `GEMINI_API_KEY`, `GOOGLE_API_KEY`, or
 Vertex AI environment for Gemini CLI.
 
+For Codex subscription auth, run `codex login` on the host. AgentMill mounts
+host `~/.codex` read-only at `/home/agent/.host-codex` and copies `auth.json`
+into the isolated Codex home only for trusted-profile runs. Standard and
+untrusted runs should use `CODEX_API_KEY`, `OPENAI_API_KEY`, or
+`CODEX_ACCESS_TOKEN` instead.
+
 ## How to Run
 
 Pick the mode that fits your workflow:
@@ -229,6 +235,7 @@ latest MCP manifest reachability, and the host Claude CLI.
 | `AGENTMILL_CODEX_DEFAULT_MODEL` | `gpt-5.3-codex` | Model used when `MODEL` is still a Claude alias |
 | `AGENTMILL_CODEX_SANDBOX` | profile-derived | Optional legacy Codex sandbox override (`read-only`, `workspace-write`, `danger-full-access`); when empty AgentMill writes a generated Codex permission profile |
 | `AGENTMILL_CODEX_APPROVAL_POLICY` | profile-derived | Optional Codex approval override; defaults to `never` for `trusted` and `untrusted` for `standard`/`untrusted` |
+| `AGENTMILL_HOST_CODEX_HOME` | `/home/agent/.host-codex` | Container path for read-only mounted host `~/.codex`; `auth.json` is copied only for trusted-profile Codex runs |
 | `AGENTMILL_QWEN_COMMAND` | `qwen` | Qwen Code binary path/command for `AGENTMILL_CLIENT=qwen` |
 | `AGENTMILL_QWEN_REQUIRE_AUTH` | `true` | Require provider env or Qwen config/cache before Qwen runs |
 | `AGENTMILL_QWEN_OUTPUT_FORMAT` | `stream-json` | Qwen headless output mode (`text`, `json`, `stream-json`) |

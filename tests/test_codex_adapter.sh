@@ -58,6 +58,7 @@ client_prepare_home
 [[ -L "$HOME/.codex" ]]
 [[ -f "$CODEX_HOME/config.toml" ]]
 [[ -f "$CODEX_HOME/rules/agentmill.rules" ]]
+[[ ! -f "$CODEX_HOME/auth.json" ]]
 
 python3 - "$CODEX_HOME/config.toml" <<'PY'
 import sys
@@ -125,6 +126,45 @@ assert data["sandbox_mode"] == "read-only", data
 assert "default_permissions" not in data, data
 assert "permissions" not in data, data
 PY
+
+host_codex="$TMPDIR/host-codex"
+trusted_home="$TMPDIR/trusted-home"
+standard_home="$TMPDIR/standard-home"
+mkdir -p "$host_codex" "$trusted_home" "$standard_home"
+printf '{"OPENAI_API_KEY":"subscription-secret"}\n' > "$host_codex/auth.json"
+(
+    unset CODEX_API_KEY OPENAI_API_KEY CODEX_ACCESS_TOKEN
+    export HOME="$trusted_home"
+    export AGENTMILL_CLIENT=codex
+    export AGENTMILL_CLIENT_HOME=
+    export AGENTMILL_CLIENT_HOME_ROOT="$trusted_home/.agentmill/clients"
+    export AGENTMILL_CODEX_REQUIRE_AUTH=true
+    export AGENTMILL_HOST_CODEX_HOME="$host_codex"
+    export AGENTMILL_PROFILE_LEVEL=trusted
+    export MODEL="gpt-5.3-codex"
+    client_require_auth
+    client_prepare_codex_home
+    [[ -f "$CODEX_HOME/auth.json" ]]
+    grep -q "subscription-secret" "$CODEX_HOME/auth.json"
+)
+set +e
+standard_auth_output="$(
+    {
+        unset CODEX_API_KEY OPENAI_API_KEY CODEX_ACCESS_TOKEN
+        export HOME="$standard_home"
+        export AGENTMILL_CLIENT=codex
+        export AGENTMILL_CLIENT_HOME=
+        export AGENTMILL_CLIENT_HOME_ROOT="$standard_home/.agentmill/clients"
+        export AGENTMILL_CODEX_REQUIRE_AUTH=true
+        export AGENTMILL_HOST_CODEX_HOME="$host_codex"
+        export AGENTMILL_PROFILE_LEVEL=standard
+        client_require_auth
+    } 2>&1
+)"
+standard_auth_rc=$?
+set -e
+[[ "$standard_auth_rc" -ne 0 ]] || { echo "expected standard profile mounted Codex auth to fail" >&2; exit 1; }
+[[ "$standard_auth_output" == *"only forwarded for trusted profile runs"* ]]
 
 python3 - "$CODEX_HOME/rules/agentmill.rules" <<'PY'
 import sys

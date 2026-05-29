@@ -51,6 +51,7 @@ AGENTMILL_CODEX_REQUIRE_AUTH="${AGENTMILL_CODEX_REQUIRE_AUTH:-true}"
 AGENTMILL_CODEX_DEFAULT_MODEL="${AGENTMILL_CODEX_DEFAULT_MODEL:-gpt-5.3-codex}"
 AGENTMILL_CODEX_SANDBOX="${AGENTMILL_CODEX_SANDBOX:-}"
 AGENTMILL_CODEX_APPROVAL_POLICY="${AGENTMILL_CODEX_APPROVAL_POLICY:-}"
+AGENTMILL_HOST_CODEX_HOME="${AGENTMILL_HOST_CODEX_HOME:-$HOME/.host-codex}"
 AGENTMILL_QWEN_COMMAND="${AGENTMILL_QWEN_COMMAND:-qwen}"
 AGENTMILL_QWEN_REQUIRE_AUTH="${AGENTMILL_QWEN_REQUIRE_AUTH:-true}"
 AGENTMILL_QWEN_OUTPUT_FORMAT="${AGENTMILL_QWEN_OUTPUT_FORMAT:-stream-json}"
@@ -2698,6 +2699,7 @@ apply_agent_env_overrides() {
         AGENTMILL_CODEX_DEFAULT_MODEL \
         AGENTMILL_CODEX_SANDBOX \
         AGENTMILL_CODEX_APPROVAL_POLICY \
+        AGENTMILL_HOST_CODEX_HOME \
         AGENTMILL_QWEN_COMMAND \
         AGENTMILL_QWEN_REQUIRE_AUTH \
         AGENTMILL_QWEN_OUTPUT_FORMAT \
@@ -2948,8 +2950,13 @@ client_require_auth() {
                 log "Auth: using Codex/OpenAI environment"
             elif [[ -f "$selected_home/.codex/auth.json" ]]; then
                 log "Auth: using selected Codex auth file"
+            elif [[ "${AGENTMILL_PROFILE_LEVEL:-trusted}" == "trusted" && -f "${AGENTMILL_HOST_CODEX_HOME:-}/auth.json" ]]; then
+                log "Auth: using trusted mounted Codex auth file"
             elif [[ "${AGENTMILL_PROFILE_LEVEL:-trusted}" == "trusted" && -f "$HOME/.codex/auth.json" ]]; then
                 log "Auth: using trusted host Codex auth file"
+            elif [[ -f "${AGENTMILL_HOST_CODEX_HOME:-}/auth.json" ]]; then
+                log "ERROR: Mounted Codex auth.json is only forwarded for trusted profile runs. Use CODEX_API_KEY, OPENAI_API_KEY, CODEX_ACCESS_TOKEN, or rerun with --profile-level trusted."
+                exit 1
             else
                 log "ERROR: No Codex auth. Set CODEX_API_KEY, OPENAI_API_KEY, CODEX_ACCESS_TOKEN, run codex login, or set AGENTMILL_CODEX_REQUIRE_AUTH=false for tests."
                 exit 1
@@ -3411,6 +3418,9 @@ client_prepare_codex_home() {
     client_prepare_generic_home
     local selected="$AGENTMILL_CLIENT_HOME" selected_codex="$AGENTMILL_CLIENT_HOME/.codex"
     mkdir -p "$selected_codex"
+    if [[ -n "${AGENTMILL_HOST_CODEX_HOME:-}" ]]; then
+        client_seed_config_dir_for_trusted_profile "$AGENTMILL_HOST_CODEX_HOME" "$selected_codex"
+    fi
     client_seed_config_dir_for_trusted_profile "$HOME/.codex" "$selected_codex"
     export CODEX_HOME="$selected_codex"
     client_write_codex_config "$selected_codex/config.toml"
