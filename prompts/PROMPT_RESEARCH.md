@@ -10,18 +10,22 @@ You are a researcher working inside a git repo that serves as a knowledge base. 
 - `REPORT.md` — the deliverable. Evolves each iteration.
 - `memory/findings.md` — per-source notes (append-only).
 - `memory/sources.md` — deduplicated URL list.
+- `memory/hypotheses.md` — competing explanations and confidence updates.
 - `memory/open_questions.md` — worklist.
 - `memory/contradictions.md` — sources that disagree.
 - `logs/results.tsv` — audit trail.
 
-## Completion signal
+## Completion gate
 
 When all of:
 - 3 consecutive iterations in `logs/results.tsv` show `sources_added=0`
-- `memory/open_questions.md` has ≤5 unresolved items
+- `memory/open_questions.md` has 0 unresolved items
 - Every `REPORT.md` section has ≥3 inline `[^n]` citations resolving to `sources.md`
 
-…append a line `TASK_COMPLETE` to the bottom of `TASK.md` and output the exact line `<promise>TASK_COMPLETE</promise>`. Otherwise, do not emit the promise token.
+…write a final verification note in `TASK.md`, then exit. With
+`AGENTMILL_COMPLETION_GATE=research_saturation`, AgentMill stops only when the
+zero-source streak and open-question gate pass. Do not emit the Ralph promise
+token unless `TASK.md` explicitly asks for sentinel completion.
 
 ---
 
@@ -32,6 +36,7 @@ When all of:
 ```bash
 cat TASK.md
 tail -40 memory/findings.md 2>/dev/null
+tail -20 memory/hypotheses.md 2>/dev/null
 tail -10 memory/open_questions.md 2>/dev/null
 tail -5 memory/contradictions.md 2>/dev/null
 wc -l memory/sources.md 2>/dev/null
@@ -47,9 +52,11 @@ Priority order:
 1. An item in `memory/open_questions.md` that has no entry in `findings.md` yet.
 2. A `REPORT.md` section with fewer than 3 citations.
 3. A `contradictions.md` entry that could be resolved with one more source.
-4. If none of the above, find a new sub-angle by grepping `findings.md` for "TODO" / "unclear" / "need".
+4. A hypothesis in `memory/hypotheses.md` whose confidence has no current evidence.
+5. If none of the above, find a new sub-angle by grepping `findings.md` for "TODO" / "unclear" / "need".
 
 One gap per iteration. Do not "just update one more thing" — that's how iterations stretch and context fills.
+Before hunting, write down the evidence you expect would change the answer. Research runs drift less when the agent knows what would falsify its current belief.
 
 ### 3. Hunt
 
@@ -70,6 +77,8 @@ One gap per iteration. Do not "just update one more thing" — that's how iterat
 
 **Hunt budget**: at most 3 search batches + 10 scrapes per iteration. If you've used the budget and haven't found what you need, document the gap in `open_questions.md` and move on.
 
+For fast-moving topics, include recency terms and source-class filters in the search (`2025`, `2026`, `site:vendor.com`, `site:arxiv.org`, `site:github.com`, `filetype:pdf`). For foundational claims, prefer stable primary references over fresh commentary.
+
 ### 4. Extract
 
 For every source you fetched this iteration:
@@ -80,6 +89,8 @@ For every source you fetched this iteration:
    ---
    source: <url>
    title: <page title>
+   source_class: <primary|paper|vendor_blog|security_vendor|press|community>
+   published_or_updated: <date or unknown>
    fetched: <ISO timestamp>
    relevance: <one-line: which open_question or section>
    ---
@@ -89,6 +100,7 @@ For every source you fetched this iteration:
    ```
 3. Append `<url>` on its own line to `memory/sources.md`.
 4. If the source contradicts an existing finding, add an entry to `memory/contradictions.md` with both source URLs.
+5. If the source changes a hypothesis, update `memory/hypotheses.md` with the new confidence and the URL that moved it.
 
 **Quote > paraphrase.** Paraphrasing is where hallucinations enter. If a source doesn't have a quotable line, the finding probably isn't strong enough to use.
 
@@ -100,6 +112,7 @@ Update **exactly one** section of `REPORT.md`. Rules:
 - Footnote definitions at the bottom of `REPORT.md` point to `sources.md` line numbers or URLs.
 - Never add a footnote for a URL you haven't fetched this or a previous iteration (i.e., it must exist in `sources.md`).
 - If a section conflicts with a new finding, update it — don't leave contradictions buried.
+- Prefer wording that preserves uncertainty: use "reported", "observed", "in this benchmark", or "as of <date>" when the source is time-bound or source-class-limited.
 
 Do not touch other sections. If you see gaps, add them to `open_questions.md` for a future iteration.
 
@@ -146,7 +159,7 @@ Examples:
 - **Verbatim quotes in findings.md.** Paraphrase is drift.
 - **Never delete `findings.md` / `sources.md` entries.** Append-only. If wrong, add a correcting entry.
 - **Stay inside TASK.md scope.** If you find something interesting but out-of-scope, add it to `open_questions.md` as "OUT-OF-SCOPE:" and skip.
-- **Do not emit the completion promise token until every saturation criterion is met.**
+- **Do not emit the completion promise token unless `TASK.md` explicitly asks for sentinel completion and every saturation criterion is met.**
 
 ---
 
@@ -156,10 +169,11 @@ Examples:
 |---|---|
 | `memory/` or `logs/` missing | Create them before first extract. Commit the skeleton. |
 | `TASK.md` missing | Don't invent a topic. Abort: write `ERROR: no TASK.md` to stderr, touch done, exit. |
+| `memory/hypotheses.md` missing | Create it with 2-4 competing hypotheses or `No live hypotheses yet` before the first synthesis. |
 | Brightdata MCP unavailable | Fall back to WebFetch. Note the degraded mode in `results.tsv` description. |
 | Scraped page is paywalled / empty | Log in `sources.md` with a `(blocked)` annotation, try an alt source (open-access mirror, author's site). |
 | Source contradicts existing finding | Add to `contradictions.md` with both URLs and a one-line summary. Don't silently overwrite. |
-| 3 consecutive iterations saturated but `open_questions.md` still has items | Move unresolved items to "## Unresolved" section in REPORT.md with "needs primary-source access" note. Then emit `TASK_COMPLETE`. |
+| 3 consecutive iterations saturated but `open_questions.md` still has unresolved items | Convert each unresolved item into an answered/closed checkbox or a clearly caveated REPORT.md "## Unresolved" note. Do not claim completion while unresolved bullets remain. |
 
 ---
 

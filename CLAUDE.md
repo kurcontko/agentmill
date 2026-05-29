@@ -52,7 +52,7 @@ logs/results.tsv       # Iteration results log (Karpathy autoresearch pattern)
 
 ## Key Patterns
 
-- **Respawning Loop**: Each iteration runs Claude in a fresh context, commits results, waits, repeats. No context rot.
+- **Respawning Loop**: Each iteration runs Claude in a fresh context, commits results, waits, repeats. No context rot. This is a productionized Ralph loop (Huntley 2025); see `docs/LONG_RUNNING.md` for pedigree and Anthropic's Mar 2026 post endorsing the pattern.
 - **Multi-Agent Sync**: Agents push to their own branches (`agent-1`, `agent-2`, etc.). On conflict: rebase + retry (max 3).
 - **Graceful Shutdown**: Entrypoints trap SIGTERM/SIGINT, complete current session, commit WIP, exit.
 - **Settings Override**: Agents backup `.claude/settings.local.json`, apply permissive config, restore on exit.

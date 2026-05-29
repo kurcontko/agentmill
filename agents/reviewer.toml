@@ -1,0 +1,15 @@
+description = "Skeptical verifier role for reviewing another agent's output."
+prompt_file = "/prompts/PROMPT_LITE.md"
+model = "sonnet"
+branch_pattern = "review-{agent_id}"
+max_iterations = 3
+loop_delay = 5
+max_wall_seconds = 3600
+max_log_bytes = 52428800
+profile_level = "standard"
+auto_commit_mode = "off"
+completion_gate = "done_file"
+network = "allowlist"
+mcp_allowlist = []
+skill_allowlist = []
+forward_host_mcp = false

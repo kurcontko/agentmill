@@ -1,33 +1,55 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MILL_SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$MILL_SOURCE" ]; do
+    MILL_DIR="$(cd -P "$(dirname "$MILL_SOURCE")" && pwd)"
+    MILL_SOURCE="$(readlink "$MILL_SOURCE")"
+    [[ $MILL_SOURCE != /* ]] && MILL_SOURCE="$MILL_DIR/$MILL_SOURCE"
+done
+MILL_DIR="$(cd -P "$(dirname "$MILL_SOURCE")" && pwd)"
 
 usage() {
     cat <<'EOF'
 mill — AgentMill CLI
 
 Usage:
-  mill run   <repo> [--model M] [--iterations N] [--prompt FILE] [--delay S] [--auto-commit MODE] [-d]
-  mill watch <repo> [--model M] [--prompt FILE] [--ralph] [--respawn]
-  mill multi <repo> [N] [-d] [--model M] [--iterations N]
-  mill shell <repo>                 Interactive Claude session
+  mill run   <repo> [--agent ROLE] [--workspace-mode direct|readonly-clone] [--model M] [--iterations N] [--max-log-bytes B] [--max-total-tokens N] [--max-total-usd USD] [--prompt FILE] [--delay S] [--auto-commit MODE] [--json] [-d]
+  mill exec  <repo> [--agent ROLE] [--workspace-mode direct|readonly-clone] [--model M] [--max-log-bytes B] [--max-total-tokens N] [--max-total-usd USD] [--prompt FILE] [--auto-commit MODE]
+  mill watch <repo> [--agent ROLE] [--transport native|acp] [--workspace-mode direct|readonly-clone] [--model M] [--max-log-bytes B] [--max-total-tokens N] [--max-total-usd USD] [--prompt FILE] [--ralph] [--respawn]
+  mill multi <repo> [N] [-d] [--roles A,B,C] [--model M] [--iterations N] [--max-log-bytes B] [--max-total-tokens N] [--max-total-usd USD]
+  mill shell <repo> [--transport native|acp] [--prompt TEXT]  Interactive client session
+  mill profiles [ROLE]              List profiles or show ROLE env exports
   mill ps                           Show running containers
-  mill status                       Show agent iteration status
+  mill status [--json]              Show agent iteration status
+  mill watch-status [--once] [--interval S]  Live dashboard from status/history logs
+  mill web [--port P] [--no-serve]  Generate logs/index.html and optionally serve logs/
   mill logs   [agent-id] [--session]  Tail agent or session logs
-  mill build  [--platform PLAT]     Build the container image
-  mill stop                         Stop all running services
-  mill memory  [topic] [--search Q] [--clear]  View, search, or clear memory
-  mill history [--tail N]           Show iteration results log
+  mill tail   [agent-id] [--json] [--tail N] [--no-follow]  Tail logs or JSON events
+  mill build  [--platform PLAT] [--pull]  Build the container image, or pull the published image first
+  mill stop [--on-converge] [--timeout S] [--agent ID] [--run-id ID]  Stop services now, or after convergence
+  mill memory  [topic] [--search Q] [--clear]  View, search, clear, dedup, or rotate memory
+  mill report status [repo] [--json]  Summarize research report/source audit state
+  mill history [--tail N] [--json] [--since TS] [--agent N] [--failed-only]  Show iteration results log
+  mill cost    [--json] [--by agent|day|week|iteration]  Summarize usage and cost telemetry
+  mill events  [--tail N] [--follow]  Show structured event log
+  mill metrics                      Write Prometheus textfile metrics to logs/metrics.prom
+  mill mcp list [--json] [--manifest FILE]  List MCP servers from a manifest snapshot
+  mill mcp test <name> [--manifest FILE] [--require-reachable]  Check that an MCP server is present
+  mill version [--json]            Print harness, image, host, and model defaults
   mill diff    [N]                  Show last N commits + uncommitted changes
+  mill patches [--latest]           List read-only clone patch artifacts
+  mill apply <artifact> [repo] [--branch BR] [--check]  Apply a patch artifact
+  mill doctor [repo] [--profile-level L] [--fix]  Validate harness configuration
   mill clean                        Remove log and status files
-  mill init                         Create .env and starter prompt
+  mill init [--research TOPIC] [--dir DIR]  Create .env, starter prompt, or research repo scaffold
 
 Environment:
   ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN must be set (or in .env).
 
 Examples:
   mill run ~/projects/myapp
+  mill exec ~/projects/myapp --agent reviewer
   mill run ~/projects/myapp --model opus --iterations 5 -d
   mill watch ~/projects/myapp --ralph
   mill multi ~/projects/myapp 2
@@ -52,11 +74,232 @@ load_env() {
 }
 
 compose() {
+    local override="" rc
+    override="$(compose_network_policy_override "$@")"
     if docker compose version >/dev/null 2>&1; then
-        docker compose -f "$MILL_DIR/docker-compose.yml" "$@"
+        if [[ -n "$override" ]]; then
+            docker compose -f "$MILL_DIR/docker-compose.yml" -f "$override" "$@"
+            rc=$?
+        else
+            docker compose -f "$MILL_DIR/docker-compose.yml" "$@"
+            rc=$?
+        fi
     else
-        docker-compose -f "$MILL_DIR/docker-compose.yml" "$@"
+        if [[ -n "$override" ]]; then
+            docker-compose -f "$MILL_DIR/docker-compose.yml" -f "$override" "$@"
+            rc=$?
+        else
+            docker-compose -f "$MILL_DIR/docker-compose.yml" "$@"
+            rc=$?
+        fi
     fi
+    [[ -n "$override" ]] && rm -f "$override"
+    return "$rc"
+}
+
+compose_known_service() {
+    case "${1:-}" in
+        headless|headless-clone|watch|watch-clone|interactive|agent-1|agent-2|agent-3) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+compose_service_network() {
+    local service="$1"
+    case "$service" in
+        agent-1) printf '%s\n' "${AGENTMILL_NETWORK_1:-${AGENTMILL_NETWORK:-}}" ;;
+        agent-2) printf '%s\n' "${AGENTMILL_NETWORK_2:-${AGENTMILL_NETWORK:-}}" ;;
+        agent-3) printf '%s\n' "${AGENTMILL_NETWORK_3:-${AGENTMILL_NETWORK:-}}" ;;
+        *)       printf '%s\n' "${AGENTMILL_NETWORK:-}" ;;
+    esac
+}
+
+compose_network_policy_override() {
+    local arg service network tmp="" needs_override=false needs_proxy=false action="${1:-}" enforce_allowlist=false
+    local -a services=()
+    case "$action" in
+        up|run|create|start|restart) enforce_allowlist=true ;;
+    esac
+    for arg in "$@"; do
+        if compose_known_service "$arg"; then
+            services+=("$arg")
+        fi
+    done
+    if [[ "${#services[@]}" -eq 0 ]]; then
+        services=(headless headless-clone watch watch-clone interactive agent-1 agent-2 agent-3)
+    fi
+    for service in "${services[@]}"; do
+        network="$(compose_service_network "$service")"
+        case "$network" in
+            deny) needs_override=true ;;
+            allowlist)
+                if [[ "$enforce_allowlist" == true && -z "${AGENTMILL_EGRESS_ALLOWLIST:-}" ]]; then
+                    echo "Error: AGENTMILL_NETWORK=allowlist requires AGENTMILL_EGRESS_ALLOWLIST" >&2
+                    exit 1
+                fi
+                needs_override=true
+                needs_proxy=true
+                ;;
+        esac
+    done
+    if [[ "$needs_override" == true ]]; then
+        tmp="$(mktemp "${TMPDIR:-/tmp}/agentmill-network-policy.XXXXXX.yml")"
+        printf 'services:\n' > "$tmp"
+        if [[ "$needs_proxy" == true ]]; then
+            cat >> "$tmp" <<'YAML'
+  agentmill-egress-proxy:
+    image: ${AGENTMILL_IMAGE:-agentmill:latest}
+    build: .
+    entrypoint: ["/agentmill-egress-proxy.py"]
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    pids_limit: 128
+    mem_limit: 256m
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,mode=1777
+    environment:
+      AGENTMILL_EGRESS_ALLOWLIST: ${AGENTMILL_EGRESS_ALLOWLIST:-}
+      AGENTMILL_EGRESS_PROXY_PORT: ${AGENTMILL_EGRESS_PROXY_PORT:-18080}
+    networks:
+      - agentmill-egress-public
+      - agentmill-egress-internal
+YAML
+        fi
+        for service in "${services[@]}"; do
+            network="$(compose_service_network "$service")"
+            case "$network" in
+                deny)
+                    printf '  %s:\n    network_mode: "none"\n    networks: []\n' "$service" >> "$tmp"
+                    ;;
+                allowlist)
+                    printf '  %s:\n' "$service" >> "$tmp"
+                    cat >> "$tmp" <<'YAML'
+    depends_on:
+      - agentmill-egress-proxy
+    networks:
+      - agentmill-egress-internal
+    environment:
+      HTTP_PROXY: "http://agentmill-egress-proxy:${AGENTMILL_EGRESS_PROXY_PORT:-18080}"
+      HTTPS_PROXY: "http://agentmill-egress-proxy:${AGENTMILL_EGRESS_PROXY_PORT:-18080}"
+      ALL_PROXY: "http://agentmill-egress-proxy:${AGENTMILL_EGRESS_PROXY_PORT:-18080}"
+      http_proxy: "http://agentmill-egress-proxy:${AGENTMILL_EGRESS_PROXY_PORT:-18080}"
+      https_proxy: "http://agentmill-egress-proxy:${AGENTMILL_EGRESS_PROXY_PORT:-18080}"
+      all_proxy: "http://agentmill-egress-proxy:${AGENTMILL_EGRESS_PROXY_PORT:-18080}"
+      NO_PROXY: localhost,127.0.0.1,::1,agentmill-egress-proxy
+      no_proxy: localhost,127.0.0.1,::1,agentmill-egress-proxy
+YAML
+                    ;;
+            esac
+        done
+        if [[ "$needs_proxy" == true ]]; then
+            cat >> "$tmp" <<'YAML'
+networks:
+  agentmill-egress-internal:
+    internal: true
+  agentmill-egress-public: {}
+YAML
+        fi
+        printf '%s\n' "$tmp"
+    fi
+    return 0
+}
+
+stream_events_for_run() {
+    local events_log="$1" run_id="$2" stop_file="$3" start_position="${4:-0}"
+    python3 - "$events_log" "$run_id" "$stop_file" "$start_position" <<'PY'
+import json
+import time
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+run_id = sys.argv[2]
+stop = Path(sys.argv[3])
+try:
+    position = int(sys.argv[4])
+except ValueError:
+    position = 0
+
+while True:
+    if path.exists():
+        try:
+            size = path.stat().st_size
+            if size < position:
+                position = 0
+            with path.open("r", encoding="utf-8") as handle:
+                handle.seek(position)
+                while True:
+                    line = handle.readline()
+                    if not line:
+                        break
+                    position = handle.tell()
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if event.get("run_id") == run_id:
+                        print(json.dumps(event, sort_keys=True), flush=True)
+        except OSError:
+            pass
+    if stop.exists():
+        break
+    time.sleep(0.1)
+PY
+}
+
+emit_mill_run_completed() {
+    local exit_code="$1" command="$2"
+    python3 - "$AGENTMILL_RUN_ID" "${AGENTMILL_PROFILE_LEVEL:-trusted}" "$exit_code" "$command" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+
+run_id, profile, exit_code, command = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+event = {
+    "version": 1,
+    "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "run_id": run_id,
+    "agent_id": "cli",
+    "profile": profile,
+    "iteration": 0,
+    "type": "mill.run.completed",
+    "payload": {
+        "exit_code": exit_code,
+        "command": command,
+        "status": "ok" if exit_code == 0 else "error",
+    },
+}
+print(json.dumps(event, sort_keys=True), flush=True)
+PY
+}
+
+compose_json_run() {
+    local events_log="$MILL_DIR/logs/events.jsonl" stop_file stream_pid rc command start_position=0
+    mkdir -p "$MILL_DIR/logs"
+    if [[ -z "${AGENTMILL_RUN_ID:-}" ]]; then
+        export AGENTMILL_RUN_ID="mill-$(date -u '+%Y%m%dT%H%M%SZ')-$$"
+    fi
+    command="$*"
+    if [[ -f "$events_log" ]]; then
+        start_position="$(wc -c < "$events_log" | tr -d ' ')"
+    fi
+    stop_file="$(mktemp)"
+    rm -f "$stop_file"
+    stream_events_for_run "$events_log" "$AGENTMILL_RUN_ID" "$stop_file" "$start_position" &
+    stream_pid=$!
+
+    set +e
+    compose "$@" >&2
+    rc=$?
+    set -e
+
+    touch "$stop_file"
+    wait "$stream_pid" || true
+    rm -f "$stop_file"
+    emit_mill_run_completed "$rc" "$command"
+    return "$rc"
 }
 
 require_repo() {
@@ -67,85 +310,349 @@ require_repo() {
     export REPO_PATH="$repo"
 }
 
+profile_file() {
+    local role="$1" file
+    [[ "$role" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "Error: invalid agent role '$role'" >&2; exit 1; }
+    file="$MILL_DIR/agents/${role}.toml"
+    [[ -f "$file" ]] || { echo "Error: unknown agent role '$role' (expected one of: $(list_profile_names | tr '\n' ' '))" >&2; exit 1; }
+    printf '%s\n' "$file"
+}
+
+list_profile_names() {
+    local f
+    for f in "$MILL_DIR"/agents/*.toml; do
+        [[ -f "$f" ]] || continue
+        basename "$f" .toml
+    done | sort
+}
+
+profile_exports() {
+    local role="$1" agent_id="${2:-1}" suffix="${3:-}" file
+    file="$(profile_file "$role")"
+    python3 "$MILL_DIR/scripts/profile-env.py" "$file" --role "$role" --agent-id "$agent_id" --suffix "$suffix"
+}
+
+apply_agent_profile() {
+    local role="$1" agent_id="${2:-1}" suffix="${3:-}"
+    eval "$(profile_exports "$role" "$agent_id" "$suffix")"
+}
+
+profile_requires_clone() {
+    local profile="${AGENTMILL_PROFILE_LEVEL:-trusted}"
+    [[ "$profile" != "trusted" ]] && ! doctor_truthy "${AGENTMILL_ALLOW_DIRECT_HOST_REPO:-false}"
+}
+
+normalize_workspace_mode() {
+    local mode="${1:-auto}"
+    case "$mode" in
+        auto|"")
+            if profile_requires_clone; then
+                printf '%s\n' "readonly-clone"
+            else
+                printf '%s\n' "direct"
+            fi
+            ;;
+        direct)
+            if profile_requires_clone; then
+                echo "Error: standard/untrusted direct workspace mode requires AGENTMILL_ALLOW_DIRECT_HOST_REPO=true" >&2
+                exit 1
+            fi
+            printf '%s\n' "direct"
+            ;;
+        readonly-clone|clone-ro|ro-clone) printf '%s\n' "readonly-clone" ;;
+        *)
+            echo "Error: invalid workspace mode '$mode' (expected direct or readonly-clone)" >&2
+            exit 1
+            ;;
+    esac
+}
+
 cmd_run() {
-    local repo="" model="" iterations="" prompt="" delay="" auto_commit="" detach=false
+    local repo="" agent="" model="" iterations="" prompt="" delay="" auto_commit="" max_wall="" max_log="" max_tokens="" max_usd="" output_format="" profile_level="" workspace_mode="" detach=false json=false
     [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --agent)       agent="$2"; shift 2 ;;
             --model)       model="$2"; shift 2 ;;
             --iterations)  iterations="$2"; shift 2 ;;
             --prompt)      prompt="$2"; shift 2 ;;
             --delay)       delay="$2"; shift 2 ;;
             --auto-commit) auto_commit="$2"; shift 2 ;;
+            --max-wall-seconds) max_wall="$2"; shift 2 ;;
+            --max-log-bytes) max_log="$2"; shift 2 ;;
+            --max-total-tokens) max_tokens="$2"; shift 2 ;;
+            --max-total-usd) max_usd="$2"; shift 2 ;;
+            --claude-output-format|--output-format) output_format="$2"; shift 2 ;;
+            --profile-level) profile_level="$2"; shift 2 ;;
+            --workspace-mode) workspace_mode="$2"; shift 2 ;;
+            --json)        json=true; shift ;;
             -d|--detach)   detach=true; shift ;;
             *) repo="${repo:-$1}"; shift ;;
         esac
     done
+    if [[ "$json" == true && "$detach" == true ]]; then
+        echo "Error: mill run --json cannot be combined with --detach" >&2
+        exit 1
+    fi
     require_repo "$repo"
+    [[ -n "$agent" ]]      && apply_agent_profile "$agent" 1
     [[ -n "$model" ]]       && export MODEL="$model"
     [[ -n "$iterations" ]]  && export MAX_ITERATIONS="$iterations"
     [[ -n "$prompt" ]]      && export PROMPT_FILE="$prompt"
     [[ -n "$delay" ]]       && export LOOP_DELAY="$delay"
     [[ -n "$auto_commit" ]] && export AUTO_COMMIT="$auto_commit"
+    [[ -n "$max_wall" ]]    && export MAX_WALL_SECONDS="$max_wall"
+    [[ -n "$max_log" ]]     && export MAX_LOG_BYTES="$max_log"
+    [[ -n "$max_tokens" ]]  && export MAX_TOTAL_TOKENS="$max_tokens"
+    [[ -n "$max_usd" ]]     && export MAX_TOTAL_USD="$max_usd"
+    [[ -n "$output_format" ]] && export AGENTMILL_CLAUDE_OUTPUT_FORMAT="$output_format"
+    [[ -n "$profile_level" ]] && export AGENTMILL_PROFILE_LEVEL="$profile_level"
+    workspace_mode="$(normalize_workspace_mode "${workspace_mode:-${AGENTMILL_WORKSPACE_MODE:-auto}}")"
+    export AGENTMILL_WORKSPACE_MODE="$workspace_mode"
 
     local up_args=(up)
     [[ "$detach" == true ]] && up_args+=(-d)
-    up_args+=(headless)
-    compose "${up_args[@]}"
+    if [[ "$workspace_mode" == "readonly-clone" ]]; then
+        up_args+=(headless-clone)
+    else
+        up_args+=(headless)
+    fi
+    if [[ "$json" == true ]]; then
+        compose_json_run "${up_args[@]}"
+    else
+        compose "${up_args[@]}"
+    fi
 }
 
-cmd_watch() {
-    local repo="" ralph=false respawn=false prompt="" model=""
+cmd_exec() {
+    local repo="" agent="" model="" prompt="" auto_commit="" max_wall="" max_log="" max_tokens="" max_usd="" output_format="" profile_level="" workspace_mode=""
     [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --ralph)   ralph=true; shift ;;
-            --respawn) respawn=true; shift ;;
-            --prompt)  prompt="$2"; shift 2 ;;
-            --model)   model="$2"; shift 2 ;;
+            --agent)       agent="$2"; shift 2 ;;
+            --model)       model="$2"; shift 2 ;;
+            --prompt)      prompt="$2"; shift 2 ;;
+            --auto-commit) auto_commit="$2"; shift 2 ;;
+            --max-wall-seconds) max_wall="$2"; shift 2 ;;
+            --max-log-bytes) max_log="$2"; shift 2 ;;
+            --max-total-tokens) max_tokens="$2"; shift 2 ;;
+            --max-total-usd) max_usd="$2"; shift 2 ;;
+            --claude-output-format|--output-format) output_format="$2"; shift 2 ;;
+            --profile-level) profile_level="$2"; shift 2 ;;
+            --workspace-mode) workspace_mode="$2"; shift 2 ;;
+            --iterations)
+                echo "Error: mill exec always runs exactly one iteration; use mill run for loops" >&2
+                exit 1
+                ;;
             *) repo="${repo:-$1}"; shift ;;
         esac
     done
     require_repo "$repo"
+    [[ -n "$agent" ]]      && apply_agent_profile "$agent" 1
+    [[ -n "$model" ]]       && export MODEL="$model"
+    [[ -n "$prompt" ]]      && export PROMPT_FILE="$prompt"
+    [[ -n "$auto_commit" ]] && export AUTO_COMMIT="$auto_commit"
+    [[ -n "$max_wall" ]]    && export MAX_WALL_SECONDS="$max_wall"
+    [[ -n "$max_log" ]]     && export MAX_LOG_BYTES="$max_log"
+    [[ -n "$max_tokens" ]]  && export MAX_TOTAL_TOKENS="$max_tokens"
+    [[ -n "$max_usd" ]]     && export MAX_TOTAL_USD="$max_usd"
+    [[ -n "$output_format" ]] && export AGENTMILL_CLAUDE_OUTPUT_FORMAT="$output_format"
+    [[ -n "$profile_level" ]] && export AGENTMILL_PROFILE_LEVEL="$profile_level"
+    export MAX_ITERATIONS=1
+    export LOOP_DELAY=0
+    export AGENTMILL_RUN_MODE=exec
+    workspace_mode="$(normalize_workspace_mode "${workspace_mode:-${AGENTMILL_WORKSPACE_MODE:-auto}}")"
+    export AGENTMILL_WORKSPACE_MODE="$workspace_mode"
+
+    if [[ "$workspace_mode" == "readonly-clone" ]]; then
+        compose run --rm headless-clone
+    else
+        compose run --rm headless
+    fi
+}
+
+cmd_watch() {
+    local repo="" agent="" ralph=false respawn=false prompt="" model="" max_wall="" max_log="" max_tokens="" max_usd="" profile_level="" workspace_mode="" transport=""
+    [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --agent)   agent="$2"; shift 2 ;;
+            --transport) transport="$2"; shift 2 ;;
+            --acp)     transport=acp; shift ;;
+            --ralph)   ralph=true; shift ;;
+            --respawn) respawn=true; shift ;;
+            --prompt)  prompt="$2"; shift 2 ;;
+            --model)   model="$2"; shift 2 ;;
+            --max-wall-seconds) max_wall="$2"; shift 2 ;;
+            --max-log-bytes) max_log="$2"; shift 2 ;;
+            --max-total-tokens) max_tokens="$2"; shift 2 ;;
+            --max-total-usd) max_usd="$2"; shift 2 ;;
+            --profile-level) profile_level="$2"; shift 2 ;;
+            --workspace-mode) workspace_mode="$2"; shift 2 ;;
+            *) repo="${repo:-$1}"; shift ;;
+        esac
+    done
+    require_repo "$repo"
+    [[ -n "$agent" ]]          && apply_agent_profile "$agent" 1
     [[ "$ralph" == true ]]   && export AUTO_RALPH=true
     [[ "$respawn" == true ]] && export RESPAWN=true
     [[ -n "$prompt" ]]       && export PROMPT_FILE="$prompt"
     [[ -n "$model" ]]        && export MODEL="$model"
-    compose run watch
+    [[ -n "$max_wall" ]]     && export MAX_WALL_SECONDS="$max_wall"
+    [[ -n "$max_log" ]]      && export MAX_LOG_BYTES="$max_log"
+    [[ -n "$max_tokens" ]]   && export MAX_TOTAL_TOKENS="$max_tokens"
+    [[ -n "$max_usd" ]]      && export MAX_TOTAL_USD="$max_usd"
+    [[ -n "$profile_level" ]] && export AGENTMILL_PROFILE_LEVEL="$profile_level"
+    [[ -n "$transport" ]] && export AGENTMILL_CLIENT_TRANSPORT="$transport"
+    workspace_mode="$(normalize_workspace_mode "${workspace_mode:-${AGENTMILL_WORKSPACE_MODE:-auto}}")"
+    export AGENTMILL_WORKSPACE_MODE="$workspace_mode"
+    if [[ "$workspace_mode" == "readonly-clone" ]]; then
+        compose run watch-clone
+    else
+        compose run watch
+    fi
 }
 
 cmd_multi() {
-    local repo="${1:-}"; shift || true
-    local count="${1:-3}"; shift || true
-    local detach=false model="" iterations=""
+    local repo="" count="" roles="" detach=false model="" iterations="" delay="" max_wall="" max_log="" max_tokens="" max_usd="" profile_level=""
+    [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
+    [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { count="$1"; shift; }
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -d|--detach)   detach=true; shift ;;
+            --roles)       roles="$2"; shift 2 ;;
             --model)       model="$2"; shift 2 ;;
             --iterations)  iterations="$2"; shift 2 ;;
-            *) shift ;;
+            --delay)       delay="$2"; shift 2 ;;
+            --max-wall-seconds) max_wall="$2"; shift 2 ;;
+            --max-log-bytes) max_log="$2"; shift 2 ;;
+            --max-total-tokens) max_tokens="$2"; shift 2 ;;
+            --max-total-usd) max_usd="$2"; shift 2 ;;
+            --profile-level) profile_level="$2"; shift 2 ;;
+            *) repo="${repo:-$1}"; shift ;;
         esac
     done
     require_repo "$repo"
-    [[ "$count" -ge 1 && "$count" -le 10 ]] || { echo "Error: agent count must be 1-10" >&2; exit 1; }
-    [[ -n "$model" ]]      && export MODEL="$model"
-    [[ -n "$iterations" ]] && export MAX_ITERATIONS="$iterations"
-    local services=""
-    for i in $(seq 1 "$count"); do services+="agent-$i "; done
+    if [[ -n "$roles" ]]; then
+        local role_list=()
+        IFS=',' read -r -a role_list <<< "$roles"
+        [[ -n "$count" ]] || count="${#role_list[@]}"
+        [[ "$count" =~ ^[0-9]+$ ]] || { echo "Error: agent count must be numeric" >&2; exit 1; }
+        [[ "$count" -eq "${#role_list[@]}" ]] || { echo "Error: --roles count (${#role_list[@]}) must match agent count ($count)" >&2; exit 1; }
+        local i role
+        for i in "${!role_list[@]}"; do
+            role="${role_list[$i]}"
+            role="${role#"${role%%[![:space:]]*}"}"
+            role="${role%"${role##*[![:space:]]}"}"
+            [[ -n "$role" ]] || { echo "Error: empty role in --roles" >&2; exit 1; }
+            apply_agent_profile "$role" "$((i + 1))" "_$((i + 1))"
+        done
+    fi
+    count="${count:-3}"
+    [[ "$count" =~ ^[0-9]+$ ]] || { echo "Error: agent count must be numeric" >&2; exit 1; }
+    [[ "$count" -ge 1 && "$count" -le 3 ]] || { echo "Error: agent count must be 1-3 (docker-compose.yml defines agent-1..agent-3)" >&2; exit 1; }
+    if [[ -n "$model" ]]; then
+        export MODEL="$model"
+        local i
+        for i in $(seq 1 "$count"); do export "MODEL_${i}=$model"; done
+    fi
+    if [[ -n "$iterations" ]]; then
+        export MAX_ITERATIONS="$iterations"
+        local i
+        for i in $(seq 1 "$count"); do export "MAX_ITERATIONS_${i}=$iterations"; done
+    fi
+    if [[ -n "$delay" ]]; then
+        export LOOP_DELAY="$delay"
+        local i
+        for i in $(seq 1 "$count"); do export "LOOP_DELAY_${i}=$delay"; done
+    fi
+    if [[ -n "$max_wall" ]]; then
+        export MAX_WALL_SECONDS="$max_wall"
+        local i
+        for i in $(seq 1 "$count"); do export "MAX_WALL_SECONDS_${i}=$max_wall"; done
+    fi
+    if [[ -n "$max_log" ]]; then
+        export MAX_LOG_BYTES="$max_log"
+        local i
+        for i in $(seq 1 "$count"); do export "MAX_LOG_BYTES_${i}=$max_log"; done
+    fi
+    if [[ -n "$max_tokens" ]]; then
+        export MAX_TOTAL_TOKENS="$max_tokens"
+        local i
+        for i in $(seq 1 "$count"); do export "MAX_TOTAL_TOKENS_${i}=$max_tokens"; done
+    fi
+    if [[ -n "$max_usd" ]]; then
+        export MAX_TOTAL_USD="$max_usd"
+        local i
+        for i in $(seq 1 "$count"); do export "MAX_TOTAL_USD_${i}=$max_usd"; done
+    fi
+    if [[ -n "$profile_level" ]]; then
+        export AGENTMILL_PROFILE_LEVEL="$profile_level"
+        local i
+        for i in $(seq 1 "$count"); do export "AGENTMILL_PROFILE_LEVEL_${i}=$profile_level"; done
+    fi
+    local services=()
+    for i in $(seq 1 "$count"); do services+=("agent-$i"); done
     local up_args=(up)
     [[ "$detach" == true ]] && up_args+=(-d)
-    # shellcheck disable=SC2086
-    compose "${up_args[@]}" $services
+    compose "${up_args[@]}" "${services[@]}"
+}
+
+cmd_profiles() {
+    local role="${1:-}"
+    if [[ -n "$role" ]]; then
+        profile_exports "$role" 1
+    else
+        list_profile_names
+    fi
 }
 
 cmd_shell() {
-    require_repo "${1:-}"
+    local repo="" transport="" acp_prompt=""
+    [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --transport) transport="$2"; shift 2 ;;
+            --acp) transport=acp; shift ;;
+            --prompt) acp_prompt="$2"; shift 2 ;;
+            *) repo="${repo:-$1}"; shift ;;
+        esac
+    done
+    require_repo "$repo"
+    [[ -n "$transport" ]] && export AGENTMILL_CLIENT_TRANSPORT="$transport"
+    [[ -n "$acp_prompt" ]] && export AGENTMILL_ACP_PROMPT="$acp_prompt"
     compose run interactive
 }
 
 cmd_status() {
-    local log_dir="$MILL_DIR/logs" found=false
+    local log_dir="$MILL_DIR/logs" found=false json=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            *) shift ;;
+        esac
+    done
     if [[ ! -d "$log_dir" ]]; then echo "No logs directory found."; exit 0; fi
+
+    if [[ "$json" == true ]]; then
+        python3 - "$log_dir" <<'PY'
+import glob
+import json
+import sys
+from pathlib import Path
+
+rows = []
+for path in sorted(glob.glob(str(Path(sys.argv[1]) / "status-*.json"))):
+    try:
+        data = json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError):
+        continue
+    data.setdefault("file", path)
+    rows.append(data)
+print(json.dumps(rows, sort_keys=True))
+PY
+        return 0
+    fi
 
     printf "%-8s  %-10s  %-12s  %-30s  %s\n" "AGENT" "PROGRESS" "STATE" "DETAIL" "TIMESTAMP"
     printf "%-8s  %-10s  %-12s  %-30s  %s\n" "-----" "--------" "-----" "------" "---------"
@@ -173,6 +680,255 @@ cmd_status() {
 }
 
 cmd_ps() { compose ps; }
+
+cmd_watch_status() {
+    local once=false interval=2
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --once) once=true; shift ;;
+            --interval) interval="$2"; shift 2 ;;
+            *) echo "Error: unknown watch-status option: $1" >&2; return 1 ;;
+        esac
+    done
+    if ! [[ "$interval" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "Error: --interval must be a non-negative number" >&2
+        return 1
+    fi
+
+    while true; do
+        if [[ -t 1 ]] && command -v tput >/dev/null 2>&1; then
+            tput clear || true
+        fi
+        printf 'AgentMill status  %s\n\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+        cmd_status
+        printf '\nRecent history\n'
+        cmd_history --tail 5 2>/dev/null || true
+        [[ "$once" == true ]] && break
+        sleep "$interval"
+    done
+}
+
+cmd_web() {
+    local port=8000 no_serve=false log_dir="$MILL_DIR/logs" output="$MILL_DIR/logs/index.html"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --port) port="$2"; shift 2 ;;
+            --no-serve|--generate-only) no_serve=true; shift ;;
+            *) echo "Error: unknown web option: $1" >&2; return 1 ;;
+        esac
+    done
+    if ! [[ "$port" =~ ^[0-9]+$ ]]; then
+        echo "Error: --port must be a positive integer" >&2
+        return 1
+    fi
+    mkdir -p "$log_dir"
+    python3 - "$log_dir" "$output" <<'PY'
+import csv
+import glob
+import json
+import sys
+from collections import Counter
+from html import escape
+from pathlib import Path
+
+log_dir = Path(sys.argv[1])
+output = Path(sys.argv[2])
+
+def read_tsv(path: Path) -> list[dict[str, str]]:
+    if not path.exists():
+        return []
+    try:
+        return list(csv.DictReader(path.open(newline="", encoding="utf-8"), delimiter="\t"))
+    except (OSError, csv.Error):
+        return []
+
+def read_jsonl(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, object]] = []
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(item, dict):
+                    rows.append(item)
+    except OSError:
+        return []
+    return rows
+
+def as_int(value: object) -> int:
+    try:
+        return int(float(str(value or 0)))
+    except ValueError:
+        return 0
+
+def as_float(value: object) -> float:
+    try:
+        return float(str(value or 0))
+    except ValueError:
+        return 0.0
+
+def cell(value: object) -> str:
+    return escape(str(value if value is not None else ""))
+
+def table(headers: list[str], rows: list[list[object]], empty: str) -> str:
+    if not rows:
+        return f'<p class="empty">{escape(empty)}</p>'
+    head = "".join(f"<th>{escape(header)}</th>" for header in headers)
+    body = []
+    for row in rows:
+        body.append("<tr>" + "".join(f"<td>{cell(value)}</td>" for value in row) + "</tr>")
+    return f"<table><thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
+
+results = read_tsv(log_dir / "results.tsv")
+usage = read_tsv(log_dir / "usage.tsv")
+events = read_jsonl(log_dir / "events.jsonl")
+statuses: list[dict[str, object]] = []
+for status_path in sorted(glob.glob(str(log_dir / "status-*.json"))):
+    try:
+        data = json.loads(Path(status_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        continue
+    if isinstance(data, dict):
+        data["file"] = Path(status_path).name
+        statuses.append(data)
+
+failed_statuses = {"error", "push_failed", "policy_denied"}
+iterations = len(results)
+failed_iterations = sum(
+    1
+    for row in results
+    if row.get("status", "") in failed_statuses or str(row.get("status", "")).startswith("policy_")
+)
+total_tokens = sum(as_int(row.get("total_tokens")) for row in usage)
+total_cost = sum(as_float(row.get("cost_usd")) for row in usage)
+event_counts = Counter(str(event.get("type", "")) for event in events if event.get("type"))
+latest_event = events[-1] if events else {}
+latest_payload = latest_event.get("payload", {}) if isinstance(latest_event, dict) else {}
+
+status_rows = [
+    [
+        row.get("agent", ""),
+        row.get("iteration", ""),
+        row.get("max_iterations", ""),
+        row.get("state", ""),
+        row.get("detail", ""),
+        row.get("timestamp", ""),
+    ]
+    for row in statuses
+]
+history_rows = [
+    [
+        row.get("iteration", ""),
+        row.get("agent", ""),
+        row.get("timestamp", ""),
+        row.get("files_changed", ""),
+        row.get("commits", ""),
+        row.get("status", ""),
+        row.get("description", ""),
+    ]
+    for row in results[-25:]
+]
+event_rows = [
+    [
+        event.get("timestamp", ""),
+        event.get("agent_id", ""),
+        event.get("iteration", ""),
+        event.get("type", ""),
+        json.dumps(event.get("payload", {}), sort_keys=True),
+    ]
+    for event in events[-25:]
+]
+event_count_rows = [[name, count] for name, count in sorted(event_counts.items())]
+
+html = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AgentMill Dashboard</title>
+  <style>
+    :root {{ color-scheme: light dark; --border: #d8dee4; --muted: #667085; --panel: #f6f8fa; --ink: #1f2328; }}
+    @media (prefers-color-scheme: dark) {{
+      :root {{ --border: #30363d; --muted: #8b949e; --panel: #161b22; --ink: #e6edf3; }}
+      body {{ background: #0d1117; }}
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; font: 14px/1.45 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: var(--ink); }}
+    header {{ padding: 24px; border-bottom: 1px solid var(--border); }}
+    main {{ max-width: 1180px; margin: 0 auto; padding: 24px; }}
+    h1 {{ margin: 0 0 4px; font-size: 28px; }}
+    h2 {{ margin: 28px 0 12px; font-size: 18px; }}
+    .muted {{ color: var(--muted); }}
+    .metrics {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }}
+    .metric {{ border: 1px solid var(--border); border-radius: 8px; padding: 14px; background: var(--panel); }}
+    .metric strong {{ display: block; font-size: 24px; margin-top: 4px; }}
+    table {{ width: 100%; border-collapse: collapse; border: 1px solid var(--border); }}
+    th, td {{ padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }}
+    th {{ background: var(--panel); font-weight: 650; }}
+    td {{ overflow-wrap: anywhere; }}
+    .grid {{ display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 0.45fr); gap: 20px; align-items: start; }}
+    .empty {{ color: var(--muted); border: 1px dashed var(--border); padding: 16px; border-radius: 8px; }}
+    @media (max-width: 800px) {{ main {{ padding: 16px; }} .grid {{ grid-template-columns: 1fr; }} }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>AgentMill Dashboard</h1>
+    <div class="muted">Generated from {cell(log_dir)}. Serve this directory with <code>python3 -m http.server</code>.</div>
+  </header>
+  <main>
+    <section class="metrics">
+      <div class="metric"><span class="muted">Iterations</span><strong>{iterations}</strong></div>
+      <div class="metric"><span class="muted">Failed</span><strong>{failed_iterations}</strong></div>
+      <div class="metric"><span class="muted">Events</span><strong>{len(events)}</strong></div>
+      <div class="metric"><span class="muted">Tokens</span><strong>{total_tokens}</strong></div>
+      <div class="metric"><span class="muted">Cost USD</span><strong>{total_cost:.4f}</strong></div>
+    </section>
+    <div class="grid">
+      <section>
+        <h2>Agent Status</h2>
+        {table(["Agent", "Iteration", "Max", "State", "Detail", "Timestamp"], status_rows, "No status files found.")}
+      </section>
+      <section>
+        <h2>Latest Event</h2>
+        <table><tbody>
+          <tr><th>Type</th><td>{cell(latest_event.get("type", ""))}</td></tr>
+          <tr><th>Timestamp</th><td>{cell(latest_event.get("timestamp", ""))}</td></tr>
+          <tr><th>Run</th><td>{cell(latest_event.get("run_id", ""))}</td></tr>
+          <tr><th>Payload</th><td>{cell(json.dumps(latest_payload, sort_keys=True))}</td></tr>
+        </tbody></table>
+      </section>
+    </div>
+    <h2>Recent History</h2>
+    {table(["Iteration", "Agent", "Timestamp", "Files", "Commits", "Status", "Description"], history_rows, "No results.tsv rows found.")}
+    <div class="grid">
+      <section>
+        <h2>Recent Events</h2>
+        {table(["Timestamp", "Agent", "Iteration", "Type", "Payload"], event_rows, "No events.jsonl rows found.")}
+      </section>
+      <section>
+        <h2>Event Counts</h2>
+        {table(["Type", "Count"], event_count_rows, "No events counted.")}
+      </section>
+    </div>
+  </main>
+</body>
+</html>
+"""
+output.write_text(html, encoding="utf-8")
+print(output)
+PY
+    echo "Wrote $output"
+    if [[ "$no_serve" == true ]]; then
+        return 0
+    fi
+    echo "Serving $log_dir at http://127.0.0.1:$port/"
+    (cd "$log_dir" && python3 -m http.server "$port")
+}
 
 cmd_logs() {
     local agent_id="${1:-1}" session=false
@@ -203,23 +959,295 @@ cmd_logs() {
 }
 
 cmd_build() {
-    local platform=""
+    local platform="" pull=false prebuilt_image="${AGENTMILL_PREBUILT_IMAGE:-ghcr.io/kurcontko/agentmill:latest}" local_image="${AGENTMILL_IMAGE:-agentmill:latest}"
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --platform) platform="$2"; shift 2 ;;
+            --pull) pull=true; shift ;;
             *) shift ;;
         esac
     done
+    if [[ "$pull" == true ]]; then
+        local pull_args=(pull)
+        [[ -n "$platform" ]] && pull_args+=(--platform "$platform")
+        pull_args+=("$prebuilt_image")
+        if docker "${pull_args[@]}"; then
+            docker tag "$prebuilt_image" "$local_image"
+            echo "Pulled $prebuilt_image as $local_image"
+            return 0
+        fi
+        echo "WARN: could not pull $prebuilt_image; building $local_image locally" >&2
+    fi
     if [[ -n "$platform" ]]; then
-        DOCKER_DEFAULT_PLATFORM="$platform" docker build -t agentmill "$MILL_DIR"
+        DOCKER_DEFAULT_PLATFORM="$platform" docker build -t "$local_image" "$MILL_DIR"
     else
-        docker build -t agentmill "$MILL_DIR"
+        docker build -t "$local_image" "$MILL_DIR"
     fi
 }
 
-cmd_stop() { compose down; }
+wait_for_convergence() {
+    local timeout="${1:-0}" agent="${2:-}" run_id="${3:-}"
+    python3 - "$MILL_DIR/logs/events.jsonl" "$MILL_DIR/logs/convergence.tsv" "$timeout" "$agent" "$run_id" <<'PY'
+import csv
+import json
+import sys
+import time
+from pathlib import Path
+
+events_path = Path(sys.argv[1])
+convergence_path = Path(sys.argv[2])
+try:
+    timeout = float(sys.argv[3] or "0")
+except ValueError:
+    print("Error: --timeout must be a non-negative number", file=sys.stderr)
+    raise SystemExit(2)
+if timeout < 0:
+    print("Error: --timeout must be a non-negative number", file=sys.stderr)
+    raise SystemExit(2)
+agent_filter = sys.argv[4]
+run_filter = sys.argv[5]
+deadline = None if timeout == 0 else time.monotonic() + timeout
+
+
+def truthy(value):
+    if value is True:
+        return True
+    return str(value).strip().lower() in {"true", "1", "yes", "on"}
+
+
+def event_matches(event):
+    if agent_filter and str(event.get("agent_id", "")) != agent_filter:
+        return None
+    if run_filter and str(event.get("run_id", "")) != run_filter:
+        return None
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+    event_type = event.get("type")
+    if event_type == "loop.stopped" and payload.get("reason") == "completion":
+        return (
+            f"event loop.stopped completion "
+            f"run_id={event.get('run_id', '')} agent={event.get('agent_id', '')} "
+            f"gate={payload.get('gate', '')}"
+        )
+    if event_type == "convergence.evaluated" and truthy(payload.get("passed")):
+        return (
+            f"event convergence.evaluated passed "
+            f"run_id={event.get('run_id', '')} agent={event.get('agent_id', '')} "
+            f"gate={payload.get('gate', '')}"
+        )
+    return None
+
+
+def check_events():
+    if not events_path.exists():
+        return None
+    try:
+        lines = events_path.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        matched = event_matches(event)
+        if matched:
+            return matched
+    return None
+
+
+def check_convergence_tsv():
+    # convergence.tsv has no run_id column, so do not use it to prove a
+    # run-specific wait. events.jsonl is the authoritative run-scoped source.
+    if run_filter or not convergence_path.exists():
+        return None
+    try:
+        rows = list(csv.DictReader(convergence_path.open(newline="", encoding="utf-8"), delimiter="\t"))
+    except (OSError, csv.Error):
+        return None
+    for row in reversed(rows):
+        if agent_filter and row.get("agent") != agent_filter:
+            continue
+        if truthy(row.get("passed")):
+            return (
+                f"convergence.tsv passed "
+                f"agent={row.get('agent', '')} iteration={row.get('iteration', '')} "
+                f"gate={row.get('gate', '')}"
+            )
+    return None
+
+
+while True:
+    matched = check_events() or check_convergence_tsv()
+    if matched:
+        print(f"Convergence observed: {matched}")
+        raise SystemExit(0)
+    if deadline is not None and time.monotonic() >= deadline:
+        print("Timed out waiting for convergence", file=sys.stderr)
+        raise SystemExit(124)
+    time.sleep(0.25)
+PY
+}
+
+cmd_stop() {
+    local on_converge=false timeout=0 agent="" run_id=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --on-converge) on_converge=true; shift ;;
+            --timeout) timeout="$2"; shift 2 ;;
+            --agent) agent="$2"; shift 2 ;;
+            --run-id) run_id="$2"; shift 2 ;;
+            *) echo "Error: unknown stop option: $1" >&2; return 1 ;;
+        esac
+    done
+
+    if [[ "$on_converge" == true ]]; then
+        wait_for_convergence "$timeout" "$agent" "$run_id"
+    fi
+    compose down
+}
+
+research_slug() {
+    python3 - "$1" <<'PY'
+import re
+import sys
+
+value = sys.argv[1].strip().lower()
+value = re.sub(r"[^a-z0-9._-]+", "-", value)
+value = value.strip("-._")
+print(value or "research-topic")
+PY
+}
+
+research_memory_type() {
+    case "$1" in
+        findings) printf '%s\n' "findings" ;;
+        sources) printf '%s\n' "sources" ;;
+        contradictions) printf '%s\n' "contradictions" ;;
+        open_questions) printf '%s\n' "open_questions" ;;
+        *) printf '%s\n' "decisions" ;;
+    esac
+}
+
+write_research_memory_topic() {
+    local dir="$1" topic="$2" file now type
+    file="$dir/memory/${topic}.md"
+    [[ -f "$file" ]] && return 0
+    now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    type="$(research_memory_type "$topic")"
+    cat > "$file" <<EOF
+---
+type: $type
+created: $now
+last_iteration: 0
+---
+EOF
+}
+
+cmd_init_research() {
+    local topic="$1" target_dir="${2:-}" root slug now
+    [[ -n "$topic" ]] || { echo "Error: --research requires a topic" >&2; return 1; }
+    if [[ -z "$target_dir" ]]; then
+        root="${AGENTMILL_RESEARCH_ROOT:-$HOME/research}"
+        slug="$(research_slug "$topic")"
+        target_dir="$root/$slug"
+    fi
+    [[ "$target_dir" == /* ]] || target_dir="$PWD/$target_dir"
+
+    mkdir -p "$target_dir/memory" "$target_dir/logs"
+    now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+    if [[ ! -f "$target_dir/TASK.md" ]]; then
+        python3 - "$MILL_DIR/prompts/TASK_TEMPLATE.md" "$target_dir/TASK.md" "$topic" <<'PY'
+import sys
+from pathlib import Path
+
+template = Path(sys.argv[1]).read_text(encoding="utf-8")
+target = Path(sys.argv[2])
+topic = sys.argv[3]
+target.write_text(template.replace("<TOPIC>", topic), encoding="utf-8")
+PY
+        echo "Created $target_dir/TASK.md"
+    else
+        echo "$target_dir/TASK.md already exists."
+    fi
+
+    if [[ ! -f "$target_dir/REPORT.md" ]]; then
+        cat > "$target_dir/REPORT.md" <<EOF
+# Research Report: $topic
+
+Created: $now
+
+## Executive Summary
+
+_Draft. Summarize the answer after evidence has accumulated._
+
+## Scope And Method
+
+_Explain source classes, time window, inclusion/exclusion rules, and searches run._
+
+## Findings
+
+_Synthesize material claims here. Every factual claim needs a footnote._
+
+## Evidence Table
+
+| Claim | Source(s) | Source class | Confidence |
+|---|---|---|---|
+
+## Contradictions And Caveats
+
+_Track disagreements, missing data, and limits._
+
+## Unresolved
+
+_Move unresolved open questions here before completion._
+
+## References
+
+_Footnote definitions go here and should resolve to memory/sources.md entries or URLs._
+EOF
+        echo "Created $target_dir/REPORT.md"
+    else
+        echo "$target_dir/REPORT.md already exists."
+    fi
+
+    local topic_file
+    for topic_file in findings sources hypotheses open_questions contradictions decisions failed_approaches; do
+        write_research_memory_topic "$target_dir" "$topic_file"
+    done
+
+    if [[ ! -d "$target_dir/.git" && ! -f "$target_dir/.git" ]] && command -v git >/dev/null 2>&1; then
+        git -C "$target_dir" init -q
+        echo "Initialized git repo at $target_dir"
+    fi
+
+    echo "Research scaffold ready: $target_dir"
+}
 
 cmd_init() {
+    local research_topic="" research_dir=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --research)
+                [[ -n "${2:-}" ]] || { echo "Error: --research requires a topic" >&2; return 1; }
+                research_topic="$2"; shift 2 ;;
+            --dir)
+                [[ -n "${2:-}" ]] || { echo "Error: --dir requires a path" >&2; return 1; }
+                research_dir="$2"; shift 2 ;;
+            *) echo "Error: unknown init option: $1" >&2; return 1 ;;
+        esac
+    done
+    if [[ -n "$research_dir" && -z "$research_topic" ]]; then
+        echo "Error: --dir is only valid with --research" >&2
+        return 1
+    fi
+    if [[ -n "$research_topic" ]]; then
+        cmd_init_research "$research_topic" "$research_dir"
+        return $?
+    fi
+
     if [[ ! -f "$MILL_DIR/.env" ]]; then
         cp "$MILL_DIR/.env.example" "$MILL_DIR/.env"
         echo "Created .env from .env.example — edit it to set your auth key and REPO_PATH."
@@ -242,9 +1270,14 @@ PROMPT
 }
 
 cmd_memory() {
-    local memory_dir="$MILL_DIR/memory" topic="" search="" clear=false
+    local memory_dir="$MILL_DIR/memory" topic="" search="" clear=false action=""
     [[ -n "${REPO_PATH:-}" && -d "$REPO_PATH/memory" ]] && memory_dir="$REPO_PATH/memory"
     [[ -d "$memory_dir" ]] || { echo "No memory directory found."; exit 0; }
+
+    if [[ "${1:-}" == "rotate" || "${1:-}" == "dedup" ]]; then
+        action="$1"
+        shift
+    fi
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -254,7 +1287,48 @@ cmd_memory() {
         esac
     done
 
-    if [[ "$clear" == true && -n "$topic" ]]; then
+    if [[ "$action" == "rotate" ]]; then
+        local stamp archive moved=false f
+        stamp="$(date -u '+%Y%m%dT%H%M%SZ')"
+        archive="$memory_dir/archive/$stamp"
+        mkdir -p "$archive"
+        for f in "$memory_dir"/*.md; do
+            [[ -f "$f" ]] || continue
+            mv "$f" "$archive/"
+            moved=true
+        done
+        if [[ "$moved" == true ]]; then
+            echo "Archived memory topics to $archive"
+        else
+            rmdir "$archive" 2>/dev/null || true
+            echo "No memory topics to rotate."
+        fi
+    elif [[ "$action" == "dedup" ]]; then
+        topic="${topic:-sources}"
+        local file="$memory_dir/${topic}.md"
+        [[ -f "$file" ]] || { echo "No memory for: $topic"; return 0; }
+        python3 - "$file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+url_pattern = re.compile(r"https?://[^\s)<>\"]+")
+lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+seen: set[str] = set()
+kept: list[str] = []
+removed = 0
+for line in lines:
+    urls = url_pattern.findall(line)
+    if urls and all(url in seen for url in urls):
+        removed += 1
+        continue
+    kept.append(line)
+    seen.update(urls)
+path.write_text("".join(kept), encoding="utf-8")
+print(f"Removed {removed} duplicate URL line(s) from {path.name}")
+PY
+    elif [[ "$clear" == true && -n "$topic" ]]; then
         rm -f "$memory_dir/${topic}.md" "$memory_dir/.${topic}.lock"
         echo "Cleared memory: $topic"
     elif [[ -n "$search" ]]; then
@@ -268,9 +1342,201 @@ cmd_memory() {
             local name count
             name="$(basename "$f" .md)"
             count="$(grep -c '^---$' "$f" 2>/dev/null || echo 0)"
+            if [[ "$(head -1 "$f" 2>/dev/null)" == "---" ]] && grep -q '^type: ' "$f" 2>/dev/null && [[ "$count" -ge 2 ]]; then
+                count=$(( count - 2 ))
+            fi
             printf '  [[%s]] (%d entries)\n' "$name" "$(( count / 2 ))"
         done
     fi
+}
+
+cmd_report() {
+    local sub="${1:-status}" repo="" json=false
+    [[ $# -gt 0 ]] && shift
+    case "$sub" in
+        status) ;;
+        -h|--help|help)
+            echo "Usage: mill report status [repo] [--json]"
+            return 0
+            ;;
+        *)
+            echo "Error: unknown report subcommand: $sub" >&2
+            return 1
+            ;;
+    esac
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            --repo) repo="$2"; shift 2 ;;
+            *)
+                if [[ "${1:0:1}" == "-" ]]; then
+                    echo "Error: unknown report status option: $1" >&2
+                    return 1
+                fi
+                repo="$1"
+                shift
+                ;;
+        esac
+    done
+
+    repo="${repo:-${REPO_PATH:-$PWD}}"
+    [[ "$repo" == /* ]] || repo="$PWD/$repo"
+    python3 - "$repo" "$json" <<'PY'
+import csv
+import json
+import re
+import sys
+from pathlib import Path
+
+repo = Path(sys.argv[1])
+emit_json = sys.argv[2].lower() == "true"
+report = repo / "REPORT.md"
+memory = repo / "memory"
+logs = repo / "logs"
+sources = memory / "sources.md"
+open_questions = memory / "open_questions.md"
+results = logs / "results.tsv"
+
+footnote_pattern = re.compile(r"\[\^[^\]]+\]")
+url_pattern = re.compile(r"https?://[^\s)<>\"]+")
+
+def read(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+def sections_from_report(text: str) -> list[dict[str, object]]:
+    sections: list[dict[str, object]] = []
+    current = None
+    body: list[str] = []
+    def section_stats(lines: list[str]) -> tuple[int, int]:
+        content_lines = [
+            line for line in lines
+            if not re.match(r"^\[\^[^\]]+\]:", line.strip())
+        ]
+        joined = "\n".join(content_lines)
+        return (
+            len(footnote_pattern.findall(joined)),
+            len(re.findall(r"\b\w+\b", joined)),
+        )
+
+    for line in text.splitlines():
+        match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if match:
+            if current is not None:
+                citations, words = section_stats(body)
+                sections.append({
+                    "level": current[0],
+                    "title": current[1],
+                    "citations": citations,
+                    "words": words,
+                })
+            current = (len(match.group(1)), match.group(2))
+            body = []
+        elif current is not None:
+            body.append(line)
+    if current is not None:
+        citations, words = section_stats(body)
+        sections.append({
+            "level": current[0],
+            "title": current[1],
+            "citations": citations,
+            "words": words,
+        })
+    return sections
+
+def unique_urls(text: str) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in url_pattern.findall(text):
+        url = raw.rstrip(".,;:")
+        if url not in seen:
+            seen.add(url)
+            result.append(url)
+    return result
+
+def count_open_questions(text: str) -> int:
+    count = 0
+    in_header = False
+    if text.startswith("---\n"):
+        in_header = True
+    for line in text.splitlines():
+        if in_header:
+            if line == "---":
+                in_header = False
+            continue
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or stripped == "---":
+            continue
+        if stripped.startswith(("- [ ]", "- [x]", "- [X]")):
+            if stripped.startswith("- [ ]"):
+                count += 1
+            continue
+        if stripped.startswith("-"):
+            count += 1
+    return count
+
+def recent_iterations(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    rows = list(csv.DictReader(path.open(newline="", encoding="utf-8"), delimiter="\t"))
+    out: list[dict[str, object]] = []
+    for row in rows[-10:]:
+        item = {
+            "iteration": row.get("iteration", ""),
+            "agent": row.get("agent", ""),
+            "timestamp": row.get("timestamp", ""),
+            "status": row.get("status", ""),
+            "description": row.get("description", ""),
+        }
+        if "sources_added" in row:
+            item["sources_added"] = row.get("sources_added", "")
+        if "section" in row:
+            item["section"] = row.get("section", "")
+        out.append(item)
+    return out
+
+report_text = read(report)
+source_text = read(sources)
+open_question_text = read(open_questions)
+sections = sections_from_report(report_text)
+urls = unique_urls(source_text)
+iterations = recent_iterations(results)
+payload = {
+    "repo": str(repo),
+    "report_exists": report.exists(),
+    "source_count": len(urls),
+    "open_questions": count_open_questions(open_question_text),
+    "sections": sections,
+    "recent_iterations": iterations,
+}
+
+if emit_json:
+    print(json.dumps(payload, sort_keys=True))
+else:
+    print(f"repo: {payload['repo']}")
+    print(f"report_exists: {str(payload['report_exists']).lower()}")
+    print(f"source_count: {payload['source_count']}")
+    print(f"open_questions: {payload['open_questions']}")
+    print("")
+    print("sections:")
+    for section in sections:
+        indent = "  " * max(int(section["level"]) - 1, 0)
+        print(f"  {indent}{section['title']}\tcitations={section['citations']}\twords={section['words']}")
+    print("")
+    print("recent_iterations:")
+    for row in iterations:
+        details = [f"iter={row['iteration']}", f"agent={row['agent']}", f"status={row['status']}"]
+        if "sources_added" in row:
+            details.append(f"sources_added={row['sources_added']}")
+        if "section" in row:
+            details.append(f"section={row['section']}")
+        if row.get("description"):
+            details.append(f"description={row['description']}")
+        print("  " + "\t".join(details))
+PY
 }
 
 cmd_diff() {
@@ -283,30 +1549,1609 @@ cmd_diff() {
     git -C "$repo" diff --stat 2>/dev/null || echo "(clean)"
 }
 
+patch_artifact_dir() {
+    local artifact="$1"
+    if [[ "$artifact" == /* && -d "$artifact" ]]; then
+        printf '%s\n' "$artifact"
+    elif [[ -d "$artifact" ]]; then
+        (cd "$artifact" && pwd)
+    elif [[ -d "$MILL_DIR/logs/patches/$artifact" ]]; then
+        printf '%s/logs/patches/%s\n' "$MILL_DIR" "$artifact"
+    else
+        echo "Error: patch artifact not found: $artifact" >&2
+        return 1
+    fi
+}
+
+patch_metadata_value() {
+    local artifact="$1" key="$2"
+    awk -F= -v key="$key" '$1 == key {sub(/^[^=]*=/, ""); print; exit}' "$artifact/metadata.txt" 2>/dev/null || true
+}
+
+patch_files_for_artifact() {
+    local artifact="$1"
+    find "$artifact" -maxdepth 1 -type f -name '[0-9][0-9][0-9][0-9]-*.patch' -print 2>/dev/null | sort
+}
+
+cmd_patches() {
+    local root="$MILL_DIR/logs/patches" latest=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --latest) latest=true; shift ;;
+            *) shift ;;
+        esac
+    done
+    [[ -d "$root" ]] || { echo "No patch artifacts found."; return 0; }
+
+    if [[ "$latest" == true ]]; then
+        local latest_dir
+        latest_dir="$(find "$root" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | sort | tail -1)"
+        [[ -n "$latest_dir" ]] || { echo "No patch artifacts found."; return 0; }
+        printf '%s\n' "$latest_dir"
+        return 0
+    fi
+
+    printf "%-38s  %-12s  %-12s  %s\n" "ARTIFACT" "BRANCH" "HEAD" "PATH"
+    local artifact branch head name
+    for artifact in "$root"/*; do
+        [[ -d "$artifact" ]] || continue
+        name="$(basename "$artifact")"
+        branch="$(patch_metadata_value "$artifact" branch)"
+        head="$(patch_metadata_value "$artifact" head)"
+        printf "%-38s  %-12s  %-12s  %s\n" "$name" "${branch:-?}" "${head:-?}" "$artifact"
+    done
+}
+
+apply_patch_artifact_to_repo() {
+    local artifact="$1" repo="$2" base patch uncommitted untracked
+    base="$(patch_metadata_value "$artifact" base)"
+    if [[ -n "$base" ]]; then
+        git -C "$repo" cat-file -e "${base}^{commit}" 2>/dev/null || {
+            echo "Error: artifact base commit is not present in target repo: $base" >&2
+            return 1
+        }
+        if ! git -C "$repo" merge-base --is-ancestor "$base" HEAD 2>/dev/null; then
+            echo "Warning: artifact base $base is not an ancestor of target HEAD; applying with git am --3way." >&2
+        fi
+    fi
+
+    local patches=()
+    while IFS= read -r patch; do patches+=("$patch"); done < <(patch_files_for_artifact "$artifact")
+    uncommitted="$artifact/uncommitted.patch"
+    untracked="$artifact/untracked-files.tgz"
+
+    if [[ "${#patches[@]}" -eq 0 && ! -s "$uncommitted" && ! -s "$untracked" ]]; then
+        echo "Error: artifact has no patches or untracked file archive: $artifact" >&2
+        return 1
+    fi
+
+    if [[ "${#patches[@]}" -gt 0 ]]; then
+        if ! git -C "$repo" am --3way "${patches[@]}"; then
+            git -C "$repo" am --abort >/dev/null 2>&1 || true
+            return 1
+        fi
+    fi
+    if [[ -s "$uncommitted" ]]; then
+        git -C "$repo" apply "$uncommitted"
+    fi
+    if [[ -s "$untracked" ]]; then
+        tar -C "$repo" -xzf "$untracked"
+        echo "Restored untracked files from artifact; review and commit them if desired."
+    fi
+}
+
+cmd_apply() {
+    local artifact="" repo="" branch="" check=false allow_dirty=false
+    [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { artifact="$1"; shift; }
+    [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --repo) repo="$2"; shift 2 ;;
+            --branch) branch="$2"; shift 2 ;;
+            --check) check=true; shift ;;
+            --allow-dirty) allow_dirty=true; shift ;;
+            *) echo "Error: unknown apply option: $1" >&2; return 1 ;;
+        esac
+    done
+    [[ -n "$artifact" ]] || { echo "Error: patch artifact required" >&2; usage 1; }
+    artifact="$(patch_artifact_dir "$artifact")"
+    [[ -f "$artifact/metadata.txt" ]] || { echo "Error: missing artifact metadata: $artifact/metadata.txt" >&2; return 1; }
+
+    repo="${repo:-${REPO_PATH:-}}"
+    [[ -n "$repo" ]] || { echo "Error: repo path required (pass repo or set REPO_PATH)" >&2; return 1; }
+    [[ "$repo" == /* ]] || repo="$PWD/$repo"
+    [[ -d "$repo/.git" ]] || [[ -f "$repo/.git" ]] || { echo "Error: $repo is not a git repo" >&2; return 1; }
+
+    if [[ "$allow_dirty" != true && -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ]]; then
+        echo "Error: target repo has uncommitted changes; commit/stash them or pass --allow-dirty" >&2
+        return 1
+    fi
+
+    if [[ "$check" == true ]]; then
+        local tmp worktree
+        tmp="$(mktemp -d)"
+        worktree="$tmp/worktree"
+        git -C "$repo" worktree add --detach "$worktree" HEAD >/dev/null 2>&1
+        if apply_patch_artifact_to_repo "$artifact" "$worktree"; then
+            git -C "$repo" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+            rm -rf "$tmp"
+            echo "Patch artifact applies cleanly: $artifact"
+            return 0
+        fi
+        git -C "$repo" worktree remove --force "$worktree" >/dev/null 2>&1 || true
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    if [[ -n "$branch" ]]; then
+        if git -C "$repo" show-ref --verify --quiet "refs/heads/$branch"; then
+            echo "Error: branch already exists: $branch" >&2
+            return 1
+        fi
+        git -C "$repo" checkout -b "$branch" >/dev/null 2>&1
+    fi
+
+    apply_patch_artifact_to_repo "$artifact" "$repo"
+}
+
 cmd_history() {
-    local results_log="$MILL_DIR/logs/results.tsv" tail_n=""
+    local results_log="$MILL_DIR/logs/results.tsv" tail_n="" json=false since="" agent="" failed_only=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --tail) tail_n="$2"; shift 2 ;;
+            --json) json=true; shift ;;
+            --since) since="$2"; shift 2 ;;
+            --agent) agent="$2"; shift 2 ;;
+            --failed-only) failed_only=true; shift ;;
             *) shift ;;
         esac
     done
 
     [[ -f "$results_log" ]] || { echo "No results log found. Run some iterations first."; exit 0; }
 
-    if [[ -n "$tail_n" ]]; then
-        # Header + last N lines
-        head -1 "$results_log"
-        tail -n "$tail_n" "$results_log"
+    if [[ "$json" == true ]]; then
+        python3 - "$results_log" "$tail_n" "$since" "$agent" "$failed_only" <<'PY'
+import csv
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+tail = sys.argv[2]
+since = sys.argv[3]
+agent = sys.argv[4]
+failed_only = sys.argv[5].lower() == "true"
+rows = list(csv.DictReader(path.open(newline=""), delimiter="\t"))
+def is_failed(row):
+    status = row.get("status", "")
+    return status not in {"", "kept", "noop"}
+
+if since:
+    rows = [row for row in rows if row.get("timestamp", "") >= since]
+if agent:
+    rows = [row for row in rows if row.get("agent", "") == agent]
+if failed_only:
+    rows = [row for row in rows if is_failed(row)]
+if tail:
+    rows = rows[-int(tail):]
+for row in rows:
+    for key in ("iteration", "files_changed", "commits", "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "total_tokens"):
+        if key in row and row[key] != "":
+            try:
+                row[key] = int(row[key])
+            except ValueError:
+                pass
+    if row.get("cost_usd", "") != "":
+        try:
+            row["cost_usd"] = float(row["cost_usd"])
+        except ValueError:
+            pass
+print(json.dumps(rows, sort_keys=True))
+PY
+        return 0
+    fi
+
+    python3 - "$results_log" "$tail_n" "$since" "$agent" "$failed_only" <<'PY' | column -t -s $'\t'
+import csv
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+tail = sys.argv[2]
+since = sys.argv[3]
+agent = sys.argv[4]
+failed_only = sys.argv[5].lower() == "true"
+reader = csv.DictReader(path.open(newline=""), delimiter="\t")
+fields = reader.fieldnames or []
+rows = list(reader)
+
+def is_failed(row):
+    status = row.get("status", "")
+    return status not in {"", "kept", "noop"}
+
+if since:
+    rows = [row for row in rows if row.get("timestamp", "") >= since]
+if agent:
+    rows = [row for row in rows if row.get("agent", "") == agent]
+if failed_only:
+    rows = [row for row in rows if is_failed(row)]
+if tail:
+    rows = rows[-int(tail):]
+
+if fields:
+    print("\t".join(fields))
+for row in rows:
+    print("\t".join(row.get(field, "") for field in fields))
+PY
+}
+
+cmd_cost() {
+    local usage_log="$MILL_DIR/logs/usage.tsv" json=false by="agent"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            --by) by="$2"; shift 2 ;;
+            *) echo "Error: unknown cost option: $1" >&2; return 1 ;;
+        esac
+    done
+    case "$by" in
+        agent|day|week|iteration) ;;
+        *) echo "Error: --by must be one of: agent, day, week, iteration" >&2; return 1 ;;
+    esac
+    [[ -f "$usage_log" ]] || { echo "No usage log found. Run with AGENTMILL_CLAUDE_OUTPUT_FORMAT=json or stream-json first."; return 0; }
+
+    if [[ "$json" == true ]]; then
+        python3 - "$usage_log" "$by" json <<'PY'
+import csv
+import json
+import sys
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+
+path = Path(sys.argv[1])
+group_by = sys.argv[2]
+mode = sys.argv[3]
+
+def as_int(value):
+    try:
+        return int(float(value or 0))
+    except ValueError:
+        return 0
+
+def as_float(value):
+    try:
+        return float(value or 0)
+    except ValueError:
+        return 0.0
+
+def key_for(row):
+    timestamp = row.get("timestamp", "")
+    if group_by == "agent":
+        return row.get("agent", "")
+    if group_by == "iteration":
+        return f"{row.get('agent', '')}:{row.get('iteration', '')}"
+    if group_by == "day":
+        return timestamp[:10] or "unknown"
+    if group_by == "week":
+        try:
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            year, week, _ = parsed.isocalendar()
+            return f"{year}-W{week:02d}"
+        except ValueError:
+            return "unknown"
+    return "unknown"
+
+groups = defaultdict(lambda: {
+    "group": "",
+    "iterations": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "total_tokens": 0,
+    "cost_usd": 0.0,
+})
+
+for row in csv.DictReader(path.open(newline="", encoding="utf-8"), delimiter="\t"):
+    key = key_for(row)
+    item = groups[key]
+    item["group"] = key
+    item["iterations"] += 1
+    for field in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "total_tokens"):
+        item[field] += as_int(row.get(field))
+    item["cost_usd"] += as_float(row.get("cost_usd"))
+
+rows = []
+for item in groups.values():
+    denom = item["input_tokens"] + item["cache_creation_input_tokens"] + item["cache_read_input_tokens"]
+    item["cache_read_ratio"] = round(item["cache_read_input_tokens"] / denom, 6) if denom else 0.0
+    item["cost_usd"] = round(item["cost_usd"], 6)
+    rows.append(item)
+rows.sort(key=lambda row: row["group"])
+
+if mode == "json":
+    print(json.dumps(rows, sort_keys=True))
+else:
+    fields = ["group", "iterations", "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "total_tokens", "cost_usd", "cache_read_ratio"]
+    print("\t".join(fields))
+    for row in rows:
+        print("\t".join(str(row[field]) for field in fields))
+PY
     else
-        cat "$results_log"
-    fi | column -t -s $'\t'
+        python3 - "$usage_log" "$by" tsv <<'PY' | column -t -s $'\t'
+import csv
+import json
+import sys
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+
+path = Path(sys.argv[1])
+group_by = sys.argv[2]
+mode = sys.argv[3]
+
+def as_int(value):
+    try:
+        return int(float(value or 0))
+    except ValueError:
+        return 0
+
+def as_float(value):
+    try:
+        return float(value or 0)
+    except ValueError:
+        return 0.0
+
+def key_for(row):
+    timestamp = row.get("timestamp", "")
+    if group_by == "agent":
+        return row.get("agent", "")
+    if group_by == "iteration":
+        return f"{row.get('agent', '')}:{row.get('iteration', '')}"
+    if group_by == "day":
+        return timestamp[:10] or "unknown"
+    if group_by == "week":
+        try:
+            parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            year, week, _ = parsed.isocalendar()
+            return f"{year}-W{week:02d}"
+        except ValueError:
+            return "unknown"
+    return "unknown"
+
+groups = defaultdict(lambda: {
+    "group": "",
+    "iterations": 0,
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0,
+    "total_tokens": 0,
+    "cost_usd": 0.0,
+})
+
+for row in csv.DictReader(path.open(newline="", encoding="utf-8"), delimiter="\t"):
+    key = key_for(row)
+    item = groups[key]
+    item["group"] = key
+    item["iterations"] += 1
+    for field in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "total_tokens"):
+        item[field] += as_int(row.get(field))
+    item["cost_usd"] += as_float(row.get("cost_usd"))
+
+rows = []
+for item in groups.values():
+    denom = item["input_tokens"] + item["cache_creation_input_tokens"] + item["cache_read_input_tokens"]
+    item["cache_read_ratio"] = round(item["cache_read_input_tokens"] / denom, 6) if denom else 0.0
+    item["cost_usd"] = round(item["cost_usd"], 6)
+    rows.append(item)
+rows.sort(key=lambda row: row["group"])
+
+fields = ["group", "iterations", "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "total_tokens", "cost_usd", "cache_read_ratio"]
+print("\t".join(fields))
+for row in rows:
+    print("\t".join(str(row[field]) for field in fields))
+PY
+    fi
+}
+
+cmd_events() {
+    local events_log="$MILL_DIR/logs/events.jsonl" tail_n="" follow=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --tail) tail_n="$2"; shift 2 ;;
+            -f|--follow) follow=true; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    [[ -f "$events_log" ]] || { echo "No events log found. Run some iterations first."; exit 0; }
+
+    if [[ "$follow" == true && -n "$tail_n" ]]; then
+        tail -n "$tail_n" -f "$events_log"
+    elif [[ "$follow" == true ]]; then
+        tail -f "$events_log"
+    elif [[ -n "$tail_n" ]]; then
+        tail -n "$tail_n" "$events_log"
+    else
+        cat "$events_log"
+    fi
+}
+
+cmd_metrics() {
+    local log_dir="$MILL_DIR/logs" output="$MILL_DIR/logs/metrics.prom"
+    mkdir -p "$log_dir"
+    python3 - "$log_dir" "$output" <<'PY'
+import csv
+import glob
+import json
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+log_dir = Path(sys.argv[1])
+output = Path(sys.argv[2])
+
+def q(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+def as_int(value):
+    try:
+        return int(float(value or 0))
+    except ValueError:
+        return 0
+
+def as_float(value):
+    try:
+        return float(value or 0)
+    except ValueError:
+        return 0.0
+
+lines = [
+    "# HELP agentmill_results_iterations_total Iteration result rows by agent and status.",
+    "# TYPE agentmill_results_iterations_total counter",
+]
+
+result_counts = defaultdict(int)
+results_log = log_dir / "results.tsv"
+if results_log.exists():
+    for row in csv.DictReader(results_log.open(newline="", encoding="utf-8"), delimiter="\t"):
+        result_counts[(row.get("agent", ""), row.get("status", ""))] += 1
+for (agent, status), count in sorted(result_counts.items()):
+    lines.append(f'agentmill_results_iterations_total{{agent="{q(agent)}",status="{q(status)}"}} {count}')
+
+lines.extend([
+    "# HELP agentmill_usage_total_tokens Total parsed token usage by agent.",
+    "# TYPE agentmill_usage_total_tokens counter",
+    "# HELP agentmill_usage_cost_usd Total estimated parsed cost by agent.",
+    "# TYPE agentmill_usage_cost_usd counter",
+    "# HELP agentmill_cache_read_ratio Cache-read token ratio by agent.",
+    "# TYPE agentmill_cache_read_ratio gauge",
+])
+usage = defaultdict(lambda: {"total": 0, "cost": 0.0, "input": 0, "cache_creation": 0, "cache_read": 0})
+usage_log = log_dir / "usage.tsv"
+if usage_log.exists():
+    for row in csv.DictReader(usage_log.open(newline="", encoding="utf-8"), delimiter="\t"):
+        agent = row.get("agent", "")
+        usage[agent]["total"] += as_int(row.get("total_tokens"))
+        usage[agent]["cost"] += as_float(row.get("cost_usd"))
+        usage[agent]["input"] += as_int(row.get("input_tokens"))
+        usage[agent]["cache_creation"] += as_int(row.get("cache_creation_input_tokens"))
+        usage[agent]["cache_read"] += as_int(row.get("cache_read_input_tokens"))
+for agent, item in sorted(usage.items()):
+    denom = item["input"] + item["cache_creation"] + item["cache_read"]
+    ratio = item["cache_read"] / denom if denom else 0.0
+    lines.append(f'agentmill_usage_total_tokens{{agent="{q(agent)}"}} {item["total"]}')
+    lines.append(f'agentmill_usage_cost_usd{{agent="{q(agent)}"}} {item["cost"]:.6f}')
+    lines.append(f'agentmill_cache_read_ratio{{agent="{q(agent)}"}} {ratio:.6f}')
+
+lines.extend([
+    "# HELP agentmill_status_iteration Last reported iteration by agent and state.",
+    "# TYPE agentmill_status_iteration gauge",
+])
+for status_path in sorted(glob.glob(str(log_dir / "status-*.json"))):
+    try:
+        data = json.loads(Path(status_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        continue
+    agent = str(data.get("agent", Path(status_path).stem.removeprefix("status-")))
+    state = str(data.get("state", "unknown"))
+    iteration = as_int(data.get("iteration"))
+    lines.append(f'agentmill_status_iteration{{agent="{q(agent)}",state="{q(state)}"}} {iteration}')
+
+output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+print(output)
+PY
+}
+
+cmd_tail() {
+    local agent_id="" json=false session=false tail_n="20" follow=true
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            --session) session=true; shift ;;
+            --tail|--lines) tail_n="$2"; shift 2 ;;
+            -f|--follow) follow=true; shift ;;
+            --no-follow) follow=false; shift ;;
+            --agent) agent_id="$2"; shift 2 ;;
+            *)
+                if [[ "${1:0:1}" == "-" ]]; then
+                    echo "Error: unknown tail option: $1" >&2
+                    return 1
+                fi
+                agent_id="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [[ "$json" == true ]]; then
+        local events_log="$MILL_DIR/logs/events.jsonl"
+        if [[ "$follow" != true && ! -f "$events_log" ]]; then
+            echo "No events log found. Run some iterations first."
+            return 0
+        fi
+        python3 - "$events_log" "$tail_n" "$follow" "$agent_id" <<'PY'
+import json
+import sys
+import time
+from pathlib import Path
+
+path = Path(sys.argv[1])
+tail_n = int(sys.argv[2] or "20")
+follow = sys.argv[3].lower() == "true"
+agent = sys.argv[4]
+
+def emit(line: str) -> None:
+    if not line:
+        return
+    if agent:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if str(event.get("agent_id", "")) != agent:
+            return
+    print(line, flush=True)
+
+position = 0
+if path.exists():
+    lines = path.read_text(encoding="utf-8").splitlines()
+    for line in lines[-tail_n:]:
+        emit(line)
+    position = path.stat().st_size
+
+if not follow:
+    raise SystemExit(0)
+
+while True:
+    if path.exists():
+        size = path.stat().st_size
+        if size < position:
+            position = 0
+        with path.open("r", encoding="utf-8") as handle:
+            handle.seek(position)
+            while True:
+                line = handle.readline()
+                if not line:
+                    break
+                position = handle.tell()
+                emit(line.rstrip("\n"))
+    time.sleep(0.25)
+PY
+        return 0
+    fi
+
+    agent_id="${agent_id:-1}"
+    if [[ "$session" == true ]]; then
+        cmd_logs --session "$agent_id"
+    else
+        cmd_logs "$agent_id"
+    fi
+}
+
+mcp_latest_manifest() {
+    python3 - "$MILL_DIR/logs" <<'PY'
+import sys
+from pathlib import Path
+
+log_dir = Path(sys.argv[1])
+files = []
+if log_dir.is_dir():
+    files = sorted(
+        log_dir.glob("mcp-manifest-*.json"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+print(files[0] if files else "")
+PY
+}
+
+cmd_mcp() {
+    local sub="${1:-list}" manifest="" json=false name="" require_reachable=false
+    [[ $# -gt 0 ]] && shift
+    case "$sub" in
+        list)
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --json) json=true; shift ;;
+                    --manifest) manifest="$2"; shift 2 ;;
+                    *) echo "Error: unknown mcp list option: $1" >&2; return 1 ;;
+                esac
+            done
+            ;;
+        test)
+            [[ $# -gt 0 && "${1:0:1}" != "-" ]] || { echo "Error: mcp test requires a server name" >&2; return 1; }
+            name="$1"; shift
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --manifest) manifest="$2"; shift 2 ;;
+                    --require-reachable|--reachable) require_reachable=true; shift ;;
+                    *) echo "Error: unknown mcp test option: $1" >&2; return 1 ;;
+                esac
+            done
+            ;;
+        -h|--help|help)
+            usage 0
+            ;;
+        *)
+            echo "Error: unknown mcp subcommand: $sub" >&2
+            return 1
+            ;;
+    esac
+
+    manifest="${manifest:-$(mcp_latest_manifest)}"
+    [[ -n "$manifest" && -f "$manifest" ]] || { echo "No MCP manifest found. Run an agent once or pass --manifest."; return 1; }
+
+    python3 - "$sub" "$manifest" "$json" "$name" "$require_reachable" <<'PY'
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+sub, manifest_path, json_output, name, require_reachable = sys.argv[1:6]
+manifest = json.loads(Path(manifest_path).read_text())
+servers = manifest.get("servers", [])
+
+def reachability(server: dict) -> tuple[bool, str]:
+    transport = str(server.get("transport", "unknown"))
+    if transport == "stdio":
+        command = str(server.get("command", "")).strip()
+        if not command:
+            return False, "stdio command metadata is missing"
+        if command.startswith("/"):
+            return (os.access(command, os.X_OK), f"stdio command: {command}")
+        return (shutil.which(command) is not None, f"stdio command: {command}")
+    if transport in {"remote", "http", "sse", "streamable-http"} or server.get("url_host"):
+        scheme = str(server.get("url_scheme", "")).strip()
+        host = str(server.get("url_host", "")).strip()
+        if scheme and host:
+            return True, f"remote endpoint: {scheme}://{host}"
+        return False, "remote endpoint metadata is incomplete"
+    return False, f"unsupported transport metadata: {transport}"
+
+if sub == "list":
+    if json_output == "true":
+        print(json.dumps(manifest, sort_keys=True))
+    else:
+        print(f"manifest: {manifest_path}")
+        print(f"run_id: {manifest.get('run_id', '')}")
+        print(f"profile: {manifest.get('profile', '')}")
+        print(f"mcp_allowlist: {','.join(manifest.get('mcp_allowlist', []))}")
+        if not servers:
+            print("servers: none")
+        else:
+            for server in servers:
+                print(f"{server.get('name', '')}\t{server.get('source', '')}\t{server.get('config_hash', '')}")
+    raise SystemExit(0)
+
+matches = [server for server in servers if server.get("name") == name]
+if not matches:
+    print(f"MCP server not found in manifest: {name}", file=sys.stderr)
+    raise SystemExit(1)
+
+allowlist = manifest.get("mcp_allowlist", [])
+allowed = not allowlist or name in allowlist
+if not allowed:
+    print(f"MCP server present but not in manifest allowlist: {name}", file=sys.stderr)
+    raise SystemExit(1)
+
+if require_reachable == "true":
+    results = [reachability(server) for server in matches]
+    if not any(ok for ok, _detail in results):
+        print(f"MCP server present but not reachable from manifest metadata: {name}", file=sys.stderr)
+        for _ok, detail in results:
+            print(f"- {detail}", file=sys.stderr)
+        raise SystemExit(1)
+    detail = next(detail for ok, detail in results if ok)
+    print(f"OK {name}: {len(matches)} manifest entr{'y' if len(matches) == 1 else 'ies'}; {detail}")
+else:
+    print(f"OK {name}: {len(matches)} manifest entr{'y' if len(matches) == 1 else 'ies'}")
+PY
+}
+
+cmd_version() {
+    local json=false claude_code_version_arg="" docker_image="unknown" docker_version="missing" host_claude="missing"
+    local model_default="${MODEL:-sonnet}" host_os host_arch git_head="unknown" git_dirty="unknown" docker_image_tag="agentmill:latest" mill_version="dev"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --json) json=true; shift ;;
+            *) echo "Error: unknown version option: $1" >&2; return 1 ;;
+        esac
+    done
+
+    claude_code_version_arg="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' "$MILL_DIR/Dockerfile" 2>/dev/null | head -1)"
+    git_head="$(git -C "$MILL_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+    if git -C "$MILL_DIR" diff --quiet >/dev/null 2>&1 && git -C "$MILL_DIR" diff --cached --quiet >/dev/null 2>&1; then
+        git_dirty=false
+    else
+        git_dirty=true
+    fi
+    host_os="$(uname -s 2>/dev/null || echo unknown)"
+    host_arch="$(uname -m 2>/dev/null || echo unknown)"
+    if command -v docker >/dev/null 2>&1; then
+        docker_version="$(docker --version 2>/dev/null | head -1 || echo unavailable)"
+        docker_image="$(docker image inspect agentmill --format '{{.Id}}' 2>/dev/null || echo missing)"
+    fi
+    if command -v claude >/dev/null 2>&1; then
+        host_claude="$(claude --version 2>/dev/null | head -1 || echo unavailable)"
+    fi
+
+    if [[ "$json" == true ]]; then
+        python3 - "$mill_version" "$MILL_DIR" "$git_head" "$git_dirty" "$claude_code_version_arg" "$model_default" "$docker_version" "$docker_image_tag" "$docker_image" "$host_claude" "$host_os" "$host_arch" <<'PY'
+import json
+import sys
+
+keys = [
+    "mill_version",
+    "mill_dir",
+    "git_head",
+    "git_dirty",
+    "claude_code_version_arg",
+    "model_default",
+    "docker_version",
+    "docker_image_tag",
+    "docker_image",
+    "host_claude",
+    "host_os",
+    "host_arch",
+]
+print(json.dumps(dict(zip(keys, sys.argv[1:])), sort_keys=True))
+PY
+        return 0
+    fi
+
+    printf 'mill_version=%s\n' "$mill_version"
+    printf 'mill_dir=%s\n' "$MILL_DIR"
+    printf 'git_head=%s\n' "$git_head"
+    printf 'git_dirty=%s\n' "$git_dirty"
+    printf 'claude_code_version_arg=%s\n' "${claude_code_version_arg:-unknown}"
+    printf 'model_default=%s\n' "$model_default"
+    printf 'docker_version=%s\n' "$docker_version"
+    printf 'docker_image_tag=%s\n' "$docker_image_tag"
+    printf 'docker_image=%s\n' "$docker_image"
+    printf 'host_claude=%s\n' "$host_claude"
+    printf 'host_os=%s\n' "$host_os"
+    printf 'host_arch=%s\n' "$host_arch"
+}
+
+DOCTOR_ERRORS=0
+DOCTOR_WARNINGS=0
+
+doctor_report() {
+    local status="$1" topic="$2" detail="$3"
+    printf '[%s] %s: %s\n' "$status" "$topic" "$detail"
+    case "$status" in
+        ERROR) DOCTOR_ERRORS=$((DOCTOR_ERRORS + 1)) ;;
+        WARN)  DOCTOR_WARNINGS=$((DOCTOR_WARNINGS + 1)) ;;
+    esac
+}
+
+doctor_ok()    { doctor_report OK "$1" "$2"; }
+doctor_warn()  { doctor_report WARN "$1" "$2"; }
+doctor_error() { doctor_report ERROR "$1" "$2"; }
+
+doctor_truthy() {
+    case "${1:-}" in
+        true|TRUE|True|1|yes|YES|Yes|on|ON|On) return 0 ;;
+    esac
+    return 1
+}
+
+doctor_list_has_entries() {
+    local raw="${1:-}" item
+    local -a items
+    IFS=',' read -r -a items <<< "$raw"
+    for item in "${items[@]}"; do
+        [[ -n "${item//[[:space:]]/}" ]] && return 0
+    done
+    return 1
+}
+
+doctor_nonnegative_int() {
+    [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+doctor_signed_int() {
+    [[ "${1:-}" =~ ^-?[0-9]+$ ]]
+}
+
+doctor_version_lt() {
+    python3 - "$1" "$2" <<'PY'
+import sys
+
+def parse(value):
+    parts = []
+    for part in value.split("."):
+        try:
+            parts.append(int(part))
+        except ValueError:
+            parts.append(0)
+    return tuple((parts + [0, 0, 0])[:3])
+
+raise SystemExit(0 if parse(sys.argv[1]) < parse(sys.argv[2]) else 1)
+PY
+}
+
+doctor_model_floor_check() {
+    local model="${MODEL:-sonnet}" resolved_model="" cli_version floor=""
+    local lower
+    resolved_model="$model"
+    lower="$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')"
+    case "$lower" in
+        opus|opus-latest|opus-4.7|opus-4-7|opus-47|opus47|4.7|4-7|claude-opus-4-7*)
+            resolved_model="claude-opus-4-7"
+            floor="2.1.111"
+            ;;
+        sonnet|sonnet-latest|sonnet-4.6|sonnet-4-6|sonnet-46|sonnet46|4.6|4-6|claude-sonnet-4-6*)
+            resolved_model="claude-sonnet-4-6"
+            ;;
+        haiku|haiku-latest|haiku-4.5|haiku-4-5|haiku-45|haiku45|4.5|4-5|claude-haiku-4-5*)
+            resolved_model="claude-haiku-4-5-20251001"
+            ;;
+    esac
+
+    cli_version="$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' "$MILL_DIR/Dockerfile" 2>/dev/null | head -1)"
+    if [[ -z "$cli_version" ]]; then
+        doctor_warn model "could not read CLAUDE_CODE_VERSION from Dockerfile"
+        return 0
+    fi
+
+    if [[ -n "$floor" ]] && doctor_version_lt "$cli_version" "$floor"; then
+        doctor_warn model "MODEL=$model resolves to $resolved_model but Dockerfile CLAUDE_CODE_VERSION=$cli_version is older than floor $floor"
+    else
+        doctor_ok model "MODEL=$model resolves to $resolved_model; Dockerfile CLAUDE_CODE_VERSION=$cli_version"
+    fi
+}
+
+doctor_host_prompt_path() {
+    local prompt="${1:-/prompts/PROMPT.md}"
+    case "$prompt" in
+        /prompts/*) printf '%s/prompts/%s\n' "$MILL_DIR" "${prompt#/prompts/}" ;;
+        /*)         printf '%s\n' "$prompt" ;;
+        *)          printf '%s/%s\n' "$MILL_DIR" "$prompt" ;;
+    esac
+}
+
+doctor_validate_env_schema() {
+    local env_file="$MILL_DIR/.env" example_file="$MILL_DIR/.env.example" key line
+    local -a unknown_keys=()
+    local -A known_keys=()
+
+    if [[ -f "$example_file" ]]; then
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^[[:space:]#]*([A-Za-z_][A-Za-z0-9_]*)= ]] || continue
+            known_keys["${BASH_REMATCH[1]}"]=1
+        done < "$example_file"
+    fi
+    for key in \
+        COMPOSE_PROJECT_NAME DOCKER_DEFAULT_PLATFORM HTTP_PROXY HTTPS_PROXY NO_PROXY NODE_EXTRA_CA_CERTS \
+        AGENTMILL_ROLE_1 AGENTMILL_ROLE_2 AGENTMILL_ROLE_3 \
+        AGENTMILL_CLIENT_1 AGENTMILL_CLIENT_2 AGENTMILL_CLIENT_3 \
+        AGENTMILL_PROVIDER_1 AGENTMILL_PROVIDER_2 AGENTMILL_PROVIDER_3 \
+        AGENTMILL_CLIENT_TRANSPORT_1 AGENTMILL_CLIENT_TRANSPORT_2 AGENTMILL_CLIENT_TRANSPORT_3 \
+        AGENTMILL_ACP_PROMPT_1 AGENTMILL_ACP_PROMPT_2 AGENTMILL_ACP_PROMPT_3 \
+        AGENTMILL_PROFILE_LEVEL_1 AGENTMILL_PROFILE_LEVEL_2 AGENTMILL_PROFILE_LEVEL_3 \
+        AGENTMILL_FORWARD_HOST_MCP_1 AGENTMILL_FORWARD_HOST_MCP_2 AGENTMILL_FORWARD_HOST_MCP_3 \
+        AGENTMILL_FORWARD_HOST_TOOLS_1 AGENTMILL_FORWARD_HOST_TOOLS_2 AGENTMILL_FORWARD_HOST_TOOLS_3 \
+        AGENTMILL_FORWARD_HOST_HOOKS_1 AGENTMILL_FORWARD_HOST_HOOKS_2 AGENTMILL_FORWARD_HOST_HOOKS_3 \
+        AGENTMILL_FORWARD_HOST_ENV_1 AGENTMILL_FORWARD_HOST_ENV_2 AGENTMILL_FORWARD_HOST_ENV_3 \
+        AGENTMILL_FORWARD_HOST_EXTENSIONS_1 AGENTMILL_FORWARD_HOST_EXTENSIONS_2 AGENTMILL_FORWARD_HOST_EXTENSIONS_3 \
+        AGENTMILL_COMPLETION_GATE_1 AGENTMILL_COMPLETION_GATE_2 AGENTMILL_COMPLETION_GATE_3 \
+        AGENTMILL_VERIFIER_COMMAND_1 AGENTMILL_VERIFIER_COMMAND_2 AGENTMILL_VERIFIER_COMMAND_3 \
+        AGENTMILL_CODER_OPEN_QUESTIONS_MAX_1 AGENTMILL_CODER_OPEN_QUESTIONS_MAX_2 AGENTMILL_CODER_OPEN_QUESTIONS_MAX_3 \
+        AGENTMILL_REFACTOR_LOC_TARGET_1 AGENTMILL_REFACTOR_LOC_TARGET_2 AGENTMILL_REFACTOR_LOC_TARGET_3 \
+        AGENTMILL_REFACTOR_LOC_TOLERANCE_1 AGENTMILL_REFACTOR_LOC_TOLERANCE_2 AGENTMILL_REFACTOR_LOC_TOLERANCE_3 \
+        AGENTMILL_REFACTOR_MAX_LOC_DELTA_1 AGENTMILL_REFACTOR_MAX_LOC_DELTA_2 AGENTMILL_REFACTOR_MAX_LOC_DELTA_3 \
+        AGENTMILL_RESEARCH_SATURATION_ITERATIONS_1 AGENTMILL_RESEARCH_SATURATION_ITERATIONS_2 AGENTMILL_RESEARCH_SATURATION_ITERATIONS_3 \
+        AGENTMILL_RESEARCH_OPEN_QUESTIONS_MAX_1 AGENTMILL_RESEARCH_OPEN_QUESTIONS_MAX_2 AGENTMILL_RESEARCH_OPEN_QUESTIONS_MAX_3 \
+        AGENTMILL_NETWORK_1 AGENTMILL_NETWORK_2 AGENTMILL_NETWORK_3 \
+        AGENTMILL_EGRESS_ALLOWLIST AGENTMILL_EGRESS_PROXY_PORT \
+        AGENTMILL_CLIENT_HOME_ROOT_1 AGENTMILL_CLIENT_HOME_ROOT_2 AGENTMILL_CLIENT_HOME_ROOT_3 \
+        AGENTMILL_CLIENT_HOME_1 AGENTMILL_CLIENT_HOME_2 AGENTMILL_CLIENT_HOME_3 \
+        AGENTMILL_OPENCODE_COMMAND_1 AGENTMILL_OPENCODE_COMMAND_2 AGENTMILL_OPENCODE_COMMAND_3 \
+        AGENTMILL_OPENCODE_REQUIRE_AUTH_1 AGENTMILL_OPENCODE_REQUIRE_AUTH_2 AGENTMILL_OPENCODE_REQUIRE_AUTH_3 \
+        AGENTMILL_CODEX_COMMAND_1 AGENTMILL_CODEX_COMMAND_2 AGENTMILL_CODEX_COMMAND_3 \
+        AGENTMILL_CODEX_REQUIRE_AUTH_1 AGENTMILL_CODEX_REQUIRE_AUTH_2 AGENTMILL_CODEX_REQUIRE_AUTH_3 \
+        AGENTMILL_CODEX_DEFAULT_MODEL_1 AGENTMILL_CODEX_DEFAULT_MODEL_2 AGENTMILL_CODEX_DEFAULT_MODEL_3 \
+        AGENTMILL_CODEX_SANDBOX_1 AGENTMILL_CODEX_SANDBOX_2 AGENTMILL_CODEX_SANDBOX_3 \
+        AGENTMILL_CODEX_APPROVAL_POLICY_1 AGENTMILL_CODEX_APPROVAL_POLICY_2 AGENTMILL_CODEX_APPROVAL_POLICY_3 \
+        AGENTMILL_QWEN_COMMAND_1 AGENTMILL_QWEN_COMMAND_2 AGENTMILL_QWEN_COMMAND_3 \
+        AGENTMILL_QWEN_REQUIRE_AUTH_1 AGENTMILL_QWEN_REQUIRE_AUTH_2 AGENTMILL_QWEN_REQUIRE_AUTH_3 \
+        AGENTMILL_QWEN_OUTPUT_FORMAT_1 AGENTMILL_QWEN_OUTPUT_FORMAT_2 AGENTMILL_QWEN_OUTPUT_FORMAT_3 \
+        AGENTMILL_QWEN_INCLUDE_PARTIAL_MESSAGES_1 AGENTMILL_QWEN_INCLUDE_PARTIAL_MESSAGES_2 AGENTMILL_QWEN_INCLUDE_PARTIAL_MESSAGES_3 \
+        AGENTMILL_QWEN_DEFAULT_MODEL_1 AGENTMILL_QWEN_DEFAULT_MODEL_2 AGENTMILL_QWEN_DEFAULT_MODEL_3 \
+        AGENTMILL_QWEN_SANDBOX_1 AGENTMILL_QWEN_SANDBOX_2 AGENTMILL_QWEN_SANDBOX_3 \
+        AGENTMILL_GEMINI_COMMAND_1 AGENTMILL_GEMINI_COMMAND_2 AGENTMILL_GEMINI_COMMAND_3 \
+        AGENTMILL_GEMINI_REQUIRE_AUTH_1 AGENTMILL_GEMINI_REQUIRE_AUTH_2 AGENTMILL_GEMINI_REQUIRE_AUTH_3 \
+        AGENTMILL_GEMINI_OUTPUT_FORMAT_1 AGENTMILL_GEMINI_OUTPUT_FORMAT_2 AGENTMILL_GEMINI_OUTPUT_FORMAT_3 \
+        AGENTMILL_GEMINI_DEFAULT_MODEL_1 AGENTMILL_GEMINI_DEFAULT_MODEL_2 AGENTMILL_GEMINI_DEFAULT_MODEL_3 \
+        AGENTMILL_GEMINI_SANDBOX_1 AGENTMILL_GEMINI_SANDBOX_2 AGENTMILL_GEMINI_SANDBOX_3 \
+        AGENTMILL_GIT_REMOTE_ALLOWLIST_1 AGENTMILL_GIT_REMOTE_ALLOWLIST_2 AGENTMILL_GIT_REMOTE_ALLOWLIST_3 \
+        AGENTMILL_ALLOW_GIT_NETWORK_1 AGENTMILL_ALLOW_GIT_NETWORK_2 AGENTMILL_ALLOW_GIT_NETWORK_3 \
+        AGENTMILL_ALLOW_MERGE_COMMITS_1 AGENTMILL_ALLOW_MERGE_COMMITS_2 AGENTMILL_ALLOW_MERGE_COMMITS_3 \
+        AGENTMILL_WRITE_ROOTS_1 AGENTMILL_WRITE_ROOTS_2 AGENTMILL_WRITE_ROOTS_3 \
+        AGENTMILL_WRITE_ROOT_SANDBOX AGENTMILL_BWRAP_COMMAND AGENTMILL_PRETOOL_POLICY_COMMAND \
+        AGENTMILL_SHELL_ALLOWLIST_1 AGENTMILL_SHELL_ALLOWLIST_2 AGENTMILL_SHELL_ALLOWLIST_3 \
+        AGENTMILL_SHELL_DENYLIST_1 AGENTMILL_SHELL_DENYLIST_2 AGENTMILL_SHELL_DENYLIST_3 \
+        AGENTMILL_MCP_ALLOWLIST_1 AGENTMILL_MCP_ALLOWLIST_2 AGENTMILL_MCP_ALLOWLIST_3 \
+        AGENTMILL_MCP_MANIFEST_LOCK_1 AGENTMILL_MCP_MANIFEST_LOCK_2 AGENTMILL_MCP_MANIFEST_LOCK_3 \
+        AGENTMILL_MCP_TOOL_SNAPSHOT AGENTMILL_MCP_TOOL_SNAPSHOT_TIMEOUT_SECONDS \
+        AGENTMILL_SKILL_ALLOWLIST_1 AGENTMILL_SKILL_ALLOWLIST_2 AGENTMILL_SKILL_ALLOWLIST_3 \
+        MODEL_1 MODEL_2 MODEL_3 AGENT_BRANCH_1 AGENT_BRANCH_2 AGENT_BRANCH_3 \
+        MAX_ITERATIONS_1 MAX_ITERATIONS_2 MAX_ITERATIONS_3 \
+        LOOP_DELAY_1 LOOP_DELAY_2 LOOP_DELAY_3 \
+        MAX_WALL_SECONDS_1 MAX_WALL_SECONDS_2 MAX_WALL_SECONDS_3 \
+        MAX_LOG_BYTES_1 MAX_LOG_BYTES_2 MAX_LOG_BYTES_3 \
+        MAX_TOTAL_TOKENS_1 MAX_TOTAL_TOKENS_2 MAX_TOTAL_TOKENS_3 \
+        MAX_TOTAL_USD_1 MAX_TOTAL_USD_2 MAX_TOTAL_USD_3 \
+        AGENTMILL_COST_INPUT_PER_MTOKENS_1 AGENTMILL_COST_INPUT_PER_MTOKENS_2 AGENTMILL_COST_INPUT_PER_MTOKENS_3 \
+        AGENTMILL_COST_OUTPUT_PER_MTOKENS_1 AGENTMILL_COST_OUTPUT_PER_MTOKENS_2 AGENTMILL_COST_OUTPUT_PER_MTOKENS_3 \
+        AGENTMILL_COST_CACHE_CREATION_PER_MTOKENS_1 AGENTMILL_COST_CACHE_CREATION_PER_MTOKENS_2 AGENTMILL_COST_CACHE_CREATION_PER_MTOKENS_3 \
+        AGENTMILL_COST_CACHE_READ_PER_MTOKENS_1 AGENTMILL_COST_CACHE_READ_PER_MTOKENS_2 AGENTMILL_COST_CACHE_READ_PER_MTOKENS_3 \
+        AGENTMILL_DOCTOR_SKIP_DOCKER AGENTMILL_DOCTOR_REQUIRE_MCP_REACHABLE \
+        AUTO_COMMIT_1 AUTO_COMMIT_2 AUTO_COMMIT_3; do
+        known_keys["$key"]=1
+    done
+
+    if [[ -f "$env_file" ]]; then
+        doctor_ok env ".env exists"
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            line="${line%%#*}"
+            [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)= ]] || continue
+            key="${BASH_REMATCH[1]}"
+            [[ -n "${known_keys[$key]:-}" ]] || unknown_keys+=("$key")
+        done < "$env_file"
+        if [[ "${#unknown_keys[@]}" -gt 0 ]]; then
+            doctor_warn env "unknown .env keys: ${unknown_keys[*]}"
+        else
+            doctor_ok env ".env keys match known schema"
+        fi
+    else
+        doctor_warn env ".env not found; set required env vars another way or run 'mill doctor --fix'"
+    fi
+
+    if [[ -z "${REPO_PATH:-}" ]]; then
+        doctor_warn env "REPO_PATH is not set in the effective environment; pass a repo path or set REPO_PATH"
+    fi
+    if [[ -n "${ANTHROPIC_API_KEY:-}" && -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+        doctor_warn env "both ANTHROPIC_API_KEY and CLAUDE_CODE_OAUTH_TOKEN are set; ANTHROPIC_API_KEY takes precedence"
+    fi
+}
+
+doctor_validate_profiles() {
+    local profiles_dir="$MILL_DIR/agents" renderer="$MILL_DIR/scripts/profile-env.py"
+    local file role output rc count=0 invalid=0
+    if [[ ! -d "$profiles_dir" ]]; then
+        doctor_warn profile "agents directory missing; built-in role validation skipped"
+        return 0
+    fi
+    if [[ ! -f "$renderer" ]]; then
+        doctor_warn profile "profile renderer missing; built-in role validation skipped"
+        return 0
+    fi
+    for file in "$profiles_dir"/*.toml; do
+        [[ -f "$file" ]] || continue
+        count=$((count + 1))
+        role="$(basename "$file" .toml)"
+        set +e
+        output="$(python3 "$renderer" "$file" --role "$role" --agent-id 1 2>&1 >/dev/null)"
+        rc=$?
+        set -e
+        if [[ "$rc" -ne 0 ]]; then
+            invalid=$((invalid + 1))
+            output="${output//$'\n'/ }"
+            doctor_error profile "invalid $role.toml: ${output:-profile-env failed}"
+        fi
+    done
+    if [[ "$count" -eq 0 ]]; then
+        doctor_warn profile "no agents/*.toml profiles found"
+    elif [[ "$invalid" -eq 0 ]]; then
+        doctor_ok profile "validated $count role profile(s)"
+    fi
+}
+
+doctor_validate_mcp_manifest() {
+    local profile_level="$1" mcp_allowlist="$2" forward_mcp="$3" manifest require_reachable
+    manifest="$(mcp_latest_manifest)"
+    require_reachable="${AGENTMILL_DOCTOR_REQUIRE_MCP_REACHABLE:-false}"
+
+    while IFS=$'\t' read -r status topic detail; do
+        [[ -n "${status:-}" ]] || continue
+        case "$status" in
+            OK) doctor_ok "$topic" "$detail" ;;
+            WARN) doctor_warn "$topic" "$detail" ;;
+            ERROR) doctor_error "$topic" "$detail" ;;
+        esac
+    done < <(python3 - "$manifest" "$profile_level" "$mcp_allowlist" "$forward_mcp" "$require_reachable" <<'PY'
+import json
+import os
+import shutil
+import sys
+from pathlib import Path
+
+manifest_path, profile, allowlist_raw, forward_mcp, require_reachable = sys.argv[1:6]
+
+def truthy(value: str) -> bool:
+    return value.lower() in {"1", "true", "yes", "on"}
+
+def emit(status: str, detail: str) -> None:
+    print(f"{status}\tmcp\t{detail}")
+
+allowlist = [item.strip() for item in allowlist_raw.split(",") if item.strip()]
+allowset = set(allowlist)
+strict_reachable = truthy(require_reachable)
+mcp_expected = bool(allowset) or truthy(forward_mcp) or profile == "trusted"
+
+if not mcp_expected:
+    emit("OK", "no MCP manifest snapshot required without forwarded or allowlisted MCP")
+    raise SystemExit(0)
+
+if not manifest_path:
+    status = "ERROR" if strict_reachable else "WARN"
+    emit(status, "no MCP manifest snapshot found; run an agent once to verify MCP reachability")
+    raise SystemExit(0)
+
+path = Path(manifest_path)
+try:
+    manifest = json.loads(path.read_text())
+except (OSError, json.JSONDecodeError) as exc:
+    emit("ERROR", f"could not read latest MCP manifest {path}: {exc}")
+    raise SystemExit(0)
+
+servers = [server for server in manifest.get("servers", []) if isinstance(server, dict)]
+names = {str(server.get("name", "")) for server in servers if server.get("name")}
+manifest_profile = str(manifest.get("profile", ""))
+manifest_allowset = {
+    item.strip()
+    for item in manifest.get("mcp_allowlist", [])
+    if isinstance(item, str) and item.strip()
+}
+manifest_current = manifest_profile == profile and manifest_allowset == allowset
+
+if not manifest_current:
+    emit(
+        "WARN",
+        f"latest MCP manifest is for profile={manifest_profile or 'unknown'} allowlist={','.join(sorted(manifest_allowset)) or '<empty>'}; run an agent to refresh it",
+    )
+else:
+    if profile != "trusted":
+        if allowset:
+            missing = sorted(allowset - names)
+            unexpected = sorted(names - allowset)
+            if missing:
+                emit("ERROR", f"allowlisted MCP server missing from latest manifest: {','.join(missing)}")
+            else:
+                emit("OK", f"latest manifest includes allowlisted MCP server(s): {','.join(allowlist)}")
+            if unexpected:
+                emit("ERROR", f"latest manifest includes MCP server(s) outside allowlist: {','.join(unexpected)}")
+        elif names:
+            emit("ERROR", f"latest manifest includes MCP server(s) but current profile has no allowlist: {','.join(sorted(names))}")
+        else:
+            emit("OK", "latest manifest has no MCP servers for current profile")
+    elif names:
+        emit("OK", f"latest manifest includes {len(names)} trusted MCP server(s)")
+    else:
+        emit("OK", "latest manifest has no MCP servers")
+
+def reachability(server: dict) -> tuple[bool, str]:
+    name = str(server.get("name", "unknown"))
+    transport = str(server.get("transport", "unknown"))
+    if transport == "stdio":
+        command = str(server.get("command", "")).strip()
+        if not command:
+            return False, f"{name} stdio command metadata is missing"
+        if command.startswith("/"):
+            if os.access(command, os.X_OK):
+                return True, f"{name} stdio command reachable: {command}"
+            return False, f"{name} stdio command not reachable: {command}"
+        if shutil.which(command) is not None:
+            return True, f"{name} stdio command reachable: {command}"
+        return False, f"{name} stdio command not reachable: {command}"
+    if transport in {"remote", "http", "sse", "streamable-http"} or server.get("url_host"):
+        scheme = str(server.get("url_scheme", "")).strip()
+        host = str(server.get("url_host", "")).strip()
+        if scheme and host:
+            return True, f"{name} remote endpoint configured: {scheme}://{host}"
+        return False, f"{name} remote endpoint metadata is incomplete"
+    return False, f"{name} has unsupported MCP transport metadata: {transport}"
+
+selected = [server for server in servers if not allowset or str(server.get("name", "")) in allowset]
+if not selected:
+    if mcp_expected and manifest_current:
+        emit("WARN", "latest MCP manifest has no configured servers to check")
+    raise SystemExit(0)
+
+tool_snapshot_enabled = manifest.get("tool_snapshot_enabled") is True
+for server in selected:
+    ok, detail = reachability(server)
+    if ok:
+        emit("OK", detail)
+    else:
+        emit("ERROR" if strict_reachable else "WARN", detail)
+    if tool_snapshot_enabled:
+        name = str(server.get("name", "unknown"))
+        snapshot_status = str(server.get("tool_snapshot_status", "")).strip()
+        if snapshot_status == "ok":
+            emit("OK", f"{name} MCP tool snapshot includes {server.get('tool_count', 0) or 0} tool(s)")
+        elif snapshot_status and snapshot_status != "disabled":
+            emit("WARN", f"{name} MCP tool snapshot unavailable: {snapshot_status}")
+PY
+)
+}
+
+cmd_doctor() {
+    local repo="" profile_level="${AGENTMILL_PROFILE_LEVEL:-trusted}" fix=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --fix) fix=true; shift ;;
+            --profile-level) profile_level="$2"; shift 2 ;;
+            --repo) repo="$2"; shift 2 ;;
+            *) repo="${repo:-$1}"; shift ;;
+        esac
+    done
+
+    DOCTOR_ERRORS=0
+    DOCTOR_WARNINGS=0
+
+    if [[ "$fix" == true ]]; then
+        [[ -f "$MILL_DIR/.env" ]] || cp "$MILL_DIR/.env.example" "$MILL_DIR/.env"
+        mkdir -p "$MILL_DIR/logs" "$MILL_DIR/memory" "$MILL_DIR/hooks" "$MILL_DIR/prompts"
+        if [[ ! -f "$MILL_DIR/prompts/PROMPT.md" ]]; then
+            cat > "$MILL_DIR/prompts/PROMPT.md" <<'PROMPT'
+# AgentMill Task
+
+Read `TASK.md` for your mission. If it doesn't exist, read `PROGRESS.md` and pick the next item.
+
+**Run `touch /tmp/.agentmill-done` when finished.**
+PROMPT
+        fi
+        doctor_ok fix "ensured .env, prompts, logs, memory, and hooks exist"
+    fi
+
+    case "$profile_level" in
+        trusted|standard|untrusted) doctor_ok profile "AGENTMILL_PROFILE_LEVEL=$profile_level" ;;
+        *) doctor_error profile "invalid AGENTMILL_PROFILE_LEVEL=$profile_level (expected trusted, standard, or untrusted)" ;;
+    esac
+    local selected_client="${AGENTMILL_CLIENT:-claude}" codex_approval="${AGENTMILL_CODEX_APPROVAL_POLICY:-}" codex_sandbox="${AGENTMILL_CODEX_SANDBOX:-}"
+    if [[ "$selected_client" == "codex" && "$profile_level" != "trusted" ]]; then
+        if [[ -z "$codex_approval" ]]; then
+            doctor_ok client "Codex non-trusted runs default to approval_policy=untrusted with generated permission profile and execpolicy rules"
+        elif [[ "$codex_approval" == "never" ]]; then
+            doctor_error client "AGENTMILL_CLIENT=codex outside trusted must not use AGENTMILL_CODEX_APPROVAL_POLICY=never"
+        else
+            doctor_ok client "Codex approval policy override: $codex_approval"
+        fi
+        if [[ -n "$codex_sandbox" && -n "${AGENTMILL_WRITE_ROOTS:-}" ]]; then
+            doctor_error client "AGENTMILL_CODEX_SANDBOX bypasses generated Codex permission-profile write roots; unset it or omit AGENTMILL_WRITE_ROOTS"
+        fi
+    fi
+    doctor_validate_profiles
+
+    doctor_validate_env_schema
+
+    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        doctor_ok auth "ANTHROPIC_API_KEY is set"
+    elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+        doctor_ok auth "CLAUDE_CODE_OAUTH_TOKEN is set"
+    else
+        doctor_error auth "set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"
+    fi
+
+    doctor_model_floor_check
+
+    if doctor_truthy "${AGENTMILL_DOCTOR_SKIP_DOCKER:-false}"; then
+        doctor_warn docker "docker checks skipped by AGENTMILL_DOCTOR_SKIP_DOCKER"
+    elif command -v docker >/dev/null 2>&1; then
+        if docker info >/dev/null 2>&1; then
+            doctor_ok docker "daemon is reachable"
+        else
+            doctor_error docker "daemon is not reachable"
+        fi
+        if docker compose version >/dev/null 2>&1 || command -v docker-compose >/dev/null 2>&1; then
+            doctor_ok compose "docker compose is available"
+        else
+            doctor_error compose "docker compose plugin or docker-compose binary is missing"
+        fi
+        if docker image inspect agentmill >/dev/null 2>&1; then
+            doctor_ok image "agentmill image exists"
+            local image_created=""
+            image_created="$(docker image inspect agentmill --format '{{.Created}}' 2>/dev/null || true)"
+            if [[ -n "$image_created" && -f "$MILL_DIR/Dockerfile" ]]; then
+                if python3 - "$MILL_DIR/Dockerfile" "$image_created" <<'PY'
+from __future__ import annotations
+
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+dockerfile = Path(sys.argv[1])
+raw = sys.argv[2].strip()
+if raw.endswith("Z"):
+    raw = raw[:-1] + "+00:00"
+if "." in raw:
+    head, tail = raw.split(".", 1)
+    suffix = ""
+    if "+" in tail:
+        frac, tz = tail.split("+", 1)
+        suffix = "+" + tz
+    elif "-" in tail:
+        frac, tz = tail.split("-", 1)
+        suffix = "-" + tz
+    else:
+        frac = tail
+    raw = f"{head}.{frac[:6]}{suffix}"
+
+try:
+    created = datetime.fromisoformat(raw)
+except ValueError:
+    raise SystemExit(2)
+if created.tzinfo is None:
+    created = created.replace(tzinfo=timezone.utc)
+created_ts = created.timestamp()
+raise SystemExit(0 if created_ts >= dockerfile.stat().st_mtime else 1)
+PY
+                then
+                    doctor_ok image "agentmill image is newer than Dockerfile"
+                else
+                    doctor_warn image "agentmill image may be older than Dockerfile; run 'mill build --pull' or 'mill build'"
+                fi
+            else
+                doctor_warn image "could not determine agentmill image freshness"
+            fi
+        else
+            doctor_warn image "agentmill image not found; run 'mill build'"
+        fi
+    else
+        doctor_error docker "docker command is not installed or not on PATH"
+    fi
+
+    repo="${repo:-${REPO_PATH:-}}"
+    if [[ -z "$repo" ]]; then
+        doctor_error repo "set REPO_PATH or pass a repo path"
+    else
+        [[ "$repo" == /* ]] || repo="$PWD/$repo"
+        if [[ -d "$repo/.git" ]] || [[ -f "$repo/.git" ]]; then
+            doctor_ok repo "$repo is a git repo"
+            if [[ -O "$repo" ]]; then
+                doctor_ok ownership "current user owns repo path"
+            else
+                doctor_warn ownership "current user does not own repo path"
+            fi
+            if [[ "$profile_level" != "trusted" && -w "$repo" ]]; then
+                doctor_warn isolation "standard/untrusted single-agent runs currently use a writable repo mount; prefer multi-agent isolated clone mode for higher-risk work"
+            fi
+            local branch
+            branch="$(git -C "$repo" branch --show-current 2>/dev/null || true)"
+            if [[ -n "$branch" ]]; then
+                doctor_ok git "current branch is $branch"
+            else
+                doctor_warn git "repo appears to be detached or branch could not be detected"
+            fi
+            if git -C "$repo" remote get-url origin >/dev/null 2>&1; then
+                doctor_ok remote "origin remote is configured"
+            else
+                doctor_warn remote "origin remote is not configured; multi-agent push/fetch workflows may be limited"
+            fi
+            if [[ -n "$(git -C "$repo" status --porcelain 2>/dev/null)" ]]; then
+                doctor_warn worktree "repo has uncommitted changes"
+            else
+                doctor_ok worktree "repo is clean"
+            fi
+        else
+            doctor_error repo "$repo is not a git repo"
+        fi
+    fi
+
+    local prompt_file="${PROMPT_FILE:-/prompts/PROMPT.md}" host_prompt
+    host_prompt="$(doctor_host_prompt_path "$prompt_file")"
+    if [[ -f "$host_prompt" ]]; then
+        doctor_ok prompt "$prompt_file maps to $host_prompt"
+    else
+        doctor_error prompt "$prompt_file does not exist on host at $host_prompt"
+    fi
+
+    local max_iterations="${MAX_ITERATIONS:-0}" max_wall="${MAX_WALL_SECONDS:-0}" max_log="${MAX_LOG_BYTES:-0}" max_tokens="${MAX_TOTAL_TOKENS:-0}" max_usd="${MAX_TOTAL_USD:-0}"
+    if doctor_nonnegative_int "$max_iterations"; then
+        doctor_ok budget "MAX_ITERATIONS=$max_iterations"
+    else
+        doctor_error budget "MAX_ITERATIONS must be a non-negative integer"
+    fi
+    if doctor_nonnegative_int "$max_wall"; then
+        doctor_ok budget "MAX_WALL_SECONDS=$max_wall"
+    else
+        doctor_error budget "MAX_WALL_SECONDS must be a non-negative integer"
+    fi
+    if doctor_nonnegative_int "$max_log"; then
+        doctor_ok budget "MAX_LOG_BYTES=$max_log"
+    else
+        doctor_error budget "MAX_LOG_BYTES must be a non-negative integer"
+    fi
+    if doctor_nonnegative_int "$max_tokens"; then
+        doctor_ok budget "MAX_TOTAL_TOKENS=$max_tokens"
+    else
+        doctor_error budget "MAX_TOTAL_TOKENS must be a non-negative integer"
+    fi
+    if [[ "$max_usd" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        doctor_ok budget "MAX_TOTAL_USD=$max_usd"
+    else
+        doctor_error budget "MAX_TOTAL_USD must be a non-negative number"
+    fi
+    if [[ "$profile_level" != "trusted" ]] && doctor_nonnegative_int "$max_iterations" && doctor_nonnegative_int "$max_wall"; then
+        if [[ "$max_iterations" -eq 0 && "$max_wall" -eq 0 ]]; then
+            doctor_error budget "standard/untrusted runs require MAX_ITERATIONS or MAX_WALL_SECONDS"
+        fi
+    elif [[ "$profile_level" == "trusted" && "$max_iterations" =~ ^[0-9]+$ && "$max_wall" =~ ^[0-9]+$ ]]; then
+        if [[ "$max_iterations" -eq 0 && "$max_wall" -eq 0 ]]; then
+            doctor_warn budget "trusted run is unbounded by iteration or wall-clock time"
+        fi
+    fi
+
+    local completion_gate="${AGENTMILL_COMPLETION_GATE:-done_file}" verifier_command="${AGENTMILL_VERIFIER_COMMAND:-}"
+    local coder_open="${AGENTMILL_CODER_OPEN_QUESTIONS_MAX:-0}" refactor_target="${AGENTMILL_REFACTOR_LOC_TARGET:-}" refactor_tolerance="${AGENTMILL_REFACTOR_LOC_TOLERANCE:-0}" refactor_max_delta="${AGENTMILL_REFACTOR_MAX_LOC_DELTA:-0}"
+    case "$completion_gate" in
+        coder_*|coding_*|coder_verified|coding_verified)
+            if [[ -n "$verifier_command" ]]; then
+                doctor_ok completion "coder gate has AGENTMILL_VERIFIER_COMMAND"
+            else
+                doctor_error completion "coder_verified requires AGENTMILL_VERIFIER_COMMAND"
+            fi
+            if doctor_nonnegative_int "$coder_open"; then
+                doctor_ok completion "AGENTMILL_CODER_OPEN_QUESTIONS_MAX=$coder_open"
+            else
+                doctor_error completion "AGENTMILL_CODER_OPEN_QUESTIONS_MAX must be a non-negative integer"
+            fi
+            ;;
+        refactor_*|refactor_verified)
+            if [[ -n "$verifier_command" ]]; then
+                doctor_ok completion "refactor gate has AGENTMILL_VERIFIER_COMMAND"
+            else
+                doctor_error completion "refactor_verified requires AGENTMILL_VERIFIER_COMMAND"
+            fi
+            if [[ -n "$refactor_target" ]]; then
+                if doctor_signed_int "$refactor_target"; then
+                    doctor_ok completion "AGENTMILL_REFACTOR_LOC_TARGET=$refactor_target"
+                else
+                    doctor_error completion "AGENTMILL_REFACTOR_LOC_TARGET must be a signed integer"
+                fi
+                if doctor_nonnegative_int "$refactor_tolerance"; then
+                    doctor_ok completion "AGENTMILL_REFACTOR_LOC_TOLERANCE=$refactor_tolerance"
+                else
+                    doctor_error completion "AGENTMILL_REFACTOR_LOC_TOLERANCE must be a non-negative integer"
+                fi
+            elif doctor_signed_int "$refactor_max_delta"; then
+                doctor_ok completion "AGENTMILL_REFACTOR_MAX_LOC_DELTA=$refactor_max_delta"
+            else
+                doctor_error completion "AGENTMILL_REFACTOR_MAX_LOC_DELTA must be a signed integer"
+            fi
+            ;;
+        research_*|source_saturation|research_saturation)
+            if doctor_nonnegative_int "${AGENTMILL_RESEARCH_SATURATION_ITERATIONS:-3}" && [[ "${AGENTMILL_RESEARCH_SATURATION_ITERATIONS:-3}" -gt 0 ]]; then
+                doctor_ok completion "research saturation iterations=${AGENTMILL_RESEARCH_SATURATION_ITERATIONS:-3}"
+            else
+                doctor_error completion "AGENTMILL_RESEARCH_SATURATION_ITERATIONS must be a positive integer"
+            fi
+            if doctor_nonnegative_int "${AGENTMILL_RESEARCH_OPEN_QUESTIONS_MAX:-0}"; then
+                doctor_ok completion "research open-question max=${AGENTMILL_RESEARCH_OPEN_QUESTIONS_MAX:-0}"
+            else
+                doctor_error completion "AGENTMILL_RESEARCH_OPEN_QUESTIONS_MAX must be a non-negative integer"
+            fi
+            ;;
+        ""|done_file|sentinel)
+            doctor_ok completion "completion gate: ${completion_gate:-done_file}"
+            ;;
+        *)
+            doctor_warn completion "unknown completion gate '$completion_gate' falls back to done_file"
+            ;;
+    esac
+
+    local network="${AGENTMILL_NETWORK:-}" git_remote_allowlist="${AGENTMILL_GIT_REMOTE_ALLOWLIST:-}" allow_git_network="${AGENTMILL_ALLOW_GIT_NETWORK:-false}" egress_allowlist="${AGENTMILL_EGRESS_ALLOWLIST:-}"
+    case "$network" in
+        "" ) doctor_warn network "AGENTMILL_NETWORK is unset; container egress is unrestricted" ;;
+        allow) doctor_warn network "AGENTMILL_NETWORK=allow; container egress is unrestricted" ;;
+        allowlist)
+            if [[ -n "$egress_allowlist" ]]; then
+                doctor_ok network "container egress proxy allowlist is set: $egress_allowlist"
+                doctor_ok network "mill-launched services use Docker internal proxy network for allowlist egress"
+            else
+                doctor_error network "AGENTMILL_NETWORK=allowlist requires AGENTMILL_EGRESS_ALLOWLIST"
+            fi
+            if [[ -n "$git_remote_allowlist" ]]; then
+                doctor_ok network "harness git remote allowlist is set: $git_remote_allowlist"
+            else
+                doctor_warn network "AGENTMILL_NETWORK=allowlist has no AGENTMILL_GIT_REMOTE_ALLOWLIST; network git origins will be denied by harness git policy"
+            fi
+            ;;
+        deny)
+            if doctor_truthy "$allow_git_network"; then
+                if [[ -n "$git_remote_allowlist" ]]; then
+                    doctor_warn network "AGENTMILL_NETWORK=deny but harness git network remotes are allowed for: $git_remote_allowlist"
+                else
+                    doctor_warn network "AGENTMILL_NETWORK=deny but AGENTMILL_ALLOW_GIT_NETWORK=true allows harness git network remotes without an allowlist"
+                fi
+            else
+                doctor_ok network "harness-managed git network remotes are denied"
+            fi
+            doctor_ok network "mill-launched services use Docker network_mode=none"
+            ;;
+        *) doctor_error network "invalid AGENTMILL_NETWORK=$network (expected allow, allowlist, or deny)" ;;
+    esac
+    if [[ "$network" != "allowlist" && "$network" != "deny" && -n "$git_remote_allowlist" ]]; then
+        doctor_ok network "harness git remote allowlist is set: $git_remote_allowlist"
+    fi
+
+    local mcp_allowlist="${AGENTMILL_MCP_ALLOWLIST:-}" forward_mcp="${AGENTMILL_FORWARD_HOST_MCP:-}"
+    if [[ "$profile_level" != "trusted" ]] && doctor_truthy "$forward_mcp" && [[ -z "$mcp_allowlist" ]]; then
+        doctor_error mcp "AGENTMILL_FORWARD_HOST_MCP=true outside trusted requires AGENTMILL_MCP_ALLOWLIST"
+    elif [[ "$profile_level" != "trusted" && -z "$mcp_allowlist" ]]; then
+        doctor_ok mcp "host/project MCP forwarding is disabled by default"
+    elif [[ -n "$mcp_allowlist" && "$mcp_allowlist" == *"*"* ]]; then
+        doctor_error mcp "AGENTMILL_MCP_ALLOWLIST must name explicit servers, not wildcards"
+    elif [[ -n "$mcp_allowlist" ]]; then
+        doctor_ok mcp "allowlist: $mcp_allowlist"
+    else
+        doctor_ok mcp "trusted profile may forward host/project MCP"
+    fi
+    doctor_validate_mcp_manifest "$profile_level" "$mcp_allowlist" "$forward_mcp"
+
+    local high_risk="${AGENTMILL_ALLOW_HIGH_RISK_CHANGES:-false}"
+    if [[ "$profile_level" != "trusted" ]] && doctor_truthy "$high_risk"; then
+        doctor_warn policy "AGENTMILL_ALLOW_HIGH_RISK_CHANGES permits high-risk commits for $profile_level profile"
+    else
+        doctor_ok policy "high-risk change gate default is active"
+    fi
+
+    local forwarded_host_config=()
+    [[ "$profile_level" != "trusted" ]] && doctor_truthy "${AGENTMILL_FORWARD_HOST_TOOLS:-}" && forwarded_host_config+=("tools")
+    [[ "$profile_level" != "trusted" ]] && doctor_truthy "${AGENTMILL_FORWARD_HOST_HOOKS:-}" && forwarded_host_config+=("hooks")
+    [[ "$profile_level" != "trusted" ]] && doctor_truthy "${AGENTMILL_FORWARD_HOST_ENV:-}" && forwarded_host_config+=("env")
+    [[ "$profile_level" != "trusted" ]] && doctor_truthy "${AGENTMILL_FORWARD_HOST_EXTENSIONS:-}" && forwarded_host_config+=("extensions")
+    if [[ "${#forwarded_host_config[@]}" -gt 0 ]]; then
+        doctor_warn host-config "forwarding host ${forwarded_host_config[*]} outside trusted profile"
+    elif [[ "$profile_level" != "trusted" ]]; then
+        doctor_ok host-config "host tools, hooks, env, plugins, skills, agents, and commands are not forwarded by default"
+    else
+        doctor_ok host-config "trusted profile may forward host Claude config"
+    fi
+    local missing_host_mounts=() expected_mount
+    for expected_mount in \
+        '/home/agent/.host-claude.json:ro' \
+        '/home/agent/.claude/settings.host.json:ro' \
+        '/home/agent/.host-plugins:ro' \
+        '/home/agent/.host-skills:ro' \
+        '/home/agent/.host-agents:ro' \
+        '/home/agent/.host-commands:ro'; do
+        grep -qF "$expected_mount" "$MILL_DIR/docker-compose.yml" 2>/dev/null || missing_host_mounts+=("$expected_mount")
+    done
+    if [[ "${#missing_host_mounts[@]}" -gt 0 ]]; then
+        doctor_warn host-config "could not verify read-only host Claude mounts: ${missing_host_mounts[*]}"
+    else
+        doctor_ok host-config "compose mounts host Claude config and extensions read-only"
+    fi
+
+    local skill_allowlist="${AGENTMILL_SKILL_ALLOWLIST:-}"
+    if [[ "$skill_allowlist" == *"*"* || "$skill_allowlist" == *"?"* ]]; then
+        doctor_error skill "AGENTMILL_SKILL_ALLOWLIST must name explicit host skill directories, not wildcards"
+    elif doctor_list_has_entries "$skill_allowlist"; then
+        doctor_ok skill "allowlist: $skill_allowlist"
+    elif [[ "$profile_level" != "trusted" ]] && doctor_truthy "${AGENTMILL_FORWARD_HOST_EXTENSIONS:-}"; then
+        doctor_warn skill "AGENTMILL_FORWARD_HOST_EXTENSIONS=true outside trusted but AGENTMILL_SKILL_ALLOWLIST is empty; host skills will not be copied"
+    elif [[ "$profile_level" != "trusted" ]]; then
+        doctor_ok skill "host skills are not copied by default"
+    else
+        doctor_ok skill "trusted profile may copy host skills"
+    fi
+
+    local workspace_mode="${AGENTMILL_WORKSPACE_MODE:-auto}" allow_direct=false
+    doctor_truthy "${AGENTMILL_ALLOW_DIRECT_HOST_REPO:-false}" && allow_direct=true
+    case "$workspace_mode" in
+        auto|direct|readonly-clone|clone-ro|ro-clone|"") ;;
+        *) doctor_error workspace "invalid AGENTMILL_WORKSPACE_MODE=$workspace_mode (expected direct or readonly-clone)" ;;
+    esac
+    if [[ "$profile_level" != "trusted" && "$workspace_mode" == "direct" && "$allow_direct" != "true" ]]; then
+        doctor_error workspace "standard/untrusted direct writable host repo mode requires AGENTMILL_ALLOW_DIRECT_HOST_REPO=true"
+    elif [[ "$profile_level" != "trusted" && ( "$workspace_mode" == "auto" || -z "$workspace_mode" ) ]]; then
+        doctor_ok workspace "mill run/watch will auto-select readonly-clone for $profile_level"
+    elif [[ "$workspace_mode" == "readonly-clone" || "$workspace_mode" == "clone-ro" || "$workspace_mode" == "ro-clone" ]]; then
+        doctor_ok workspace "read-only clone mode selected"
+    else
+        doctor_ok workspace "workspace mode: ${workspace_mode:-auto}"
+    fi
+
+    if grep -q 'read_only:.*AGENTMILL_READ_ONLY_ROOTFS' "$MILL_DIR/docker-compose.yml" 2>/dev/null; then
+        doctor_ok filesystem "containers use read-only root filesystem by default"
+    else
+        doctor_warn filesystem "could not verify read-only root filesystem in docker-compose.yml"
+    fi
+    if grep -q '/tmp:rw,nosuid,nodev' "$MILL_DIR/docker-compose.yml" 2>/dev/null \
+        && grep -q '/home/agent:rw,nosuid,nodev' "$MILL_DIR/docker-compose.yml" 2>/dev/null \
+        && grep -q '/workspace:rw,nosuid,nodev' "$MILL_DIR/docker-compose.yml" 2>/dev/null; then
+        doctor_ok filesystem "runtime scratch paths are tmpfs"
+    else
+        doctor_warn filesystem "could not verify tmpfs scratch paths in docker-compose.yml"
+    fi
+    if grep -q 'bubblewrap' "$MILL_DIR/Dockerfile" 2>/dev/null; then
+        doctor_ok filesystem "image installs bubblewrap for non-native write-root sandboxes"
+    else
+        doctor_warn filesystem "could not verify bubblewrap install in Dockerfile"
+    fi
+    if [[ "$profile_level" != "trusted" && -n "${AGENTMILL_WRITE_ROOTS:-}" && "${AGENTMILL_WRITE_ROOT_SANDBOX:-auto}" != "off" ]]; then
+        case "$selected_client" in
+            opencode|qwen|gemini)
+                if grep -q 'bubblewrap' "$MILL_DIR/Dockerfile" 2>/dev/null; then
+                    doctor_ok filesystem "AGENTMILL_WRITE_ROOTS will use bubblewrap for $selected_client"
+                else
+                    doctor_error filesystem "AGENTMILL_WRITE_ROOTS for $selected_client requires bubblewrap in the image"
+                fi
+                ;;
+        esac
+    fi
+
+    local hook_dir="${AGENTMILL_HOOK_DIR:-$MILL_DIR/hooks}" host_hook_dir
+    case "$hook_dir" in
+        /hooks) host_hook_dir="$MILL_DIR/hooks" ;;
+        /*)     host_hook_dir="$hook_dir" ;;
+        *)      host_hook_dir="$MILL_DIR/$hook_dir" ;;
+    esac
+    if [[ -d "$host_hook_dir" ]]; then
+        doctor_ok hooks "$hook_dir maps to $host_hook_dir"
+        local hook found_bad_hook=false
+        for hook in "$host_hook_dir"/*.sh; do
+            [[ -e "$hook" ]] || continue
+            if [[ ! -x "$hook" ]]; then
+                doctor_error hooks "$(basename "$hook") exists but is not executable"
+                found_bad_hook=true
+            fi
+        done
+        [[ "$found_bad_hook" == true ]] || doctor_ok hooks "all discovered hook scripts are executable"
+    else
+        doctor_warn hooks "$hook_dir does not exist; optional hooks are disabled"
+    fi
+
+    if grep -q '\./hooks:/hooks:ro' "$MILL_DIR/docker-compose.yml" 2>/dev/null; then
+        doctor_ok hooks "docker-compose mounts hooks read-only"
+    else
+        doctor_warn hooks "could not verify read-only /hooks mount in docker-compose.yml"
+    fi
+
+    if command -v claude >/dev/null 2>&1; then
+        local claude_version
+        claude_version="$(claude --version 2>/dev/null | head -1 || true)"
+        doctor_ok claude "CLI available${claude_version:+ ($claude_version)}"
+    else
+        doctor_warn claude "claude CLI not found on host; it is expected inside the AgentMill image"
+    fi
+
+    printf 'Doctor summary: %d error(s), %d warning(s)\n' "$DOCTOR_ERRORS" "$DOCTOR_WARNINGS"
+    [[ "$DOCTOR_ERRORS" -eq 0 ]]
 }
 
 cmd_clean() {
     local log_dir="$MILL_DIR/logs"
     [[ -d "$log_dir" ]] || { echo "Nothing to clean."; return 0; }
-    rm -f "$log_dir"/status-*.json "$log_dir"/agent-*.log "$log_dir"/session_*.log "$log_dir"/results.tsv
+    rm -f "$log_dir"/status-*.json "$log_dir"/agent-*.log "$log_dir"/session_*.log "$log_dir"/results.tsv "$log_dir"/convergence.tsv "$log_dir"/usage.tsv "$log_dir"/events.jsonl "$log_dir"/events.jsonl.lock
     echo "Cleaned logs from $log_dir"
 }
 
@@ -315,19 +3160,34 @@ load_env
 
 case "${1:-}" in
     run)    shift; cmd_run "$@" ;;
+    exec)   shift; cmd_exec "$@" ;;
     watch)  shift; cmd_watch "$@" ;;
     multi)  shift; cmd_multi "$@" ;;
     shell)  shift; cmd_shell "$@" ;;
+    profiles) shift; cmd_profiles "$@" ;;
     ps)     shift; cmd_ps "$@" ;;
     status) shift; cmd_status "$@" ;;
+    watch-status) shift; cmd_watch_status "$@" ;;
+    web)    shift; cmd_web "$@" ;;
     logs)   shift; cmd_logs "$@" ;;
+    tail)   shift; cmd_tail "$@" ;;
     build)  shift; cmd_build "$@" ;;
     stop)   shift; cmd_stop "$@" ;;
     memory) shift; cmd_memory "$@" ;;
+    report) shift; cmd_report "$@" ;;
     history) shift; cmd_history "$@" ;;
+    cost)   shift; cmd_cost "$@" ;;
+    events) shift; cmd_events "$@" ;;
+    metrics) shift; cmd_metrics "$@" ;;
+    mcp)    shift; cmd_mcp "$@" ;;
+    version) shift; cmd_version "$@" ;;
     diff)   shift; cmd_diff "$@" ;;
+    patches) shift; cmd_patches "$@" ;;
+    apply)  shift; cmd_apply "$@" ;;
+    doctor) shift; cmd_doctor "$@" ;;
     clean)  shift; cmd_clean "$@" ;;
     init)   shift; cmd_init "$@" ;;
+    --version) shift; cmd_version "$@" ;;
     -h|--help|help) usage 0 ;;
     "") usage 0 ;;
     *)  echo "Unknown command: $1" >&2; usage 1 ;;

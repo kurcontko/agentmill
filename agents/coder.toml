@@ -1,0 +1,16 @@
+description = "Default bounded coding agent for normal repositories."
+prompt_file = "/prompts/PROMPT.md"
+model = "sonnet"
+branch_pattern = "agent-{agent_id}"
+max_iterations = 10
+loop_delay = 5
+max_wall_seconds = 7200
+max_log_bytes = 52428800
+profile_level = "standard"
+auto_commit_mode = "wip"
+completion_gate = "coder_verified"
+coder_open_questions_max = 0
+network = "allowlist"
+mcp_allowlist = []
+skill_allowlist = []
+forward_host_mcp = false

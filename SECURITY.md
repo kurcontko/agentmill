@@ -30,3 +30,6 @@ Only the latest release on the `main` branch is actively supported with security
 - Containers run Claude Code with `--dangerously-skip-permissions` by design. This is intentional for autonomous operation inside isolated containers and should **never** be used outside a container boundary.
 - Agents have full read/write access to the mounted repository. Do not mount sensitive host directories.
 - API keys (`ANTHROPIC_API_KEY`) are passed via environment variables. Use Docker secrets or a vault in production.
+
+For the deployment threat model and long-running-agent hardening roadmap, see
+[`docs/SECURITY.md`](docs/SECURITY.md).

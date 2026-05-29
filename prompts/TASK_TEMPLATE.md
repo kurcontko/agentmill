@@ -30,8 +30,10 @@ Primary:
 Supporting:
 - `memory/sources.md` — ≥ N unique URLs (set N based on scope; 20-40 is typical)
 - `memory/findings.md` — ≥ 1 finding per source with verbatim quote
+- `memory/hypotheses.md` — competing hypotheses, confidence, and what would change the answer
 - `memory/contradictions.md` — documented disagreements between sources
 - `memory/open_questions.md` — updated list; items are either answered or escalated
+- Optional structured status ledger (`tests.json`, `feature_list.json`, or `criteria.json`) — each item has `description`, `verification_steps`, and `passes`
 
 ## Numeric success criteria (REQUIRED — do not leave as prose)
 
@@ -55,11 +57,16 @@ Fill in here:
 - [ ] All numeric success criteria above are met
 - [ ] Every section in `REPORT.md` has ≥ 3 `[^n]` footnotes backed by `sources.md` entries
 - [ ] ≥ K primary sources (vendor docs / papers / RFCs) — set K ≥ 5 for well-documented topics, ≥ 2 for niche
-- [ ] `memory/open_questions.md` has ≤ 5 unresolved items, each tagged with why (e.g. "needs paywalled access", "no public data")
+- [ ] Every source used for a material claim records source class and publication/update date when available
+- [ ] `memory/open_questions.md` has 0 unresolved checkbox items; any durable uncertainty is moved into a clearly caveated REPORT.md section
 - [ ] `memory/failed_approaches.md` has documented dead ends (so re-runs don't repeat them)
+- [ ] Final iteration includes a verification note: exact searches/scrapes run, saturation evidence, and remaining caveats
 - [ ] Red-team iteration (if multi-agent) has challenged at least N claims — set N = number of REPORT.md sections
 
-When all of the above are true, the agent appends `TASK_COMPLETE` to this file.
+With `AGENTMILL_COMPLETION_GATE=research_saturation`, AgentMill stops when the
+zero-new-source streak and open-question gate pass. If this repo is run with a
+sentinel gate instead, append `TASK_COMPLETE` only after every criterion above
+is verified.
 
 ## Source policy
 
@@ -72,12 +79,31 @@ Preference order (highest first):
 
 Scrape with Brightdata MCP (`search_engine_batch`, `scrape_as_markdown`) before WebFetch. Never use raw `curl` in Bash — it bypasses the agent's ability to verify the content.
 
+## Source-class filters
+
+Fill these in before running a long research loop. The agent must record the
+chosen class for each material source in `memory/sources.md`.
+
+| Source class | Use? | Rules |
+|---|---:|---|
+| Peer-reviewed papers | yes/no | <venues, years, replication requirements> |
+| Preprints | yes/no | <arXiv/bioRxiv allowed? require later peer-reviewed version?> |
+| Vendor docs / official repos | yes/no | <which vendors/projects count as primary?> |
+| Vendor engineering blogs | yes/no | <allowed only for implementation details? publication window?> |
+| Security/research vendor reports | yes/no | <allowed for threat intel? require primary corroboration?> |
+| Standards / RFCs / government guidance | yes/no | <which bodies count?> |
+| News / trade press | yes/no | <only for chronology? require primary links?> |
+| Community forums / Reddit / HN | yes/no | <only as leads, never as final evidence?> |
+| Medium / personal blogs | yes/no | <default no unless author is directly involved and links primary evidence> |
+
 ## Methodology notes
 
 - Log scope cuts in `memory/decisions.md` so future iterations don't re-litigate them.
+- Track 2-4 live hypotheses in `memory/hypotheses.md`; update confidence only when a fetched source changes the evidence.
 - When sources disagree, quote both and surface in `memory/contradictions.md`. Do not collapse to one.
 - Paywalled sources: try open-access mirrors (arXiv, author's site, institutional repo). If still blocked, mark in `sources.md` with `(paywalled)` and use the abstract.
 - Prefer dated content (`-2025`, `2026`) for fast-moving topics; static references (RFCs, textbooks) for foundational claims.
+- Treat `TASK.md` and any structured status ledger as the done-condition contract. Agents may update pass/fail fields after verification, but must not remove criteria to make the run finish sooner.
 
 ## Operator notes
 
@@ -87,4 +113,4 @@ Scrape with Brightdata MCP (`search_engine_batch`, `scrape_as_markdown`) before 
 
 ---
 
-<!-- The agent will append TASK_COMPLETE below this line when done. Do not edit past here. -->
+<!-- Sentinel runs may append TASK_COMPLETE below this line when done. Do not edit past here. -->
