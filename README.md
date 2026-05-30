@@ -50,6 +50,9 @@ Claude runs in a loop in the background. No UI — output goes to `./logs/`. Res
 
 ```bash
 REPO_PATH=/path/to/repo docker compose up headless
+
+# Use REPO_PATH from .env, or pass /path/to/repo to override it
+./mill run --iterations 3
 ```
 
 Loop: pull → run Claude → commit → push → wait → repeat.
@@ -103,7 +106,7 @@ AGENT_BRANCH=main REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agen
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
-| `REPO_PATH` | *(required)* | Absolute path to the repo on your host |
+| `REPO_PATH` | *(required unless passed)* | Absolute path to the repo on your host; `mill run/watch/multi/shell [repo]` can override it |
 | `ANTHROPIC_API_KEY` | — | API key auth |
 | `CLAUDE_CODE_OAUTH_TOKEN` | — | OAuth token auth (alternative to API key) |
 | `MODEL` | `sonnet` | Claude model (`sonnet`, `opus`, etc.) |
