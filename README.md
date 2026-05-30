@@ -70,8 +70,8 @@ Claude runs in a loop in the background. No UI — output goes to `./logs/`. Res
 ```bash
 REPO_PATH=/path/to/repo docker compose up headless
 
-# Use a built-in role profile
-./mill run /path/to/repo --agent coder --iterations 3
+# Use REPO_PATH from .env, or pass /path/to/repo to override it
+./mill run --agent coder --iterations 3
 ```
 
 Loop: pull → run Claude → commit → push → wait → repeat.
@@ -219,7 +219,7 @@ latest MCP manifest reachability, and the host Claude CLI.
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
-| `REPO_PATH` | *(required)* | Absolute path to the repo on your host |
+| `REPO_PATH` | *(required unless passed)* | Absolute path to the repo on your host; `mill run/exec/watch/multi/shell [repo]` can override it |
 | `ANTHROPIC_API_KEY` | — | API key auth |
 | `CLAUDE_CODE_OAUTH_TOKEN` | — | OAuth token auth (alternative to API key) |
 | `AGENTMILL_CLIENT` | `claude` | Client executable (`claude`, `codex`, `opencode`, `qwen`, `gemini`; `fake` is test-only) |

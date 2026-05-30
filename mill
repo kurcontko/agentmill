@@ -14,11 +14,11 @@ usage() {
 mill — AgentMill CLI
 
 Usage:
-  mill run   <repo> [--agent ROLE] [--workspace-mode direct|readonly-clone] [--model M] [--iterations N] [--max-log-bytes B] [--max-total-tokens N] [--max-total-usd USD] [--prompt FILE] [--delay S] [--auto-commit MODE] [--json] [-d]
-  mill exec  <repo> [--agent ROLE] [--workspace-mode direct|readonly-clone] [--model M] [--max-log-bytes B] [--max-total-tokens N] [--max-total-usd USD] [--prompt FILE] [--auto-commit MODE]
-  mill watch <repo> [--agent ROLE] [--transport native|acp] [--workspace-mode direct|readonly-clone] [--model M] [--max-log-bytes B] [--max-total-tokens N] [--max-total-usd USD] [--prompt FILE] [--ralph] [--respawn]
-  mill multi <repo> [N] [-d] [--roles A,B,C] [--model M] [--iterations N] [--max-log-bytes B] [--max-total-tokens N] [--max-total-usd USD]
-  mill shell <repo> [--transport native|acp] [--prompt TEXT]  Interactive client session
+  mill run   [repo] [--agent ROLE] [--workspace-mode direct|readonly-clone] [--model M] [--iterations N] [--max-log-bytes B] [--max-total-tokens N] [--max-total-usd USD] [--prompt FILE] [--delay S] [--auto-commit MODE] [--json] [-d]
+  mill exec  [repo] [--agent ROLE] [--workspace-mode direct|readonly-clone] [--model M] [--max-log-bytes B] [--max-total-tokens N] [--max-total-usd USD] [--prompt FILE] [--auto-commit MODE]
+  mill watch [repo] [--agent ROLE] [--transport native|acp] [--workspace-mode direct|readonly-clone] [--model M] [--max-log-bytes B] [--max-total-tokens N] [--max-total-usd USD] [--prompt FILE] [--ralph] [--respawn]
+  mill multi [repo] [N] [-d] [--roles A,B,C] [--model M] [--iterations N] [--max-log-bytes B] [--max-total-tokens N] [--max-total-usd USD]
+  mill shell [repo] [--transport native|acp] [--prompt TEXT]  Interactive client session
   mill profiles [ROLE]              List profiles or show ROLE env exports
   mill ps                           Show running containers
   mill status [--json]              Show agent iteration status
@@ -46,6 +46,7 @@ Usage:
 
 Environment:
   ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN must be set (or in .env).
+  REPO_PATH may supply the repo path when [repo] is omitted.
 
 Examples:
   mill run ~/projects/myapp
@@ -306,8 +307,8 @@ compose_json_run() {
 }
 
 require_repo() {
-    [[ -n "${1:-}" ]] || { echo "Error: repo path required" >&2; usage 1; }
-    local repo="$1"
+    local repo="${1:-${REPO_PATH:-}}"
+    [[ -n "$repo" ]] || { echo "Error: repo path required (pass repo or set REPO_PATH)" >&2; usage 1; }
     [[ "$repo" == /* ]] || repo="$PWD/$repo"
     [[ -d "$repo/.git" ]] || [[ -f "$repo/.git" ]] || { echo "Error: $repo is not a git repo" >&2; exit 1; }
     export REPO_PATH="$repo"
@@ -377,6 +378,7 @@ cmd_run() {
     [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            -h|--help)    usage 0 ;;
             --agent)       agent="$2"; shift 2 ;;
             --model)       model="$2"; shift 2 ;;
             --iterations)  iterations="$2"; shift 2 ;;
@@ -434,6 +436,7 @@ cmd_exec() {
     [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            -h|--help)    usage 0 ;;
             --agent)       agent="$2"; shift 2 ;;
             --model)       model="$2"; shift 2 ;;
             --prompt)      prompt="$2"; shift 2 ;;
@@ -481,6 +484,7 @@ cmd_watch() {
     [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            -h|--help) usage 0 ;;
             --agent)   agent="$2"; shift 2 ;;
             --transport) transport="$2"; shift 2 ;;
             --acp)     transport=acp; shift ;;
@@ -520,10 +524,18 @@ cmd_watch() {
 
 cmd_multi() {
     local repo="" count="" roles="" detach=false model="" iterations="" delay="" max_wall="" max_log="" max_tokens="" max_usd="" profile_level=""
-    [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
+    if [[ $# -gt 0 && "${1:0:1}" != "-" ]]; then
+        if [[ "$1" =~ ^[0-9]+$ && -n "${REPO_PATH:-}" ]]; then
+            count="$1"
+        else
+            repo="$1"
+        fi
+        shift
+    fi
     [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { count="$1"; shift; }
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            -h|--help)    usage 0 ;;
             -d|--detach)   detach=true; shift ;;
             --roles)       roles="$2"; shift 2 ;;
             --model)       model="$2"; shift 2 ;;
@@ -617,6 +629,7 @@ cmd_shell() {
     [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            -h|--help) usage 0 ;;
             --transport) transport="$2"; shift 2 ;;
             --acp) transport=acp; shift ;;
             --prompt) acp_prompt="$2"; shift 2 ;;
