@@ -218,8 +218,10 @@ if grep -Fxq -- '--sandbox' "$CODEX_ARGS_LOG"; then
     echo "unexpected --sandbox arg when Codex permission profile is active" >&2
     exit 1
 fi
-grep -Fx -- '--ask-for-approval' "$CODEX_ARGS_LOG"
-grep -Fx 'untrusted' "$CODEX_ARGS_LOG"
+if grep -Fxq -- '--ask-for-approval' "$CODEX_ARGS_LOG"; then
+    echo "unexpected --ask-for-approval arg for codex exec" >&2
+    exit 1
+fi
 grep -Fx -- '--model' "$CODEX_ARGS_LOG"
 grep -Fx "$MODEL" "$CODEX_ARGS_LOG"
 grep -Fx "CODEX_HOME=$CODEX_HOME" "$CODEX_ARGS_LOG"

@@ -3820,7 +3820,7 @@ client_run_headless() {
             ;;
         codex)
             local codex_final="${session_log}.final"
-            local codex_args=(exec - --cd "$REPO_DIR" --json --ask-for-approval "$(client_codex_approval_policy)" --output-last-message "$codex_final")
+            local codex_args=(exec - --cd "$REPO_DIR" --json --output-last-message "$codex_final")
             if ! client_codex_use_permission_profile; then
                 codex_args+=(--sandbox "$(client_codex_sandbox_mode)")
             fi
