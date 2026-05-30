@@ -3185,12 +3185,13 @@ client_codex_approval_policy() {
 }
 
 client_write_codex_config() {
-    local config="$1" ir sandbox approval
+    local config="$1" ir sandbox approval repo_dir
     ir="$(client_policy_ir_json)"
     sandbox="$(client_codex_sandbox_mode)"
     approval="$(client_codex_approval_policy)"
+    repo_dir="${REPO_DIR:-${PWD:-/workspace/repo}}"
     mkdir -p "$(dirname "$config")"
-    python3 - "$config" "$MODEL" "$ir" "$sandbox" "$approval" "$REPO_DIR" "$AGENTMILL_WRITE_ROOTS" "$AGENTMILL_ALLOW_HIGH_RISK_CHANGES" "$AGENTMILL_EGRESS_ALLOWLIST" <<'PY'
+    python3 - "$config" "$MODEL" "$ir" "$sandbox" "$approval" "$repo_dir" "$AGENTMILL_WRITE_ROOTS" "$AGENTMILL_ALLOW_HIGH_RISK_CHANGES" "$AGENTMILL_EGRESS_ALLOWLIST" <<'PY'
 import json
 import os
 import sys
@@ -3735,7 +3736,12 @@ client_prepare_project() {
             write_project_settings "$(autonomous_settings_json)"
             ;;
         fake) return 0 ;;
-        opencode|codex|qwen|gemini) return 0 ;;
+        opencode|qwen|gemini) return 0 ;;
+        codex)
+            if [[ -n "${CODEX_HOME:-}" ]]; then
+                client_write_codex_config "$CODEX_HOME/config.toml"
+            fi
+            ;;
         *)
             log_error "Client '${AGENTMILL_CLIENT}' is not implemented yet"
             exit 1

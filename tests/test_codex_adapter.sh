@@ -147,6 +147,19 @@ printf '{"OPENAI_API_KEY":"subscription-secret"}\n' > "$host_codex/auth.json"
     [[ -f "$CODEX_HOME/auth.json" ]]
     grep -q "subscription-secret" "$CODEX_HOME/auth.json"
 )
+(
+    unset REPO_DIR
+    export HOME="$TMPDIR/no-repo-dir-home"
+    export AGENTMILL_CLIENT=codex
+    export AGENTMILL_CLIENT_HOME=
+    export AGENTMILL_CLIENT_HOME_ROOT="$HOME/.agentmill/clients"
+    export AGENTMILL_HOST_CODEX_HOME=
+    export AGENTMILL_PROFILE_LEVEL=trusted
+    export MODEL="gpt-5.3-codex"
+    mkdir -p "$HOME"
+    client_prepare_codex_home
+    [[ -f "$CODEX_HOME/config.toml" ]]
+)
 set +e
 standard_auth_output="$(
     {
