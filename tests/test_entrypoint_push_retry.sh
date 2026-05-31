@@ -29,6 +29,7 @@ test_log_preserves_entrypoint_log_paths() {
 
     local tmpdir
     tmpdir="$(mktemp -d)"
+    # shellcheck disable=SC2034 # Used by the eval'd log() helper.
     LOG_DIR="$tmpdir"
 
     unset AGENT_ID
@@ -36,6 +37,7 @@ test_log_preserves_entrypoint_log_paths() {
     [[ -f "$tmpdir/agent.log" ]]
     [[ ! -e "$tmpdir/agent-tui.log" ]]
 
+    # shellcheck disable=SC2034 # Used by the eval'd log() helper.
     AGENT_ID=2
     log "headless message" >/dev/null
     [[ -f "$tmpdir/agent-2.log" ]]
