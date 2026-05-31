@@ -5,11 +5,14 @@ REPO_DIR="${1:-$PWD}"
 AUTO_SETUP="${AUTO_SETUP:-true}"
 REPO_SETUP_COMMAND="${REPO_SETUP_COMMAND:-}"
 EXTRA_PYTHON_TOOLS="${EXTRA_PYTHON_TOOLS:-}"
+POETRY_ALLOW_SOURCE_BUILDS="${POETRY_ALLOW_SOURCE_BUILDS:-false}"
+POETRY_INSTALL_ROOT="${POETRY_INSTALL_ROOT:-false}"
 
 repo_log() { echo "[repo-setup] $*"; }
 
 has_pyproject_field() {
-    [[ -f pyproject.toml ]] && rg -q "$1" pyproject.toml && rg -q '^\s*dev\s*=' pyproject.toml
+    local pattern="$1"
+    [[ -f pyproject.toml ]] && rg -q "$pattern" pyproject.toml && rg -q '^\s*dev\s*=' pyproject.toml
 }
 
 activate_venv() {
@@ -29,6 +32,19 @@ install_extra_python_tools() {
     repo_log "Installing extra Python tools: $EXTRA_PYTHON_TOOLS"
     # shellcheck disable=SC2086
     "$REPO_DIR/.venv/bin/python" -m pip install --no-cache-dir $EXTRA_PYTHON_TOOLS
+}
+
+poetry_install() {
+    local poetry_args=(install --no-interaction)
+    [[ "$POETRY_INSTALL_ROOT" == "true" ]] || poetry_args+=(--no-root)
+
+    if [[ "$POETRY_ALLOW_SOURCE_BUILDS" == "true" ]]; then
+        poetry "${poetry_args[@]}"
+    else
+        # Source builds can execute package setup scripts; prefer wheels in autonomous setup.
+        poetry config installer.only-binary :all: 2>/dev/null || true
+        POETRY_INSTALLER_ONLY_BINARY=:all: PIP_ONLY_BINARY=:all: poetry "${poetry_args[@]}"
+    fi
 }
 
 cd "$REPO_DIR"
@@ -57,7 +73,7 @@ if [[ -f pyproject.toml ]]; then
         command -v poetry >/dev/null 2>&1 || { repo_log "Installing Poetry"; python3 -m pip install --no-cache-dir poetry; }
         repo_log "Running: poetry install"
         poetry config virtualenvs.in-project true 2>/dev/null || true
-        poetry install --no-interaction
+        poetry_install
     else
         ensure_venv
         if has_pyproject_field '^\[project\.optional-dependencies\]'; then
