@@ -1,13 +1,27 @@
 #!/usr/bin/env bash
 
+LOG_DIR="${LOG_DIR:-/workspace/logs}"
+mkdir -p "$LOG_DIR"
+
+log() {
+    local msg logfile
+    if [[ -n "${AGENT_ID:-}" ]]; then
+        msg="[agentmill:agent-${AGENT_ID} $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
+        logfile="$LOG_DIR/agent-${AGENT_ID}.log"
+    else
+        msg="[agentmill $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
+        logfile="$LOG_DIR/agent.log"
+    fi
+    echo "$msg"
+    echo "$msg" >> "$logfile"
+}
+
 require_auth() {
     if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
         log "Auth: using ANTHROPIC_API_KEY"
     elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
         log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
-        if [[ ! -f "$HOME/.claude.json" ]]; then
-            printf '%s\n' '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
-        fi
+        [[ -f "$HOME/.claude.json" ]] || printf '%s\n' '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
     else
         log "ERROR: No auth configured."
         log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
@@ -16,40 +30,26 @@ require_auth() {
     fi
 }
 
-merge_host_claude_config() {
-    /setup-claude-config.sh
-}
+merge_host_claude_config() { /setup-claude-config.sh; }
 
 configure_git_identity() {
-    local git_user="$1"
-    local git_email="$2"
-    local suffix="${3:-}"
-    local git_name="$git_user"
-
-    if [[ -n "$suffix" ]]; then
-        git_name="${git_user}-${suffix}"
-    fi
-
-    git config --global user.name "$git_name"
-    git config --global user.email "$git_email"
+    local name="${1}${3:+-$3}"
+    git config --global user.name "$name"
+    git config --global user.email "$2"
 }
 
 prepare_repo_environment() {
-    local repo_dir="$1"
-
     log "Preparing repo environment..."
     # shellcheck disable=SC1091
-    . /setup-repo-env.sh "$repo_dir"
+    . /setup-repo-env.sh "$1"
     log "Repo environment ready."
 }
 
+# --- Project settings backup/restore ---
 backup_project_settings() {
     SETTINGS_LOCAL_PATH="${1:-.claude/settings.local.json}"
-    SETTINGS_BACKUP_FILE=""
-    SETTINGS_BACKUP_EXISTS=false
-
+    SETTINGS_BACKUP_FILE="" SETTINGS_BACKUP_EXISTS=false
     mkdir -p "$(dirname "$SETTINGS_LOCAL_PATH")"
-
     if [[ -f "$SETTINGS_LOCAL_PATH" ]]; then
         SETTINGS_BACKUP_FILE="$(mktemp)"
         cp "$SETTINGS_LOCAL_PATH" "$SETTINGS_BACKUP_FILE"
@@ -58,83 +58,58 @@ backup_project_settings() {
 }
 
 write_project_settings() {
-    if [[ -z "${SETTINGS_LOCAL_PATH:-}" ]]; then
-        echo "SETTINGS_LOCAL_PATH is not set; call backup_project_settings first" >&2
-        return 1
-    fi
-
+    [[ -n "${SETTINGS_LOCAL_PATH:-}" ]] || { echo "call backup_project_settings first" >&2; return 1; }
     printf '%s\n' "$1" > "$SETTINGS_LOCAL_PATH"
+}
+
+restore_project_settings() {
+    [[ -n "${SETTINGS_LOCAL_PATH:-}" ]] || return 0
+    if [[ "${SETTINGS_BACKUP_EXISTS:-false}" == "true" && -f "${SETTINGS_BACKUP_FILE:-}" ]]; then
+        cp "$SETTINGS_BACKUP_FILE" "$SETTINGS_LOCAL_PATH"
+    else
+        rm -f "$SETTINGS_LOCAL_PATH"
+    fi
+    rm -f "${SETTINGS_BACKUP_FILE:-}"
+    unset SETTINGS_LOCAL_PATH SETTINGS_BACKUP_FILE SETTINGS_BACKUP_EXISTS
 }
 
 autonomous_settings_json() {
     printf '%s\n' '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep","Agent","WebFetch","WebSearch","NotebookEdit","mcp__*"],"defaultMode":"bypassPermissions"}}'
 }
 
-# Start a background process that polls for the done sentinel file.
-# When found, it either signals a target PID or the current process group.
+# --- Sentinel watcher: polls done file, signals target on completion ---
 start_sentinel_watcher() {
-    local target_pid="$1"
-    local signal_mode="${2:-pid}"
-    local poll_interval="${3:-1}"
+    local target_pid="$1" mode="${2:-pid}" interval="${3:-1}"
     local done_file="${DONE_FILE:-/tmp/.agentmill-done}"
-    local signal_flag_file="${SENTINEL_SIGNAL_FLAG_FILE:-/tmp/.agentmill-sentinel-signal}"
-
+    local flag_file="${SENTINEL_SIGNAL_FLAG_FILE:-/tmp/.agentmill-sentinel-signal}"
     (
         while kill -0 "$target_pid" 2>/dev/null; do
             if [[ -f "$done_file" ]]; then
-                sleep 2  # let Claude finish writing
-                case "$signal_mode" in
-                    pid)
-                        kill -TERM "$target_pid" 2>/dev/null || true
-                        ;;
-                    process_group)
-                        : > "$signal_flag_file"
-                        kill -TERM 0 2>/dev/null || true
-                        ;;
-                    *)
-                        echo "Unknown sentinel watcher mode: $signal_mode" >&2
-                        ;;
-                esac
+                sleep 2
+                if [[ "$mode" == "process_group" ]]; then
+                    : > "$flag_file"
+                    kill -TERM 0 2>/dev/null || true
+                else
+                    kill -TERM "$target_pid" 2>/dev/null || true
+                fi
                 break
             fi
-            sleep "$poll_interval"
+            sleep "$interval"
         done
     ) &
     SENTINEL_WATCHER_PID=$!
 }
 
 stop_sentinel_watcher() {
-    if [[ -n "${SENTINEL_WATCHER_PID:-}" ]]; then
-        kill "$SENTINEL_WATCHER_PID" 2>/dev/null || true
-        wait "$SENTINEL_WATCHER_PID" 2>/dev/null || true
-        unset SENTINEL_WATCHER_PID
-    fi
+    [[ -n "${SENTINEL_WATCHER_PID:-}" ]] || return 0
+    kill "$SENTINEL_WATCHER_PID" 2>/dev/null || true
+    wait "$SENTINEL_WATCHER_PID" 2>/dev/null || true
+    unset SENTINEL_WATCHER_PID
 }
 
 push_failure_is_retryable() {
     case "$1" in
-        *"[rejected]"*" (fetch first)"*|*"[rejected]"*" (non-fast-forward)"*|*"non-fast-forward"*)
-            return 0
-            ;;
+        *"[rejected]"*" (fetch first)"*|*"[rejected]"*" (non-fast-forward)"*|*"non-fast-forward"*) return 0 ;;
     esac
-
     return 1
-}
-
-restore_project_settings() {
-    if [[ -z "${SETTINGS_LOCAL_PATH:-}" ]]; then
-        return 0
-    fi
-
-    if [[ "${SETTINGS_BACKUP_EXISTS:-false}" == "true" ]] && [[ -n "${SETTINGS_BACKUP_FILE:-}" ]] && [[ -f "$SETTINGS_BACKUP_FILE" ]]; then
-        cp "$SETTINGS_BACKUP_FILE" "$SETTINGS_LOCAL_PATH"
-    else
-        rm -f "$SETTINGS_LOCAL_PATH"
-    fi
-
-    if [[ -n "${SETTINGS_BACKUP_FILE:-}" ]]; then
-        rm -f "$SETTINGS_BACKUP_FILE"
-    fi
-
-    unset SETTINGS_LOCAL_PATH SETTINGS_BACKUP_FILE SETTINGS_BACKUP_EXISTS
 }

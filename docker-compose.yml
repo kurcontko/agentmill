@@ -9,11 +9,9 @@ x-common-env: &common-env
   EXTRA_PYTHON_TOOLS: ${EXTRA_PYTHON_TOOLS:-}
   AUTO_RALPH_MAX_ITERATIONS: ${AUTO_RALPH_MAX_ITERATIONS:-10}
   AUTO_RALPH_COMPLETION_PROMISE: ${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}
-  # Container hardening: disable auto-updater, telemetry, error reporting
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
   DISABLE_COST_WARNINGS: "1"
   GIT_TERMINAL_PROMPT: "0"
-  # Forward host proxy/TLS settings when set
   HTTP_PROXY: ${HTTP_PROXY:-}
   HTTPS_PROXY: ${HTTPS_PROXY:-}
   NO_PROXY: ${NO_PROXY:-}
@@ -22,164 +20,108 @@ x-common-env: &common-env
 x-agent-base: &agent-base
   build: .
   restart: unless-stopped
-  security_opt:
-    - no-new-privileges:true
-  cap_drop:
-    - ALL
+  security_opt: [no-new-privileges:true]
+  cap_drop: [ALL]
   mem_limit: 4g
   pids_limit: 256
-  volumes: &shared-volumes
-    - ./prompts:/prompts
-    - ./logs:/workspace/logs
-    - ~/.claude.json:/home/agent/.host-claude.json:ro
-    - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
-    - ~/.claude/plugins:/home/agent/.host-plugins:ro
-    - ~/.claude/commands:/home/agent/.claude/commands:ro
-    - ~/.claude/skills:/home/agent/.host-skills:ro
-    - ~/.claude/agents:/home/agent/.host-agents:ro
+
+x-headless-env: &headless-env
+  <<: *common-env
+  MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
+  LOOP_DELAY: ${LOOP_DELAY:-5}
+
+x-multi-agent-env: &multi-agent-env
+  <<: *common-env
+  AGENT_BRANCH: ${AGENT_BRANCH:-}
+  MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
+  LOOP_DELAY: ${LOOP_DELAY:-5}
+
+x-claude-volumes: &claude-volumes
+  - ./prompts:/prompts
+  - ./logs:/workspace/logs
+  - ~/.claude.json:/home/agent/.host-claude.json:ro
+  - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
+  - ~/.claude/plugins:/home/agent/.host-plugins:ro
+  - ~/.claude/commands:/home/agent/.claude/commands:ro
+  - ~/.claude/skills:/home/agent/.host-skills:ro
+  - ~/.claude/agents:/home/agent/.host-agents:ro
+
+x-repo-volumes: &repo-volumes
+  - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
+  - ./prompts:/prompts
+  - ./logs:/workspace/logs
+  - ~/.claude.json:/home/agent/.host-claude.json:ro
+  - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
+  - ~/.claude/plugins:/home/agent/.host-plugins:ro
+  - ~/.claude/commands:/home/agent/.claude/commands:ro
+  - ~/.claude/skills:/home/agent/.host-skills:ro
+  - ~/.claude/agents:/home/agent/.host-agents:ro
+
+x-upstream-volumes: &upstream-volumes
+  - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/upstream
+  - ./prompts:/prompts
+  - ./logs:/workspace/logs
+  - ~/.claude.json:/home/agent/.host-claude.json:ro
+  - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
+  - ~/.claude/plugins:/home/agent/.host-plugins:ro
+  - ~/.claude/commands:/home/agent/.claude/commands:ro
+  - ~/.claude/skills:/home/agent/.host-skills:ro
+  - ~/.claude/agents:/home/agent/.host-agents:ro
+
+x-tui-base: &tui-base
+  <<: *agent-base
+  entrypoint: ["/entrypoint-tui.sh"]
+  tty: true
+  stdin_open: true
+  restart: "no"
 
 services:
-# --- Headless (default) ---------------------------------------
-# Autonomous loop, no UI. Output goes to ./logs/.
-# Usage: docker compose up headless
   headless:
     <<: *agent-base
     environment:
-      <<: *common-env
+      <<: *headless-env
       AGENT_ID: "1"
-      MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
-      LOOP_DELAY: ${LOOP_DELAY:-5}
-    volumes:
-      - ./prompts:/prompts
-      - ./logs:/workspace/logs
-      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
-      - ~/.claude.json:/home/agent/.host-claude.json:ro
-      - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
-      - ~/.claude/plugins:/home/agent/.host-plugins:ro
-      - ~/.claude/commands:/home/agent/.claude/commands:ro
-      - ~/.claude/skills:/home/agent/.host-skills:ro
-      - ~/.claude/agents:/home/agent/.host-agents:ro
+    volumes: *repo-volumes
 
-# --- Multi-agent: independent clones --------------------------
-# Mounts repo as upstream. Each agent clones into its own
-# workspace and syncs via git push/pull. No race conditions.
-#
-# Usage:
-#   docker compose up agent-1 agent-2 agent-3
-#
-# Different prompts/roles per agent:
-#   PROMPT_FILE_1=/prompts/core.md PROMPT_FILE_2=/prompts/tests.md \
-#     docker compose up agent-1 agent-2
-#
-# All agents on same branch (they'll rebase on conflict):
-#   AGENT_BRANCH=main docker compose up agent-1 agent-2
   agent-1:
     <<: *agent-base
     environment:
-      <<: *common-env
+      <<: *multi-agent-env
       AGENT_ID: "1"
-      AGENT_BRANCH: ${AGENT_BRANCH:-}
-      MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
-      LOOP_DELAY: ${LOOP_DELAY:-5}
       PROMPT_FILE: ${PROMPT_FILE_1:-/prompts/PROMPT.md}
-    volumes:
-      - ./prompts:/prompts
-      - ./logs:/workspace/logs
-      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/upstream
-      - ~/.claude.json:/home/agent/.host-claude.json:ro
-      - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
-      - ~/.claude/plugins:/home/agent/.host-plugins:ro
-      - ~/.claude/commands:/home/agent/.claude/commands:ro
-      - ~/.claude/skills:/home/agent/.host-skills:ro
-      - ~/.claude/agents:/home/agent/.host-agents:ro
+    volumes: *upstream-volumes
 
   agent-2:
     <<: *agent-base
     environment:
-      <<: *common-env
+      <<: *multi-agent-env
       AGENT_ID: "2"
-      AGENT_BRANCH: ${AGENT_BRANCH:-}
-      MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
-      LOOP_DELAY: ${LOOP_DELAY:-5}
       PROMPT_FILE: ${PROMPT_FILE_2:-/prompts/PROMPT.md}
-    volumes:
-      - ./prompts:/prompts
-      - ./logs:/workspace/logs
-      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/upstream
-      - ~/.claude.json:/home/agent/.host-claude.json:ro
-      - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
-      - ~/.claude/plugins:/home/agent/.host-plugins:ro
-      - ~/.claude/commands:/home/agent/.claude/commands:ro
-      - ~/.claude/skills:/home/agent/.host-skills:ro
-      - ~/.claude/agents:/home/agent/.host-agents:ro
+    volumes: *upstream-volumes
 
   agent-3:
     <<: *agent-base
     environment:
-      <<: *common-env
+      <<: *multi-agent-env
       AGENT_ID: "3"
-      AGENT_BRANCH: ${AGENT_BRANCH:-}
-      MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
-      LOOP_DELAY: ${LOOP_DELAY:-5}
       PROMPT_FILE: ${PROMPT_FILE_3:-/prompts/PROMPT.md}
-    volumes:
-      - ./prompts:/prompts
-      - ./logs:/workspace/logs
-      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/upstream
-      - ~/.claude.json:/home/agent/.host-claude.json:ro
-      - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
-      - ~/.claude/plugins:/home/agent/.host-plugins:ro
-      - ~/.claude/commands:/home/agent/.claude/commands:ro
-      - ~/.claude/skills:/home/agent/.host-skills:ro
-      - ~/.claude/agents:/home/agent/.host-agents:ro
+    volumes: *upstream-volumes
 
-# --- Watch mode -----------------------------------------------
-# Autonomous Claude TUI forwarded to your terminal. You observe.
-# Usage: docker compose run watch
   watch:
-    <<: *agent-base
-    entrypoint: ["/entrypoint-tui.sh"]
-    tty: true
-    stdin_open: true
-    restart: "no"
+    <<: *tui-base
     environment:
       <<: *common-env
       PROMPT_FILE: ${PROMPT_FILE:-/prompts/PROMPT.md}
       AUTO_RALPH: ${AUTO_RALPH:-false}
       RESPAWN: ${RESPAWN:-false}
       LOOP_DELAY: ${LOOP_DELAY:-5}
-    volumes:
-      - ./prompts:/prompts
-      - ./logs:/workspace/logs
-      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
-      - ~/.claude.json:/home/agent/.host-claude.json:ro
-      - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
-      - ~/.claude/plugins:/home/agent/.host-plugins:ro
-      - ~/.claude/commands:/home/agent/.claude/commands:ro
-      - ~/.claude/skills:/home/agent/.host-skills:ro
-      - ~/.claude/agents:/home/agent/.host-agents:ro
+    volumes: *repo-volumes
 
-# --- Interactive mode ------------------------------------------
-# Plain Claude TUI. You drive, no automation.
-# Usage: docker compose run interactive
   interactive:
-    <<: *agent-base
-    entrypoint: ["/entrypoint-tui.sh"]
-    tty: true
-    stdin_open: true
-    restart: "no"
+    <<: *tui-base
     environment:
       <<: *common-env
       AUTO_RALPH: "false"
       RESPAWN: "false"
       SKIP_PROMPT: "true"
-    volumes:
-      - ./prompts:/prompts
-      - ./logs:/workspace/logs
-      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
-      - ~/.claude.json:/home/agent/.host-claude.json:ro
-      - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
-      - ~/.claude/plugins:/home/agent/.host-plugins:ro
-      - ~/.claude/commands:/home/agent/.claude/commands:ro
-      - ~/.claude/skills:/home/agent/.host-skills:ro
-      - ~/.claude/agents:/home/agent/.host-agents:ro
+    volumes: *repo-volumes

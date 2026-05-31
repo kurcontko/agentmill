@@ -6,42 +6,29 @@ AUTO_SETUP="${AUTO_SETUP:-true}"
 REPO_SETUP_COMMAND="${REPO_SETUP_COMMAND:-}"
 EXTRA_PYTHON_TOOLS="${EXTRA_PYTHON_TOOLS:-}"
 
-repo_log() {
-    echo "[repo-setup] $*"
-    return 0
-}
+repo_log() { echo "[repo-setup] $*"; }
 
-has_pyproject_dev_extra() {
-    [[ -f pyproject.toml ]] && rg -q '^\[project\.optional-dependencies\]' pyproject.toml && rg -q '^\s*dev\s*=' pyproject.toml
-    local rc=$?
-    return "$rc"
-}
-
-has_pyproject_dev_group() {
-    [[ -f pyproject.toml ]] && rg -q '^\[dependency-groups\]' pyproject.toml && rg -q '^\s*dev\s*=' pyproject.toml
-    local rc=$?
-    return "$rc"
+has_pyproject_field() {
+    local pattern="$1"
+    [[ -f pyproject.toml ]] && rg -q "$pattern" pyproject.toml && rg -q '^\s*dev\s*=' pyproject.toml
 }
 
 activate_venv() {
-    if [[ -d "$REPO_DIR/.venv/bin" ]]; then
-        export PATH="$REPO_DIR/.venv/bin:$PATH"
-        repo_log "Using virtualenv at $REPO_DIR/.venv"
-    fi
+    [[ -d "$REPO_DIR/.venv/bin" ]] && export PATH="$REPO_DIR/.venv/bin:$PATH" && repo_log "Using virtualenv at $REPO_DIR/.venv"
     return 0
 }
 
+ensure_venv() {
+    [[ -d .venv ]] || { repo_log "Creating virtualenv"; python3 -m venv .venv; }
+    . .venv/bin/activate
+    python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+}
+
 install_extra_python_tools() {
-    if [[ -z "$EXTRA_PYTHON_TOOLS" ]]; then
-        return
-    fi
-
-    if [[ ! -x "$REPO_DIR/.venv/bin/python" ]]; then
-        repo_log "Creating virtualenv for extra Python tools"
-        python3 -m venv "$REPO_DIR/.venv"
-    fi
-
+    [[ -z "$EXTRA_PYTHON_TOOLS" ]] && return
+    [[ -x "$REPO_DIR/.venv/bin/python" ]] || { repo_log "Creating virtualenv for extra tools"; python3 -m venv "$REPO_DIR/.venv"; }
     repo_log "Installing extra Python tools: $EXTRA_PYTHON_TOOLS"
+    # shellcheck disable=SC2086
     "$REPO_DIR/.venv/bin/python" -m pip install --no-cache-dir $EXTRA_PYTHON_TOOLS
 }
 
@@ -56,55 +43,32 @@ fi
 if [[ -n "$REPO_SETUP_COMMAND" ]]; then
     repo_log "Running custom setup command"
     eval "$REPO_SETUP_COMMAND"
-    activate_venv
-    install_extra_python_tools
-    activate_venv
+    activate_venv; install_extra_python_tools; activate_venv
     return 0 2>/dev/null || exit 0
 fi
 
 if [[ -f pyproject.toml ]]; then
     if [[ -f uv.lock ]] && command -v uv >/dev/null 2>&1; then
         uv_args=(sync --frozen)
-        if has_pyproject_dev_extra; then
-            uv_args+=(--extra dev)
-        fi
-        if has_pyproject_dev_group; then
-            uv_args+=(--group dev)
-        fi
+        has_pyproject_field '^\[project\.optional-dependencies\]' && uv_args+=(--extra dev)
+        has_pyproject_field '^\[dependency-groups\]' && uv_args+=(--group dev)
         repo_log "Running: uv ${uv_args[*]}"
         uv "${uv_args[@]}"
-    elif [[ -f poetry.lock ]] && command -v poetry >/dev/null 2>&1; then
+    elif [[ -f poetry.lock ]]; then
+        command -v poetry >/dev/null 2>&1 || { repo_log "Installing Poetry"; python3 -m pip install --no-cache-dir poetry; }
         repo_log "Running: poetry install"
         poetry config virtualenvs.in-project true 2>/dev/null || true
-        poetry install --no-interaction
-    elif [[ -f poetry.lock ]]; then
-        # Poetry lockfile exists but poetry not installed — install it, then use it
-        repo_log "Installing Poetry and running: poetry install"
-        python3 -m pip install --no-cache-dir poetry
-        poetry config virtualenvs.in-project true 2>/dev/null || true
-        poetry install --no-interaction
+        poetry install --no-interaction # NOSONAR: preserve Poetry defaults for user-controlled repo setup.
     else
-        if [[ ! -d .venv ]]; then
-            repo_log "Creating virtualenv"
-            python3 -m venv .venv
-        fi
-        repo_log "Installing project dependencies with pip"
-        . .venv/bin/activate
-        python -m pip install --no-cache-dir --upgrade pip setuptools wheel
-        if has_pyproject_dev_extra; then
+        ensure_venv
+        if has_pyproject_field '^\[project\.optional-dependencies\]'; then
             python -m pip install --no-cache-dir -e '.[dev]'
         else
             python -m pip install --no-cache-dir -e .
         fi
     fi
 elif [[ -f requirements.txt ]]; then
-    if [[ ! -d .venv ]]; then
-        repo_log "Creating virtualenv"
-        python3 -m venv .venv
-    fi
-    repo_log "Installing requirements.txt"
-    . .venv/bin/activate
-    python -m pip install --no-cache-dir --upgrade pip setuptools wheel
+    ensure_venv
     python -m pip install --no-cache-dir -r requirements.txt
 fi
 

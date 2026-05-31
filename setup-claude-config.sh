@@ -1,196 +1,183 @@
 #!/usr/bin/env bash
 # Merges host Claude config into the container's ~/.claude.json
-# and sets up plugins with corrected paths.
-# Called from entrypoints before launching Claude Code.
+# and sets up plugins/skills/agents with corrected paths.
 set -euo pipefail
 
-HOST_CONFIG="/home/agent/.host-claude.json"
-TARGET_CONFIG="$HOME/.claude.json"
-HOST_SETTINGS="/home/agent/.claude/settings.host.json"
-TARGET_SETTINGS="/home/agent/.claude/settings.json"
+HOST_CONFIG="${HOST_CONFIG:-/home/agent/.host-claude.json}"
+TARGET_CONFIG="${TARGET_CONFIG:-$HOME/.claude.json}"
+HOST_SETTINGS="${HOST_SETTINGS:-/home/agent/.claude/settings.host.json}"
+TARGET_SETTINGS="${TARGET_SETTINGS:-/home/agent/.claude/settings.json}"
 HOST_PLUGINS="/home/agent/.host-plugins"
 TARGET_PLUGINS="/home/agent/.claude/plugins"
 HOST_SKILLS="/home/agent/.host-skills"
 TARGET_SKILLS="/home/agent/.claude/skills"
 HOST_AGENTS="/home/agent/.host-agents"
 TARGET_AGENTS="/home/agent/.claude/agents"
-DEFAULT_TRUSTED_PATHS="/workspace/repo /workspace/upstream"
+DEFAULT_TRUSTED_PATHS="${DEFAULT_TRUSTED_PATHS:-/workspace/repo /workspace/upstream}"
 
-# --- Merge ~/.claude.json (MCP servers, plugins) ----------------------------
-if [[ -f "$HOST_CONFIG" ]]; then
-    python3 -c "
-import json, os
+export HOST_CONFIG TARGET_CONFIG HOST_SETTINGS TARGET_SETTINGS DEFAULT_TRUSTED_PATHS
 
-host = json.load(open('$HOST_CONFIG'))
-target = {}
-if os.path.exists('$TARGET_CONFIG'):
-    target = json.load(open('$TARGET_CONFIG'))
+# --- Merge ~/.claude.json and settings.json in one Python pass ----------------
+merge_error_file="$(mktemp)"
+if ! python3 2>"$merge_error_file" << 'PYEOF'
+import json, os, sys
 
-target['hasCompletedOnboarding'] = True
+def load(path):
+    if not os.path.isfile(path):
+        return {}
+    with open(path) as f:
+        return json.load(f)
 
-if 'mcpServers' in host:
-    target['mcpServers'] = host['mcpServers']
+def save(path, data):
+    json.dump(data, open(path, "w"), indent=2)
 
-projects = target.get('projects', {})
-host_projects = host.get('projects', {})
+def ensure_dict(value):
+    return value if isinstance(value, dict) else {}
 
-# Merge values from ALL trusted host projects (not just the first).
-# For dict keys (mcpServers etc.), later projects add to earlier ones.
-merged_trusted = {}
-for hp in host_projects.values():
-    if not hp.get('hasTrustDialogAccepted'):
-        continue
-    for key in (
-        'allowedTools',
-        'mcpContextUris',
-        'mcpServers',
-        'enabledMcpjsonServers',
-        'disabledMcpjsonServers',
-        'hasClaudeMdExternalIncludesApproved',
-        'hasClaudeMdExternalIncludesWarningShown',
-    ):
-        if key not in hp:
+def warn(message):
+    print(f"WARN: {message}", file=sys.stderr)
+
+# --- claude.json: merge MCP servers and trusted project config ----------------
+try:
+    host_cfg = ensure_dict(load(os.environ["HOST_CONFIG"]))
+    target_config_path = os.environ["TARGET_CONFIG"]
+    target_cfg = ensure_dict(load(target_config_path))
+    target_cfg["hasCompletedOnboarding"] = True
+
+    if "mcpServers" in host_cfg:
+        target_cfg["mcpServers"] = host_cfg["mcpServers"]
+
+    # Merge all trusted host projects into a single config overlay
+    merged = {}
+    for hp in host_cfg.get("projects", {}).values():
+        if not hp.get("hasTrustDialogAccepted"):
             continue
-        val = hp[key]
-        if isinstance(val, dict):
-            merged_trusted.setdefault(key, {}).update(val)
-        elif isinstance(val, list):
-            existing = merged_trusted.setdefault(key, [])
-            for item in val:
-                if item not in existing:
-                    existing.append(item)
-        else:
-            merged_trusted[key] = val
+        for key in ("allowedTools", "mcpContextUris", "mcpServers",
+                    "enabledMcpjsonServers", "disabledMcpjsonServers",
+                    "hasClaudeMdExternalIncludesApproved",
+                    "hasClaudeMdExternalIncludesWarningShown"):
+            val = hp.get(key)
+            if val is None:
+                continue
+            if isinstance(val, dict):
+                merged.setdefault(key, {}).update(val)
+            elif isinstance(val, list):
+                existing = merged.setdefault(key, [])
+                existing.extend(i for i in val if i not in existing)
+            else:
+                merged[key] = val
 
-for path in '$DEFAULT_TRUSTED_PATHS'.split():
-    project = dict(projects.get(path, {}))
-    for key, val in merged_trusted.items():
-        if key not in project:
-            project[key] = val
-    project['hasTrustDialogAccepted'] = True
-    project['hasTrustDialogHooksAccepted'] = True
+    projects = ensure_dict(target_cfg.get("projects", {}))
+    for path in os.environ["DEFAULT_TRUSTED_PATHS"].split():
+        proj = dict(projects.get(path, {}))
+        for k, v in merged.items():
+            if k not in proj:
+                proj[k] = v
+        proj["hasTrustDialogAccepted"] = True
+        proj["hasTrustDialogHooksAccepted"] = True
 
-    # Auto-enable project .mcp.json servers so agents skip trust prompts
-    mcp_json = os.path.join(path, '.mcp.json')
-    if os.path.isfile(mcp_json):
-        try:
-            mcp_data = json.load(open(mcp_json))
-            mcp_servers = mcp_data.get('mcpServers', {})
-            enabled = project.get('enabledMcpjsonServers', [])
-            for name in mcp_servers:
-                if name not in enabled:
-                    enabled.append(name)
-            if enabled:
-                project['enabledMcpjsonServers'] = enabled
-        except (json.JSONDecodeError, OSError):
-            pass
+        mcp_json = os.path.join(path, ".mcp.json")
+        if os.path.isfile(mcp_json):
+            try:
+                servers = ensure_dict(load(mcp_json)).get("mcpServers", {})
+                enabled = proj.get("enabledMcpjsonServers", [])
+                enabled.extend(n for n in servers if n not in enabled)
+                if enabled:
+                    proj["enabledMcpjsonServers"] = enabled
+            except (json.JSONDecodeError, OSError) as exc:
+                warn(f"skipping malformed MCP config {mcp_json}: {exc}")
+        projects[path] = proj
 
-    projects[path] = project
+    target_cfg["projects"] = projects
+    save(target_config_path, target_cfg)
+except (json.JSONDecodeError, OSError, TypeError) as exc:
+    warn(f"failed to merge claude.json: {exc}")
 
-target['projects'] = projects
+# --- settings.json: permissions + plugins + hooks ----------------------------
+try:
+    host_settings_path = os.environ["HOST_SETTINGS"]
+    target_settings_path = os.environ["TARGET_SETTINGS"]
+    if os.path.isfile(host_settings_path):
+        host_settings = ensure_dict(load(host_settings_path))
+        target_settings = ensure_dict(load(target_settings_path))
+        perms = target_settings.get("permissions", {})
+        perms["defaultMode"] = "bypassPermissions"
+        perms["allow"] = list(set(
+            perms.get("allow", []) + host_settings.get("permissions", {}).get("allow", [])
+        ))
+        target_settings["permissions"] = perms
+        target_settings["skipDangerousModePermissionPrompt"] = True
+        target_settings["enableAllProjectMcpServers"] = True
 
-json.dump(target, open('$TARGET_CONFIG', 'w'), indent=2)
-" 2>/dev/null || {
-        if [[ ! -f "$TARGET_CONFIG" ]]; then
-            echo '{"hasCompletedOnboarding":true}' > "$TARGET_CONFIG"
-        fi
-    }
+        for key in ("enabledPlugins", "hooks"):
+            if key in host_settings:
+                target_settings[key] = host_settings[key]
+        if "env" in host_settings:
+            env = target_settings.get("env", {})
+            env.update(host_settings["env"])
+            target_settings["env"] = env
+
+        save(target_settings_path, target_settings)
+except (json.JSONDecodeError, OSError, TypeError) as exc:
+    warn(f"failed to merge settings.json: {exc}")
+PYEOF
+then
+    echo "[setup-claude-config] WARN: failed to merge host Claude config/settings:" >&2
+fi
+if [[ -s "$merge_error_file" ]]; then
+    sed 's/^/[setup-claude-config]   /' "$merge_error_file" >&2 || true
+fi
+rm -f "$merge_error_file"
+
+# Fallback: ensure claude.json exists
+if [[ ! -f "$TARGET_CONFIG" ]]; then
+    echo '{"hasCompletedOnboarding":true}' > "$TARGET_CONFIG"
 fi
 
-# --- Merge settings.json (permissions + plugin config) ----------------------
-if [[ -f "$HOST_SETTINGS" ]]; then
-    python3 -c "
-import json, os
-
-host = json.load(open('$HOST_SETTINGS'))
-target = {}
-if os.path.exists('$TARGET_SETTINGS'):
-    target = json.load(open('$TARGET_SETTINGS'))
-
-perms = target.get('permissions', {})
-perms['defaultMode'] = 'bypassPermissions'
-
-host_allow = host.get('permissions', {}).get('allow', [])
-target_allow = perms.get('allow', [])
-perms['allow'] = list(set(target_allow + host_allow))
-target['permissions'] = perms
-target['skipDangerousModePermissionPrompt'] = True
-target['enableAllProjectMcpServers'] = True
-
-if 'enabledPlugins' in host:
-    target['enabledPlugins'] = host['enabledPlugins']
-
-# Forward hooks from host settings
-if 'hooks' in host:
-    target['hooks'] = host['hooks']
-
-# Forward env vars from host settings
-if 'env' in host:
-    target_env = target.get('env', {})
-    target_env.update(host['env'])
-    target['env'] = target_env
-
-json.dump(target, open('$TARGET_SETTINGS', 'w'), indent=2)
-" 2>/dev/null || true
-fi
-
-# --- Copy plugins and fix paths ---------------------------------------------
+# --- Copy and fix plugins -----------------------------------------------------
 if [[ -d "$HOST_PLUGINS" ]] && [[ "$(ls -A "$HOST_PLUGINS" 2>/dev/null)" ]]; then
-    # Copy plugin files to writable location
     mkdir -p "$TARGET_PLUGINS"
     cp -a "$HOST_PLUGINS"/. "$TARGET_PLUGINS"/ 2>/dev/null || true
 
-    # Fix installed_plugins.json - rewrite host home path to container home
-    MANIFEST="$TARGET_PLUGINS/installed_plugins.json"
-    if [[ -f "$MANIFEST" ]]; then
-        python3 -c "
-import json, re, os
+    # Fix paths in plugin manifests
+    for manifest in "$TARGET_PLUGINS/installed_plugins.json" "$TARGET_PLUGINS/known_marketplaces.json"; do
+        [[ -f "$manifest" ]] || continue
+        if ! python3 - "$manifest" <<'PY'
+import json, re
+import sys
 
-manifest = json.load(open('$MANIFEST'))
-
-# Find and replace any home directory paths with container path
-for plugin_id, entries in manifest.get('plugins', {}).items():
-    for entry in entries:
-        path = entry.get('installPath', '')
-        # Replace host .claude/plugins path with container path
-        entry['installPath'] = re.sub(
-            r'^.*/\.claude/plugins/',
-            '/home/agent/.claude/plugins/',
-            path
+manifest = sys.argv[1]
+data = json.load(open(manifest))
+if manifest.endswith("/installed_plugins.json"):
+    for entries in data.get("plugins", {}).values():
+        for entry in entries:
+            path = entry.get("installPath", "")
+            entry["installPath"] = re.sub(
+                r"^.*/\.claude/plugins/",
+                "/home/agent/.claude/plugins/",
+                path,
+            )
+elif manifest.endswith("/known_marketplaces.json"):
+    for marketplace in data.values():
+        path = marketplace.get("installLocation", "")
+        marketplace["installLocation"] = re.sub(
+            r"^.*/\.claude/plugins/",
+            "/home/agent/.claude/plugins/",
+            path,
         )
+json.dump(data, open(manifest, "w"), indent=2)
+PY
+        then
+            echo "[setup-claude-config] WARN: failed to rewrite plugin manifest paths: $manifest" >&2
+        fi
+    done
+fi
 
-json.dump(manifest, open('$MANIFEST', 'w'), indent=2)
-" 2>/dev/null || true
+# --- Copy user skills and agents ---------------------------------------------
+for pair in "$HOST_SKILLS:$TARGET_SKILLS" "$HOST_AGENTS:$TARGET_AGENTS"; do
+    src="${pair%%:*}" dst="${pair##*:}"
+    if [[ -d "$src" ]] && [[ "$(ls -A "$src" 2>/dev/null)" ]]; then
+        mkdir -p "$dst"
+        cp -a "$src"/. "$dst"/ 2>/dev/null || true
     fi
-
-    MARKETPLACES="$TARGET_PLUGINS/known_marketplaces.json"
-    if [[ -f "$MARKETPLACES" ]]; then
-        python3 -c "
-import json, re, os
-
-marketplaces = json.load(open('$MARKETPLACES'))
-
-for marketplace in marketplaces.values():
-    install_path = marketplace.get('installLocation', '')
-    marketplace['installLocation'] = re.sub(
-        r'^.*/\.claude/plugins/',
-        '/home/agent/.claude/plugins/',
-        install_path
-    )
-
-json.dump(marketplaces, open('$MARKETPLACES', 'w'), indent=2)
-" 2>/dev/null || true
-    fi
-fi
-
-# --- Copy user skills ----------------------------------------------------------
-if [[ -d "$HOST_SKILLS" ]] && [[ "$(ls -A "$HOST_SKILLS" 2>/dev/null)" ]]; then
-    mkdir -p "$TARGET_SKILLS"
-    cp -a "$HOST_SKILLS"/. "$TARGET_SKILLS"/ 2>/dev/null || true
-fi
-
-# --- Copy user agents ----------------------------------------------------------
-if [[ -d "$HOST_AGENTS" ]] && [[ "$(ls -A "$HOST_AGENTS" 2>/dev/null)" ]]; then
-    mkdir -p "$TARGET_AGENTS"
-    cp -a "$HOST_AGENTS"/. "$TARGET_AGENTS"/ 2>/dev/null || true
-fi
+done
