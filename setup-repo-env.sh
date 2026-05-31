@@ -58,7 +58,7 @@ if [[ -f pyproject.toml ]]; then
         command -v poetry >/dev/null 2>&1 || { repo_log "Installing Poetry"; python3 -m pip install --no-cache-dir poetry; }
         repo_log "Running: poetry install"
         poetry config virtualenvs.in-project true 2>/dev/null || true
-        poetry install --no-interaction
+        poetry install --no-interaction # NOSONAR: preserve Poetry defaults for user-controlled repo setup.
     else
         ensure_venv
         if has_pyproject_field '^\[project\.optional-dependencies\]'; then
