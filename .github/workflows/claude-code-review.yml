@@ -83,7 +83,7 @@ jobs:
             are no blocking issues, say that clearly and summarize any residual test or deployment risk.
           claude_args: |
             --model "deepseek-v4-pro[1m]"
-            --max-turns 8
+            --max-turns 40
             --disallowedTools Edit,Write,MultiEdit
 
       - name: Post review summary comment

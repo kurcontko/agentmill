@@ -41,7 +41,7 @@ class PushBranchWithRetriesTests(unittest.TestCase):
         self.worker = self.root / "worker"
         self.logs = self.root / "logs"
         self.helper = (
-            extract_shell_function(Path("entrypoint-common.sh"), "push_failure_is_retryable")
+            extract_shell_function(Path("lib/agentmill/sh/runtime/git.sh"), "push_failure_is_retryable")
             + extract_shell_function(Path("entrypoint.sh"), "push_branch_with_retries")
         )
 
