@@ -4,11 +4,16 @@ LOG_DIR="${LOG_DIR:-/workspace/logs}"
 mkdir -p "$LOG_DIR"
 
 log() {
-    local id="${AGENT_ID:-tui}"
-    local msg
-    msg="[agentmill:${id} $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
+    local msg logfile
+    if [[ -n "${AGENT_ID:-}" ]]; then
+        msg="[agentmill:agent-${AGENT_ID} $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
+        logfile="$LOG_DIR/agent-${AGENT_ID}.log"
+    else
+        msg="[agentmill $(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"
+        logfile="$LOG_DIR/agent.log"
+    fi
     echo "$msg"
-    echo "$msg" >> "$LOG_DIR/agent-${id}.log"
+    echo "$msg" >> "$logfile"
 }
 
 require_auth() {
@@ -18,7 +23,9 @@ require_auth() {
         log "Auth: using CLAUDE_CODE_OAUTH_TOKEN (subscription)"
         [[ -f "$HOME/.claude.json" ]] || printf '%s\n' '{"hasCompletedOnboarding":true}' > "$HOME/.claude.json"
     else
-        log "ERROR: No auth. Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN."
+        log "ERROR: No auth configured."
+        log "  Option 1: Set ANTHROPIC_API_KEY env var (API credits)"
+        log "  Option 2: Set CLAUDE_CODE_OAUTH_TOKEN env var (subscription, from 'claude setup-token')"
         exit 1
     fi
 }

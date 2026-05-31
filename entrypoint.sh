@@ -36,7 +36,10 @@ push_branch_with_retries() {
         if push_output="$(git push --porcelain origin "$branch" 2>&1)"; then return 0; fi
 
         if ! push_failure_is_retryable "$push_output"; then
-            log "ERROR: git push failed permanently: $push_output"
+            log "ERROR: git push failed permanently for branch $branch"
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && log "git push: $line"
+            done <<< "$push_output"
             return 1
         fi
         [[ "$retry" -lt "$max_retries" ]] || { log "ERROR: push failed after $max_retries retries"; return 1; }
