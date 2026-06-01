@@ -182,6 +182,7 @@ cmd_logs() {
     if [[ "$session" == true ]]; then
         # Show latest session log for this agent
         local latest
+        # shellcheck disable=SC2012
         latest="$(ls -t "$MILL_DIR/logs"/session_*_iter*.log 2>/dev/null | head -1)"
         if [[ -n "$latest" ]]; then
             echo "=== $(basename "$latest") ==="

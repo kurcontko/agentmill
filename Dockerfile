@@ -10,6 +10,8 @@ COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /uvx /usr/local/bin/
 #       https://code.claude.com/docs/en/changelog
 ARG CLAUDE_CODE_VERSION=2.1.119
 
+# The harness may install ad-hoc project tools in this disposable image; remove
+# Debian's system-pip guard so legacy setup commands still work.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \

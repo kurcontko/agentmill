@@ -14,14 +14,25 @@ extract_function() {
 # the real logger does for the warn path inside resolve_model). Variable
 # state can't leak out of $(...) command substitutions, so the test
 # inspects captured stderr rather than a stub variable.
+# shellcheck disable=SC2329
 log_warn() {
     echo "WARN $*" >&2
 }
 
 eval "$(extract_function resolve_model entrypoint-common.sh)"
+eval "$(extract_function log_claude_version entrypoint-common.sh)"
 
 WARN_LOG="$(mktemp)"
-trap 'rm -f "$WARN_LOG"' EXIT
+LOG_OUTPUT="$(mktemp)"
+TMP_BIN="$(mktemp -d)"
+trap 'rm -f "$WARN_LOG" "$LOG_OUTPUT"; rm -rf "$TMP_BIN"' EXIT
+
+cat > "$TMP_BIN/claude" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "${CLAUDE_VERSION_OUTPUT:-Claude Code 2.1.119}"
+SH
+chmod +x "$TMP_BIN/claude"
+PATH="$TMP_BIN:$PATH"
 
 assert_resolves() {
     local input="$1" expected="$2"
@@ -87,8 +98,58 @@ assert_resolves "" "claude-sonnet-4-6"
 # Resolved models must actually be passed to Claude at launch sites.
 assert_file_contains "entrypoint.sh" "export MODEL"
 assert_file_contains "entrypoint-tui.sh" "export MODEL"
-assert_file_contains "entrypoint.sh" '--model "$MODEL" \'
+# shellcheck disable=SC2016
+assert_file_contains "entrypoint.sh" '--model "$MODEL"'
+# shellcheck disable=SC2016
 assert_file_contains "entrypoint-tui.sh" 'claude --model "$MODEL" || true'
+# shellcheck disable=SC2016
 assert_file_contains "auto-trust.exp" 'set model [expr {[info exists env(MODEL)] ? $env(MODEL) : "sonnet"}]'
+
+log() {
+    echo "LOG $*" >> "$LOG_OUTPUT"
+}
+
+log_warn() {
+    echo "WARN $*" >> "$LOG_OUTPUT"
+}
+
+assert_log_contains() {
+    local expected="$1"
+    if ! grep -Fq -- "$expected" "$LOG_OUTPUT"; then
+        echo "FAIL: expected log output to contain: $expected" >&2
+        echo "actual log output:" >&2
+        cat "$LOG_OUTPUT" >&2
+        return 1
+    fi
+}
+
+assert_log_not_contains() {
+    local unexpected="$1"
+    if grep -Fq -- "$unexpected" "$LOG_OUTPUT"; then
+        echo "FAIL: expected log output not to contain: $unexpected" >&2
+        echo "actual log output:" >&2
+        cat "$LOG_OUTPUT" >&2
+        return 1
+    fi
+}
+
+: > "$LOG_OUTPUT"
+CLAUDE_VERSION_OUTPUT="Claude Code 2.1.119" log_claude_version "claude-opus-4-7"
+assert_log_contains "Claude Code CLI version: 2.1.119"
+assert_log_not_contains "silent downshift likely"
+
+: > "$LOG_OUTPUT"
+CLAUDE_VERSION_OUTPUT="Claude Code 2.1.110" log_claude_version "claude-opus-4-7"
+assert_log_contains "Claude Code CLI version: 2.1.110"
+assert_log_contains "older than the floor 2.1.111"
+
+: > "$LOG_OUTPUT"
+CLAUDE_VERSION_OUTPUT="Claude Code 2.1.110" log_claude_version "claude-sonnet-4-6"
+assert_log_contains "Claude Code CLI version: 2.1.110"
+assert_log_not_contains "silent downshift likely"
+
+: > "$LOG_OUTPUT"
+CLAUDE_VERSION_OUTPUT="claude dev build" log_claude_version "claude-opus-4-7"
+assert_log_contains "Could not parse claude CLI version"
 
 echo "PASS test_resolve_model"
