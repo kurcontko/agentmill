@@ -8,6 +8,8 @@ updates:
       time: "04:00"
       timezone: Etc/UTC
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: ci
       include: scope
@@ -20,6 +22,8 @@ updates:
       time: "04:30"
       timezone: Etc/UTC
     open-pull-requests-limit: 5
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: ci
       include: scope
