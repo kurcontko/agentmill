@@ -31,7 +31,9 @@ Rules:
 
 ### Orient (be fast — skim, don't study)
 
-From the shared repo root, run in parallel:
+**First, re-read `PROMPT.md` from disk.** The operator may have edited it between sessions to steer the loop; your prior beliefs about the task rules are stale. This is the manual-steering escape hatch — respect it.
+
+Then from the shared repo root, run in parallel:
 ```bash
 cat TASK.md 2>/dev/null || true
 cat PROGRESS.md 2>/dev/null || true
@@ -43,6 +45,8 @@ git worktree list
 Then run the fast verifier (redirect to file, read only the summary/tail) from the checkout where you will do the work.
 Now you know: what's done, what's actually broken, what to do next, what's already claimed, and whether a worktree already exists for the task.
 Skip README unless you need it for the area you're about to touch.
+
+Before claiming, also scan PROGRESS.md for **failed approaches** logged by prior sessions — do not re-attempt anything you find there without a new hypothesis.
 
 ### Claim
 
@@ -68,12 +72,23 @@ Do not edit code, run task verifiers, or make git commits until you are inside t
 - Do all code edits, tests, and git operations in the task worktree.
 - The shared repo root is for coordination only: `TASK.md`, `PROGRESS.md`, and `current_tasks/`.
 - One logical change at a time. Follow existing patterns.
-- Tests: add for new behavior, update for changed behavior.
+- **Test-first.** Every new module gets a test file BEFORE implementation. When you find a bug, write a failing test that reproduces it BEFORE fixing it. No exceptions, even for one-line fixes — the test is the receipt that the fix worked.
+- **Fast inner loop, full suite at the gate.** Use the project's fast subset (e.g. `pytest -q -m 'not slow'`, `pytest --fast`, `npm test -- --shard`, `cargo test --lib`) after every change. Run the full suite only before commit. **You cannot tell time** — do not burn a session on a 30-minute suite when a 1-minute subset catches the same regression.
 - Max 3 serious attempts per sub-problem, then document blocker and change approach.
 - If task requires recent knowledge or documentation do not hesitate to use web search. It's recommended to ground your work if needed.
 - If stuck on a broad problem, decompose: split by test, by component, by file. Compare against known-good implementations when available.
-- If a change breaks passing behavior, fix that before moving on.
+- If a change breaks passing behavior, fix that before moving on. Never "fix it later."
 - Record new subtasks on disk in the shared repo root so parallel agents can pick them up.
+
+#### When stuck — escalate, don't flail
+
+If you have spent more than ~20% of your token budget on the same failing check without measurable progress (error not shrinking, pass rate not rising, search not narrowing), **stop coding**. Append a `STUCK:` block to `PROGRESS.md` containing:
+
+- The symptom (one line; what's failing, where).
+- Three hypotheses you ruled out, each with one line on how you ruled it out.
+- The next thing you would try.
+
+Then exit. A fresh respawn often sees the bug instantly because its context isn't poisoned by your dead-end traces. Flailing burns tokens; stopping creates a handoff the next session can act on.
 
 ### Persist & Exit
 
@@ -88,6 +103,23 @@ Before exit:
 5. Sync or publish the worktree branch according to the repo workflow.
 6. Do not leave unpublished or unmerged changes stranded only in the worktree.
 7. Leave both the shared repo root and the task worktree clean and restartable.
+
+#### Failed approaches log — long-term memory across sessions
+
+Maintain a `## Failed approaches` subsection in `PROGRESS.md`. If you ruled out an approach this session, add a one-line entry: **what you tried, why it failed (one sentence)**. Future sessions read this before retrying anything broad — that is the *only* mechanism keeping a respawning loop from re-attempting the same dead end forever.
+
+Example: *"Tried `Tsit5` for the perturbation ODE — diverges at high k (system too stiff). Switched to `Kvaerno5`."*
+
+This is the agent's portable memory. The commit log records *what you did*; the failed-approaches log records *what not to do next time*.
+
+#### Completion sentinel
+
+When (and only when) the verifier passed and `PROGRESS.md` is updated:
+
+1. `touch /tmp/.agentmill-done`
+2. Emit the literal string `DONE` as the **last line** of stdout.
+
+The file touch is for the docker harness; the `DONE` line is a redundant signal for harnesses (or operators) that gate on output. **Never emit `DONE` for partial progress, blocked tasks, or `STUCK:` exits** — those exit cleanly without the sentinel, and the harness respawns you.
 
 ---
 
@@ -166,5 +198,6 @@ $FAST_TEST_COMMAND > /tmp/test.log 2>&1; tail -30 /tmp/test.log
 - Don't declare success without verifier evidence.
 - Don't commit source changes from the shared repo root.
 - Don't spawn nested agents/sessions/containers unless operator asked.
+- **No fudge factors.** Never tune a constant, add an `abs(...)`, widen a tolerance, mark a test `xfail`, comment out an assertion, change the expected value, or skip a test to make a check pass. If you are tempted, you have not isolated the bug — stop and bisect upstream. A green suite that hides a real failure is worse than a red suite that names it.
 - **ONE TASK THEN EXIT. This is the #1 rule. After committing your task, run `touch /tmp/.agentmill-done` immediately.**
 Do not scan for more work. Do not read `TASK.md` again. Do not "pick the next task." The harness handles iteration — you handle exactly one task per session, period.**

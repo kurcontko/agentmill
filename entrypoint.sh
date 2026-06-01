@@ -18,6 +18,14 @@ DONE_FILE="${DONE_FILE:-/tmp/.agentmill-done}"
 # shellcheck source=/entrypoint-common.sh
 . /entrypoint-common.sh
 
+# Resolve friendly aliases (opus / sonnet / haiku / opus-4.7 / etc.) to full
+# Claude model IDs — see resolve_model() in entrypoint-common.sh for rationale.
+MODEL_RAW="$MODEL"
+MODEL="$(resolve_model "$MODEL_RAW")"
+export MODEL
+[[ "$MODEL" != "$MODEL_RAW" ]] && log "Resolved MODEL '$MODEL_RAW' -> '$MODEL'"
+log_claude_version "$MODEL"
+
 # — State ————————————————————————————————————————
 ITERATION=0
 SHUTTING_DOWN=false
