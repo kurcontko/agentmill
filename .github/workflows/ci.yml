@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "split/**"]
   pull_request:
-    branches: [main]
+    branches: [main, "split/**"]
   workflow_dispatch:
 
 permissions:

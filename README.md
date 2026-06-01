@@ -38,6 +38,8 @@ Set one of these in `.env`:
 - **API Key** — set `ANTHROPIC_API_KEY`
 - **OAuth Token** — run `claude setup-token` on the host, set `CLAUDE_CODE_OAUTH_TOKEN`
 
+For GitHub Actions PR review with Claude Code and DeepSeek, see [`docs/claude-code-github-actions.md`](docs/claude-code-github-actions.md).
+
 ## How to Run
 
 Pick the mode that fits your workflow:
