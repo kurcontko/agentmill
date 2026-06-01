@@ -36,17 +36,48 @@ EOF
     exit "${1:-0}"
 }
 
+env_strip_comment() {
+    local line="$1" out="" char quote="" prev="" i
+    for ((i = 0; i < ${#line}; i++)); do
+        char="${line:i:1}"
+        if [[ -z "$quote" ]]; then
+            case "$char" in
+                \"|\')
+                    quote="$char"
+                    ;;
+                '#')
+                    if [[ -z "$out" || "$prev" =~ [[:space:]] ]]; then
+                        break
+                    fi
+                    ;;
+            esac
+        elif [[ "$char" == "$quote" ]]; then
+            quote=""
+        fi
+        out+="$char"
+        prev="$char"
+    done
+    printf '%s' "$out"
+}
+
+env_trim() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+
 # Parse .env file if it exists (handles KEY=value, KEY="value", KEY='value')
 load_env() {
     [[ -f "$MILL_DIR/.env" ]] || return 0
     while IFS= read -r line || [[ -n "$line" ]]; do
-        line="${line%%\#*}"                         # strip comments
+        line="$(env_strip_comment "$line")"
         [[ "$line" =~ ^[[:space:]]*$ ]] && continue # skip blank lines
-        [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
+        [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
         local key="${BASH_REMATCH[1]}" val="${BASH_REMATCH[2]}"
+        val="$(env_trim "$val")"
         val="${val#\"}" val="${val%\"}"              # strip double quotes
         val="${val#\'}" val="${val%\'}"              # strip single quotes
-        val="${val%"${val##*[! ]}"}"                 # trim trailing spaces
         [[ -z "${!key:-}" ]] && export "$key=$val"
     done < "$MILL_DIR/.env"
 }
@@ -116,7 +147,11 @@ cmd_watch() {
 
 cmd_multi() {
     local repo="${1:-}"; shift || true
-    local count="${1:-3}"; shift || true
+    local count="3"
+    if [[ $# -gt 0 && "${1:-}" =~ ^[0-9]+$ ]]; then
+        count="$1"
+        shift
+    fi
     local detach=false model="" iterations=""
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -182,6 +217,7 @@ cmd_logs() {
     if [[ "$session" == true ]]; then
         # Show latest session log for this agent
         local latest
+        # shellcheck disable=SC2012
         latest="$(ls -t "$MILL_DIR/logs"/session_*_iter*.log 2>/dev/null | head -1)"
         if [[ -n "$latest" ]]; then
             echo "=== $(basename "$latest") ==="
@@ -243,7 +279,6 @@ PROMPT
 
 cmd_memory() {
     local memory_dir="$MILL_DIR/memory" topic="" search="" clear=false
-    [[ -n "${REPO_PATH:-}" && -d "$REPO_PATH/memory" ]] && memory_dir="$REPO_PATH/memory"
     [[ -d "$memory_dir" ]] || { echo "No memory directory found."; exit 0; }
 
     while [[ $# -gt 0 ]]; do
