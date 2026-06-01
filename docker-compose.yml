@@ -36,20 +36,11 @@ x-multi-agent-env: &multi-agent-env
   MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
   LOOP_DELAY: ${LOOP_DELAY:-5}
 
-x-claude-volumes: &claude-volumes
-  - ./prompts:/prompts
-  - ./logs:/workspace/logs
-  - ~/.claude.json:/home/agent/.host-claude.json:ro
-  - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
-  - ~/.claude/plugins:/home/agent/.host-plugins:ro
-  - ~/.claude/commands:/home/agent/.claude/commands:ro
-  - ~/.claude/skills:/home/agent/.host-skills:ro
-  - ~/.claude/agents:/home/agent/.host-agents:ro
-
 x-repo-volumes: &repo-volumes
   - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
   - ./prompts:/prompts
   - ./logs:/workspace/logs
+  - ./memory:/workspace/memory
   - ~/.claude.json:/home/agent/.host-claude.json:ro
   - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
   - ~/.claude/plugins:/home/agent/.host-plugins:ro
@@ -61,6 +52,7 @@ x-upstream-volumes: &upstream-volumes
   - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/upstream
   - ./prompts:/prompts
   - ./logs:/workspace/logs
+  - ./memory:/workspace/memory
   - ~/.claude.json:/home/agent/.host-claude.json:ro
   - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro
   - ~/.claude/plugins:/home/agent/.host-plugins:ro
