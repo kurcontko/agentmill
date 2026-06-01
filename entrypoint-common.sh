@@ -22,6 +22,43 @@ log() {
 log_error() { log "ERROR $*"; }
 log_warn()  { log "WARN $*";  }
 
+json_escape() {
+    python3 -c 'import json, sys; print(json.dumps(sys.stdin.read()))'
+}
+
+status_write() {
+    local iter="${1:-${ITERATION:-0}}" state="${2:-unknown}" detail="${3:-}" max_iter="${4:-${MAX_ITERATIONS:-0}}"
+    local agent="${AGENT_ID:-1}" timestamp path lock
+    timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    path="$LOG_DIR/status-${agent}.json"
+    lock="${path}.lock"
+    mkdir -p "$LOG_DIR"
+    if _lock_acquire "$lock" 5; then
+        printf '{"agent":%s,"iteration":%s,"max_iterations":%s,"state":%s,"detail":%s,"timestamp":%s}\n' \
+            "$(printf '%s' "$agent" | json_escape)" \
+            "$iter" \
+            "$max_iter" \
+            "$(printf '%s' "$state" | json_escape)" \
+            "$(printf '%s' "$detail" | json_escape)" \
+            "$(printf '%s' "$timestamp" | json_escape)" > "$path"
+        _lock_release "$lock"
+    else
+        log_warn "status file lock timeout for $agent"
+    fi
+}
+
+iteration_changed_file_count() {
+    local base="${1:-HEAD}" tmp count
+    tmp="$(mktemp)"
+    if git rev-parse --verify "$base^{commit}" >/dev/null 2>&1; then
+        git diff --name-only "$base"..HEAD >> "$tmp" 2>/dev/null || true
+    fi
+    git status --porcelain 2>/dev/null | sed -E 's/^...//' >> "$tmp" || true
+    count="$(sort -u "$tmp" | grep -c . || true)"
+    rm -f "$tmp"
+    printf '%s' "${count:-0}"
+}
+
 require_auth() {
     if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
         log "Auth: using ANTHROPIC_API_KEY"
@@ -126,7 +163,8 @@ push_failure_is_retryable() {
 
 MEMORY_DIR="${MEMORY_DIR:-/workspace/memory}"
 
-# Portable exclusive lock: flock if available, mkdir fallback
+# Portable exclusive lock: flock if available, mkdir fallback.
+# flock mode uses fd 200, so callers should not hold nested locks in one shell.
 _lock_acquire() {
     local lockpath="$1" timeout="${2:-5}" i=0
     if command -v flock >/dev/null 2>&1; then
@@ -243,9 +281,9 @@ claim_task() {
     local task="$1" agent="${2:-${AGENT_ID:-unknown}}"
     local lock="${CLAIMS_FILE}.lock"
     memory_init
-    [[ -f "$CLAIMS_FILE" ]] || printf '# In-progress task claims\n\n' > "$CLAIMS_FILE"
     if _lock_acquire "$lock" 5; then
-        if grep -qF "	${task}" "$CLAIMS_FILE" 2>/dev/null; then
+        [[ -f "$CLAIMS_FILE" ]] || printf '# In-progress task claims\n\n' > "$CLAIMS_FILE"
+        if awk -v task="$task" 'BEGIN { FS = sprintf("%c", 9) } NF >= 3 && $NF == task { found = 1; exit } END { exit found ? 0 : 1 }' "$CLAIMS_FILE" 2>/dev/null; then
             _lock_release "$lock"
             log_warn "claim_task: '$task' already claimed"
             return 1
@@ -264,7 +302,7 @@ release_task() {
     [[ -f "$CLAIMS_FILE" ]] || return 0
     if _lock_acquire "$lock" 5; then
         local tmp; tmp="$(mktemp)"
-        grep -vF "	${task}" "$CLAIMS_FILE" > "$tmp" || true
+        awk -v task="$task" 'BEGIN { FS = sprintf("%c", 9) } !(NF >= 3 && $NF == task)' "$CLAIMS_FILE" > "$tmp"
         mv "$tmp" "$CLAIMS_FILE"
         _lock_release "$lock"
     else

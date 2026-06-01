@@ -101,6 +101,7 @@ else
 fi
 
 prepare_repo_environment "$REPO_DIR"
+status_write 0 starting "configured"
 
 # — Override project settings for autonomous mode ————————
 backup_project_settings ".claude/settings.local.json"
@@ -119,8 +120,11 @@ while true; do
     ITERATION=$((ITERATION + 1))
     ITER_START_TIME="$(date +%s)"
     SESSION_LOG="$LOG_DIR/session_$(date -u '+%Y%m%d_%H%M%S')_iter${ITERATION}.log"
+    ITER_COMMITS_BEFORE="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
+    ITER_HEAD_BEFORE="$(git rev-parse HEAD 2>/dev/null || echo HEAD)"
 
     log "==== Iteration $ITERATION ===="
+    status_write "$ITERATION" running "session:$(basename "$SESSION_LOG")"
 
     [[ -f "$PROMPT_FILE" ]] || { log "ERROR: Prompt file not found at $PROMPT_FILE"; exit 1; }
     rm -f "$DONE_FILE"
@@ -150,11 +154,17 @@ $PROMPT_CONTENT"
 
     log "Claude exited with code $CLAUDE_EXIT"
 
-    if [[ -f "$DONE_FILE" ]]; then log "Agent signaled done"; else log "WARN: Agent exited without signaling done"; fi
+    DONE_SIGNALED=false
+    if [[ -f "$DONE_FILE" ]]; then
+        DONE_SIGNALED=true
+        log "Agent signaled done"
+    else
+        log "WARN: Agent exited without signaling done"
+    fi
 
-    # Capture iteration metrics for results log
-    ITER_FILES_CHANGED="$(git diff --name-only HEAD 2>/dev/null | wc -l | tr -d ' ')"
-    ITER_COMMITS_BEFORE="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
+    # Capture iteration metrics for results log, including agent-created commits
+    # and untracked files.
+    ITER_FILES_CHANGED="$(iteration_changed_file_count "$ITER_HEAD_BEFORE")"
 
     # Commit changes (controlled by AUTO_COMMIT)
     if [[ -n "$(git status --porcelain)" ]]; then
@@ -187,10 +197,11 @@ $PROMPT_CONTENT"
     ITER_NEW_COMMITS=$((ITER_COMMITS_AFTER - ITER_COMMITS_BEFORE))
     ITER_STATUS="kept"
     [[ "$ITER_FILES_CHANGED" -eq 0 && "$ITER_NEW_COMMITS" -eq 0 ]] && ITER_STATUS="noop"
-    [[ "$CLAUDE_EXIT" -ne 0 ]] && ITER_STATUS="error"
+    [[ "$CLAUDE_EXIT" -ne 0 && "$DONE_SIGNALED" != true ]] && ITER_STATUS="error"
     ITER_DESC="exit=$CLAUDE_EXIT"
-    [[ -f "$DONE_FILE" ]] && ITER_DESC="done"
+    [[ "$DONE_SIGNALED" == true ]] && ITER_DESC="done"
     results_log_append "$ITERATION" "$AGENT_ID" "$ITER_FILES_CHANGED" "$ITER_NEW_COMMITS" "$ITER_STATUS" "$ITER_DESC"
+    status_write "$ITERATION" "$ITER_STATUS" "$ITER_DESC"
 
     # Check iteration limit
     if [[ "$MAX_ITERATIONS" -gt 0 ]] && [[ "$ITERATION" -ge "$MAX_ITERATIONS" ]]; then

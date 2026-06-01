@@ -27,6 +27,8 @@ x-agent-base: &agent-base
 
 x-headless-env: &headless-env
   <<: *common-env
+  PROMPT_FILE: ${PROMPT_FILE:-/prompts/PROMPT.md}
+  AUTO_COMMIT: ${AUTO_COMMIT:-}
   MAX_ITERATIONS: ${MAX_ITERATIONS:-0}
   LOOP_DELAY: ${LOOP_DELAY:-5}
 
