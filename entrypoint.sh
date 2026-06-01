@@ -22,6 +22,7 @@ DONE_FILE="${DONE_FILE:-/tmp/.agentmill-done}"
 # Claude model IDs — see resolve_model() in entrypoint-common.sh for rationale.
 MODEL_RAW="$MODEL"
 MODEL="$(resolve_model "$MODEL_RAW")"
+export MODEL
 [[ "$MODEL" != "$MODEL_RAW" ]] && log "Resolved MODEL '$MODEL_RAW' -> '$MODEL'"
 log_claude_version "$MODEL"
 
@@ -143,6 +144,7 @@ $PROMPT_CONTENT"
     set +e
     claude --dangerously-skip-permissions \
         -p "$PROMPT_CONTENT" \
+        --model "$MODEL" \
         > >(tee "$SESSION_LOG") 2>&1 &
     CLAUDE_PID=$!
     start_sentinel_watcher "$CLAUDE_PID"

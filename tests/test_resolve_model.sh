@@ -33,6 +33,14 @@ assert_resolves() {
     fi
 }
 
+assert_file_contains() {
+    local file="$1" expected="$2"
+    if ! grep -Fq -- "$expected" "$REPO_ROOT/$file"; then
+        echo "FAIL: expected $file to contain: $expected" >&2
+        return 1
+    fi
+}
+
 # Family aliases default to the latest in each family.
 assert_resolves "opus"            "claude-opus-4-7"
 assert_resolves "sonnet"          "claude-sonnet-4-6"
@@ -75,5 +83,12 @@ grep -q "Unknown MODEL alias 'made-up-model'" "$WARN_LOG" \
 
 # Default when no argument supplied.
 assert_resolves "" "claude-sonnet-4-6"
+
+# Resolved models must actually be passed to Claude at launch sites.
+assert_file_contains "entrypoint.sh" "export MODEL"
+assert_file_contains "entrypoint-tui.sh" "export MODEL"
+assert_file_contains "entrypoint.sh" '--model "$MODEL" \'
+assert_file_contains "entrypoint-tui.sh" 'claude --model "$MODEL" || true'
+assert_file_contains "auto-trust.exp" 'set model [expr {[info exists env(MODEL)] ? $env(MODEL) : "sonnet"}]'
 
 echo "PASS test_resolve_model"

@@ -20,6 +20,7 @@ AUTO_RALPH_COMPLETION_PROMISE="${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}"
 # Claude model IDs — see resolve_model() in entrypoint-common.sh for rationale.
 MODEL_RAW="$MODEL"
 MODEL="$(resolve_model "$MODEL_RAW")"
+export MODEL
 [[ "$MODEL" != "$MODEL_RAW" ]] && log "Resolved MODEL '$MODEL_RAW' -> '$MODEL'"
 log_claude_version "$MODEL"
 
@@ -97,7 +98,7 @@ while true; do
     start_sentinel_watcher "$$" process_group
 
     if [[ "${SKIP_PROMPT:-false}" == "true" ]]; then
-        claude || true
+        claude --model "$MODEL" || true
     else
         /auto-trust.exp || true
     fi
