@@ -31,7 +31,7 @@ Rules:
 
 ### Orient (be fast — skim, don't study)
 
-**First, re-read `PROMPT.md` and any `CLAUDE.md` from disk.** The operator may have edited them between sessions to steer the loop; your prior beliefs about the rules are stale. This is the manual-steering escape hatch — respect it.
+**First, re-read `PROMPT.md` from disk.** The operator may have edited it between sessions to steer the loop; your prior beliefs about the task rules are stale. This is the manual-steering escape hatch — respect it.
 
 Then from the shared repo root, run in parallel:
 ```bash
