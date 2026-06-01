@@ -28,6 +28,8 @@ The workflow also passes the same secret through the Claude Code action's `anthr
 
 The workflow passes the scoped repository `GITHUB_TOKEN` to the action so the review path can be validated before this workflow exists on the default branch. The job only runs on same-repository PRs and grants `contents: read`, `pull-requests: write`, `issues: write`, and `actions: read`.
 
+After Claude succeeds, the workflow upserts a single PR summary comment marked with `<!-- agentmill-claude-code-review -->`. This keeps clean reviews visible on the pull request even when Claude has no inline findings to post.
+
 ## Provider notes
 
 - OpenAI Codex GitHub Actions require an OpenAI Platform API key in `OPENAI_API_KEY`; a ChatGPT subscription is not a GitHub Actions credential.
