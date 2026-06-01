@@ -26,6 +26,8 @@ CLAUDE_CODE_EFFORT_LEVEL: max
 
 The workflow also passes the same secret through the Claude Code action's `anthropic_api_key` input. That is needed because the action validates `ANTHROPIC_API_KEY` before launching Claude Code, while the Claude runtime still receives the DeepSeek-style `ANTHROPIC_AUTH_TOKEN` environment configuration.
 
+The workflow passes the scoped repository `GITHUB_TOKEN` to the action so the review path can be validated before this workflow exists on the default branch. The job only runs on same-repository PRs and grants `contents: read`, `pull-requests: write`, `issues: write`, and `actions: read`.
+
 ## Provider notes
 
 - OpenAI Codex GitHub Actions require an OpenAI Platform API key in `OPENAI_API_KEY`; a ChatGPT subscription is not a GitHub Actions credential.
