@@ -1,0 +1,122 @@
+name: Claude Code PR Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main, "split/**"]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+  actions: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  review:
+    name: DeepSeek Claude Code review
+    if: >-
+      ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_BASE_URL: https://api.deepseek.com/anthropic
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.ANTHROPIC_AUTH_TOKEN }}
+      ANTHROPIC_MODEL: "deepseek-v4-pro[1m]"
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "deepseek-v4-pro[1m]"
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "deepseek-v4-pro[1m]"
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: deepseek-v4-flash
+      CLAUDE_CODE_SUBAGENT_MODEL: deepseek-v4-flash
+      CLAUDE_CODE_EFFORT_LEVEL: max
+
+    steps:
+      - name: Skip when auth secret is absent
+        if: env.ANTHROPIC_AUTH_TOKEN == ''
+        run: echo "ANTHROPIC_AUTH_TOKEN is not configured; skipping Claude Code review."
+
+      - name: Checkout repository
+        if: env.ANTHROPIC_AUTH_TOKEN != ''
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Review pull request
+        id: claude
+        if: env.ANTHROPIC_AUTH_TOKEN != ''
+        uses: anthropics/claude-code-action@787c5a0ce96a9a6cfb050ea0c8f4c05f2447c251 # v1.0.133
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          anthropic_api_key: ${{ env.ANTHROPIC_AUTH_TOKEN }}
+          use_sticky_comment: "true"
+          classify_inline_comments: "false"
+          include_fix_links: "false"
+          settings: |
+            {
+              "env": {
+                "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+                "ANTHROPIC_AUTH_TOKEN": "${{ env.ANTHROPIC_AUTH_TOKEN }}",
+                "ANTHROPIC_MODEL": "deepseek-v4-pro[1m]",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "deepseek-v4-pro[1m]",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "deepseek-v4-pro[1m]",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "deepseek-v4-flash",
+                "CLAUDE_CODE_SUBAGENT_MODEL": "deepseek-v4-flash",
+                "CLAUDE_CODE_EFFORT_LEVEL": "max"
+              }
+            }
+          prompt: |
+            Review pull request #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+
+            Do not edit files, create commits, push branches, or open pull requests.
+            Focus on correctness, CI/workflow behavior, shell scripts, Docker changes, Python tests,
+            secret-handling, and regressions that could break AgentMill users.
+
+            Leave concise, actionable review comments only for issues with concrete impact. If there
+            are no blocking issues, say that clearly and summarize any residual test or deployment risk.
+          claude_args: |
+            --model "deepseek-v4-pro[1m]"
+            --max-turns 8
+            --disallowedTools Edit,Write,MultiEdit
+
+      - name: Post review summary comment
+        if: env.ANTHROPIC_AUTH_TOKEN != '' && steps.claude.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          marker='<!-- agentmill-claude-code-review -->'
+          body_file="$(mktemp)"
+          {
+            printf '%s\n' "$marker"
+            printf '### Claude Code PR Review\n\n'
+            printf 'DeepSeek-backed Claude Code review completed successfully for `%s`.\n\n' "$HEAD_SHA"
+            printf -- '- Model: `deepseek-v4-pro[1m]`\n'
+            printf -- '- Run: %s\n\n' "$RUN_URL"
+            printf 'Claude ran in review-only mode with `Edit`, `Write`, and `MultiEdit` denied. '
+            printf 'If no inline findings were posted, the review completed without concrete issues to report.\n'
+          } > "$body_file"
+
+          comment_id="$(
+            gh api "repos/$REPO/issues/$PR_NUMBER/comments" --paginate \
+              --jq '.[] | select(.user.login == "github-actions[bot]" and (.body | contains("<!-- agentmill-claude-code-review -->"))) | .id' \
+              | tail -n 1
+          )"
+
+          if [[ -n "$comment_id" ]]; then
+            gh api "repos/$REPO/issues/comments/$comment_id" -X PATCH -F body=@"$body_file"
+          else
+            gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@"$body_file"
+          fi

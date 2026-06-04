@@ -18,6 +18,13 @@ DONE_FILE="${DONE_FILE:-/tmp/.agentmill-done}"
 # shellcheck source=/entrypoint-common.sh
 . /entrypoint-common.sh
 
+# Resolve friendly aliases (opus / sonnet / haiku / opus-4.7 / etc.) to full
+# Claude model IDs — see resolve_model() in entrypoint-common.sh for rationale.
+MODEL_RAW="$MODEL"
+MODEL="$(resolve_model "$MODEL_RAW")"
+[[ "$MODEL" != "$MODEL_RAW" ]] && log "Resolved MODEL '$MODEL_RAW' -> '$MODEL'"
+log_claude_version "$MODEL"
+
 # — State ————————————————————————————————————————
 ITERATION=0
 SHUTTING_DOWN=false
@@ -53,6 +60,8 @@ push_branch_with_retries() {
 
 require_auth
 merge_host_claude_config
+results_log_init
+memory_init
 configure_git_identity "$GIT_USER" "$GIT_EMAIL" "$AGENT_ID"
 
 # — Workspace setup: auto-detect single/multi-agent/worktree mode —
@@ -126,10 +135,17 @@ while true; do
     log "Running Claude (session log: $SESSION_LOG)..."
     PROMPT_CONTENT="$(cat "$PROMPT_FILE")"
 
+    # Inject iteration context from previous run (Karpathy pattern: carry forward)
+    if [[ "$ITERATION" -gt 1 ]]; then
+        ITER_CTX="$(iteration_context)"
+        PROMPT_CONTENT="$(cat "$ITER_CTX")
+
+$PROMPT_CONTENT"
+    fi
+
     set +e
     claude --dangerously-skip-permissions \
         -p "$PROMPT_CONTENT" \
-        --model "$MODEL" \
         > >(tee "$SESSION_LOG") 2>&1 &
     CLAUDE_PID=$!
     start_sentinel_watcher "$CLAUDE_PID"
@@ -141,6 +157,10 @@ while true; do
     log "Claude exited with code $CLAUDE_EXIT"
 
     if [[ -f "$DONE_FILE" ]]; then log "Agent signaled done"; else log "WARN: Agent exited without signaling done"; fi
+
+    # Capture iteration metrics for results log
+    ITER_FILES_CHANGED="$(git diff --name-only HEAD 2>/dev/null | wc -l | tr -d ' ')"
+    ITER_COMMITS_BEFORE="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
 
     # Commit changes (controlled by AUTO_COMMIT)
     if [[ -n "$(git status --porcelain)" ]]; then
@@ -167,6 +187,16 @@ while true; do
     else
         log "No changes to commit."
     fi
+
+    # Log iteration results (Karpathy autoresearch pattern)
+    ITER_COMMITS_AFTER="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
+    ITER_NEW_COMMITS=$((ITER_COMMITS_AFTER - ITER_COMMITS_BEFORE))
+    ITER_STATUS="kept"
+    [[ "$ITER_FILES_CHANGED" -eq 0 && "$ITER_NEW_COMMITS" -eq 0 ]] && ITER_STATUS="noop"
+    [[ "$CLAUDE_EXIT" -ne 0 ]] && ITER_STATUS="error"
+    ITER_DESC="exit=$CLAUDE_EXIT"
+    [[ -f "$DONE_FILE" ]] && ITER_DESC="done"
+    results_log_append "$ITERATION" "$AGENT_ID" "$ITER_FILES_CHANGED" "$ITER_NEW_COMMITS" "$ITER_STATUS" "$ITER_DESC"
 
     # Check iteration limit
     if [[ "$MAX_ITERATIONS" -gt 0 ]] && [[ "$ITERATION" -ge "$MAX_ITERATIONS" ]]; then

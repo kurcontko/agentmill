@@ -5,32 +5,49 @@ Docker-based framework for running autonomous AI agents (Claude Code) in respawn
 ## Commands
 
 ```bash
-# Build
-docker build -t agentmill .
-DOCKER_DEFAULT_PLATFORM=linux/amd64 docker build -t agentmill .  # macOS
+# CLI (preferred)
+./mill run ~/myrepo                        # headless loop
+./mill run ~/myrepo --model opus --iterations 5
+./mill watch ~/myrepo --ralph              # autonomous TUI with Ralph Loop
+./mill multi ~/myrepo 3                    # 3 parallel agents
+./mill shell ~/myrepo                      # interactive Claude session
+./mill status                              # show agent iteration status
+./mill history                             # show iteration results log
+./mill memory                              # list memory topics
+./mill memory decisions                    # read a memory topic
+./mill memory --search "pattern"           # search across memory
+./mill memory decisions --clear            # clear a memory topic
+./mill diff                                # show recent changes across iterations
+./mill logs 1                              # tail agent-1 logs
+./mill build                               # build container image
+./mill stop                                # stop all services
 
-# Run
-REPO_PATH=/path/to/repo docker compose up headless                  # headless loop
-REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agent-3  # multi-agent
-REPO_PATH=/path/to/repo docker compose run watch                    # autonomous TUI
-REPO_PATH=/path/to/repo docker compose run interactive              # manual TUI
+# Direct docker compose (still works)
+REPO_PATH=/path/to/repo docker compose up headless
+REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agent-3
+REPO_PATH=/path/to/repo docker compose run watch
+REPO_PATH=/path/to/repo docker compose run interactive
 
 # Test
 python3 -m unittest tests.test_entrypoint_retry_limit
 bash tests/test_entrypoint_push_retry.sh
 
 # Lint
-shellcheck entrypoint.sh entrypoint-tui.sh
+shellcheck entrypoint.sh entrypoint-tui.sh mill
 ```
 
 ## Architecture
 
 ```
+mill                   # CLI wrapper — run/watch/multi/shell/status/memory/history
 entrypoint.sh          # Claude headless agent loop
 entrypoint-tui.sh      # Claude interactive TUI mode
+entrypoint-common.sh   # Shared functions: logging, auth, git, settings, sentinel, memory
 setup-repo-env.sh      # Auto-bootstrap repo (uv/poetry/pip detection)
 setup-claude-config.sh # Merge host Claude config into container
-prompts/               # Versioned agent task prompts (PROMPT.md through V7)
+prompts/               # Agent task prompts (PROMPT.md, PROMPT_LITE.md, PROMPT_MEMORY.md)
+memory/                # Shared markdown memory (flock-guarded, multi-agent safe)
+logs/results.tsv       # Iteration results log (Karpathy autoresearch pattern)
 ```
 
 ## Key Patterns
@@ -40,6 +57,8 @@ prompts/               # Versioned agent task prompts (PROMPT.md through V7)
 - **Graceful Shutdown**: Entrypoints trap SIGTERM/SIGINT, complete current session, commit WIP, exit.
 - **Settings Override**: Agents backup `.claude/settings.local.json`, apply permissive config, restore on exit.
 - **Auto-Setup**: Detects `pyproject.toml`/`requirements.txt` and runs appropriate installer (uv > poetry > pip).
+- **Shared Memory**: Agents write to `memory/` via flock-guarded append-only markdown files. Read freely, write safely.
+- **Iteration Log**: Every iteration appends to `logs/results.tsv` (agent, files changed, commits, status). View with `mill history`.
 
 ## Code Conventions
 

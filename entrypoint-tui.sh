@@ -16,11 +16,19 @@ AUTO_RALPH_COMPLETION_PROMISE="${AUTO_RALPH_COMPLETION_PROMISE:-TASK_COMPLETE}"
 # shellcheck source=/entrypoint-common.sh
 . /entrypoint-common.sh
 
+# Resolve friendly aliases (opus / sonnet / haiku / opus-4.7 / etc.) to full
+# Claude model IDs — see resolve_model() in entrypoint-common.sh for rationale.
+MODEL_RAW="$MODEL"
+MODEL="$(resolve_model "$MODEL_RAW")"
+[[ "$MODEL" != "$MODEL_RAW" ]] && log "Resolved MODEL '$MODEL_RAW' -> '$MODEL'"
+log_claude_version "$MODEL"
+
 # log() provided by entrypoint-common.sh
 
 require_auth
 merge_host_claude_config
 configure_git_identity "$GIT_USER" "$GIT_EMAIL"
+memory_init
 
 [[ -d "$REPO_DIR/.git" ]] || [[ -f "$REPO_DIR/.git" ]] || { log "ERROR: No repo at $REPO_DIR"; exit 1; }
 
@@ -89,7 +97,7 @@ while true; do
     start_sentinel_watcher "$$" process_group
 
     if [[ "${SKIP_PROMPT:-false}" == "true" ]]; then
-        claude --model "$MODEL" || true
+        claude || true
     else
         /auto-trust.exp || true
     fi

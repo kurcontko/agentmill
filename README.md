@@ -38,6 +38,8 @@ Set one of these in `.env`:
 - **API Key** — set `ANTHROPIC_API_KEY`
 - **OAuth Token** — run `claude setup-token` on the host, set `CLAUDE_CODE_OAUTH_TOKEN`
 
+For GitHub Actions PR review with Claude Code and DeepSeek, see [`docs/claude-code-github-actions.md`](docs/claude-code-github-actions.md).
+
 ## How to Run
 
 Pick the mode that fits your workflow:
@@ -50,6 +52,9 @@ Claude runs in a loop in the background. No UI — output goes to `./logs/`. Res
 
 ```bash
 REPO_PATH=/path/to/repo docker compose up headless
+
+# Use REPO_PATH from .env, or pass /path/to/repo to override it
+./mill run --iterations 3
 ```
 
 Loop: pull → run Claude → commit → push → wait → repeat.
@@ -103,7 +108,7 @@ AGENT_BRANCH=main REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agen
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
-| `REPO_PATH` | *(required)* | Absolute path to the repo on your host |
+| `REPO_PATH` | *(required unless passed)* | Absolute path to the repo on your host; `mill run/watch/multi/shell [repo]` can override it |
 | `ANTHROPIC_API_KEY` | — | API key auth |
 | `CLAUDE_CODE_OAUTH_TOKEN` | — | OAuth token auth (alternative to API key) |
 | `MODEL` | `sonnet` | Claude model (`sonnet`, `opus`, etc.) |
