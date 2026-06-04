@@ -17,6 +17,13 @@ memory_write sources "https://example.com/source" researcher
 memory_write open_questions "what remains?" researcher
 memory_write failed_approaches "bad path" coder
 
+set +e
+memory_write "../escape" "bad topic" attacker >/dev/null 2>&1
+invalid_rc=$?
+set -e
+[[ "$invalid_rc" -ne 0 ]] || { echo "expected invalid memory topic to fail" >&2; exit 1; }
+[[ ! -f "$TMPDIR/escape.md" ]] || { echo "invalid memory topic escaped MEMORY_DIR" >&2; exit 1; }
+
 python3 - "$MEMORY_DIR" <<'PY'
 import sys
 from pathlib import Path

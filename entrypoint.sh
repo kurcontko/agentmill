@@ -29,6 +29,7 @@ client_select "${AGENTMILL_CLIENT:-${AGENTMILL_PROVIDER:-claude}}"
 
 MODEL_RAW="$MODEL"
 MODEL="$(client_resolve_model "$MODEL_RAW")"
+export MODEL
 [[ "$MODEL" != "$MODEL_RAW" ]] && log "Resolved MODEL '$MODEL_RAW' -> '$MODEL'"
 client_version "$MODEL"
 
@@ -67,7 +68,12 @@ push_branch_with_retries() {
         fi
 
         if ! push_failure_is_retryable "$push_output"; then
-            log "ERROR: git push failed permanently: $push_output"
+            log "ERROR: git push failed permanently for branch $branch"
+            if [[ -n "$push_output" ]]; then
+                while IFS= read -r line || [[ -n "$line" ]]; do
+                    log "git push: $line"
+                done <<< "$push_output"
+            fi
             if declare -F event_emit_kv >/dev/null; then
                 event_emit_kv push.failed branch="$branch" retry="$retry" retryable=false reason="$push_output"
             fi
@@ -209,6 +215,7 @@ event_emit_kv run.configured \
     multi_agent="$MULTI_AGENT" \
     workspace_mode="$AGENTMILL_WORKSPACE_MODE" \
     repo_dir="$REPO_DIR"
+status_write 0 starting "configured"
 
 # — Override project settings for autonomous mode ————————
 client_prepare_project "$REPO_DIR"
@@ -225,14 +232,16 @@ while true; do
 
     ITERATION=$((ITERATION + 1))
     ITER_START_TIME="$(date +%s)"
-    SESSION_LOG="$LOG_DIR/session_$(date -u '+%Y%m%d_%H%M%S')_iter${ITERATION}.log"
+    SESSION_LOG="$LOG_DIR/session_agent-${AGENT_ID}_$(date -u '+%Y%m%d_%H%M%S')_iter${ITERATION}.log"
     ITER_COMMITS_BEFORE="$(git rev-list --count HEAD 2>/dev/null || echo 0)"
     ITER_HEAD_BEFORE="$(git rev-parse HEAD 2>/dev/null || echo HEAD)"
 
     log "==== Iteration $ITERATION ===="
     event_emit_kv iteration.started session_log="$SESSION_LOG" prompt_file="$PROMPT_FILE"
+    status_write "$ITERATION" running "session:$(basename "$SESSION_LOG")"
 
     if ! enforce_mcp_manifest_stability; then
+        status_write "$ITERATION" policy_denied "mcp_manifest_changed"
         results_log_append "$ITERATION" "$AGENT_ID" 0 0 "policy_denied" "mcp_manifest_changed"
         emit_iteration_failed "mcp_manifest_changed" "policy_denied" "mcp_manifest_changed" 0 0 0
         event_emit_kv iteration.completed status="policy_denied" description="mcp_manifest_changed" files_changed=0 commits=0 exit_code=0
@@ -247,12 +256,14 @@ while true; do
     set -e
     if [[ "$PRE_HOOK_RC" -ne 0 ]]; then
         log_warn "pre_iteration hook blocked iteration $ITERATION"
+        status_write "$ITERATION" "policy_${HOOK_LAST_DECISION:-denied}" "pre_iteration:${HOOK_LAST_REASON:-blocked}"
         results_log_append "$ITERATION" "$AGENT_ID" 0 0 "policy_${HOOK_LAST_DECISION:-denied}" "pre_iteration:${HOOK_LAST_REASON:-blocked}"
         emit_iteration_failed "pre_iteration_${HOOK_LAST_DECISION:-denied}" "policy_${HOOK_LAST_DECISION:-denied}" "pre_iteration:${HOOK_LAST_REASON:-blocked}" 0 0 0
         event_emit_kv iteration.completed status="policy_${HOOK_LAST_DECISION:-denied}" description="pre_iteration:${HOOK_LAST_REASON:-blocked}" files_changed=0 commits=0 exit_code=0
         break
     fi
     if ! apply_hook_prompt_file_update; then
+        status_write "$ITERATION" "policy_${HOOK_LAST_DECISION:-denied}" "pre_iteration:${HOOK_LAST_REASON:-blocked}"
         results_log_append "$ITERATION" "$AGENT_ID" 0 0 "policy_${HOOK_LAST_DECISION:-denied}" "pre_iteration:${HOOK_LAST_REASON:-blocked}"
         emit_iteration_failed "pre_iteration_${HOOK_LAST_DECISION:-denied}" "policy_${HOOK_LAST_DECISION:-denied}" "pre_iteration:${HOOK_LAST_REASON:-blocked}" 0 0 0
         event_emit_kv iteration.completed status="policy_${HOOK_LAST_DECISION:-denied}" description="pre_iteration:${HOOK_LAST_REASON:-blocked}" files_changed=0 commits=0 exit_code=0
@@ -316,8 +327,9 @@ $PROMPT_CONTENT"
     event_emit_kv convergence.evaluated gate="$COMPLETION_GATE_NAME" passed="$COMPLETION_ACCEPTED" value="$COMPLETION_GATE_VALUE" threshold="$COMPLETION_GATE_THRESHOLD" evidence="$COMPLETION_GATE_EVIDENCE" hook_decision="${HOOK_LAST_DECISION:-allow}"
     convergence_log_append "$ITERATION" "$AGENT_ID" "$COMPLETION_GATE_NAME" "$COMPLETION_ACCEPTED" "$COMPLETION_GATE_VALUE" "$COMPLETION_GATE_THRESHOLD" "$COMPLETION_GATE_EVIDENCE" "${HOOK_LAST_DECISION:-allow}"
 
-    # Capture iteration metrics for results log
-    ITER_FILES_CHANGED="$(git diff --name-only HEAD 2>/dev/null | wc -l | tr -d ' ')"
+    # Capture iteration metrics for results log, including agent-created commits
+    # and untracked files.
+    ITER_FILES_CHANGED="$(iteration_changed_file_count "$ITER_HEAD_BEFORE")"
 
     set +e
     run_hook post_iteration "$(hook_payload hook=post_iteration exit_code="$CLAUDE_EXIT" done_signaled="$DONE_SIGNALED" completion_accepted="$COMPLETION_ACCEPTED" files_changed="$ITER_FILES_CHANGED" session_log="$SESSION_LOG")"
@@ -394,7 +406,7 @@ $PROMPT_CONTENT"
     ITER_NEW_COMMITS=$((ITER_COMMITS_AFTER - ITER_COMMITS_BEFORE))
     ITER_STATUS="kept"
     [[ "$ITER_FILES_CHANGED" -eq 0 && "$ITER_NEW_COMMITS" -eq 0 ]] && ITER_STATUS="noop"
-    [[ "$CLAUDE_EXIT" -ne 0 ]] && ITER_STATUS="error"
+    [[ "$CLAUDE_EXIT" -ne 0 && "$COMPLETION_ACCEPTED" != true ]] && ITER_STATUS="error"
     [[ "$POST_HOOK_RC" -ne 0 ]] && ITER_STATUS="policy_${HOOK_LAST_DECISION:-denied}"
     [[ "$SHELL_POLICY_RC" -ne 0 ]] && ITER_STATUS="policy_denied"
     [[ "$TOOL_CLASS_POLICY_RC" -ne 0 ]] && ITER_STATUS="policy_denied"
@@ -418,7 +430,8 @@ $PROMPT_CONTENT"
     fi
     results_log_append "$ITERATION" "$AGENT_ID" "$ITER_FILES_CHANGED" "$ITER_NEW_COMMITS" "$ITER_STATUS" "$ITER_DESC" \
         "$USAGE_LAST_INPUT_TOKENS" "$USAGE_LAST_OUTPUT_TOKENS" "$USAGE_LAST_CACHE_CREATION_INPUT_TOKENS" "$USAGE_LAST_CACHE_READ_INPUT_TOKENS" "$USAGE_LAST_TOTAL_TOKENS" "$USAGE_LAST_COST_USD"
-    if [[ "$CLAUDE_EXIT" -ne 0 ]]; then
+    status_write "$ITERATION" "$ITER_STATUS" "$ITER_DESC"
+    if [[ "$CLAUDE_EXIT" -ne 0 && "$COMPLETION_ACCEPTED" != true ]]; then
         emit_iteration_failed "claude_exit" "$ITER_STATUS" "$ITER_DESC" "$CLAUDE_EXIT" "$ITER_FILES_CHANGED" "$ITER_NEW_COMMITS"
     elif [[ "$POST_HOOK_RC" -ne 0 ]]; then
         emit_iteration_failed "post_iteration_${HOOK_LAST_DECISION:-denied}" "$ITER_STATUS" "$ITER_DESC" "$CLAUDE_EXIT" "$ITER_FILES_CHANGED" "$ITER_NEW_COMMITS"

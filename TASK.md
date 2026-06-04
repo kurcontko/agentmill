@@ -97,6 +97,12 @@ Cross-ref: `AUTO_RALPH_COMPLETION_PROMISE=TASK_COMPLETE`, commit `740deff`
 - [x] **`mill stop --on-converge`** flag for headless runs.
 - [x] **`logs/convergence.tsv`** records per-iteration gate evaluation so
   failures to converge are auditable.
+- [x] **Weak-model termination oracle** — implemented as a command contract.
+  After each iteration, AgentMill builds a deterministic artifact bundle, runs
+  `AGENTMILL_TERMINATION_ORACLE_COMMAND`, validates strict verdict JSON, logs
+  `termination.oracle.*` events and `termination_oracle` convergence rows,
+  injects bounded next-iteration context, and in `required` mode allows
+  completion only when deterministic typed gates also prove completion.
 
 ## 4. Iteration log + structured events
 
@@ -373,7 +379,8 @@ Cross-ref: `Dockerfile`, `.github/workflows/`, no published image today.
 
 - [x] **GHCR publish** — `ghcr.io/kurcontko/agentmill:<semver>` and `:latest`
   on tag push.
-- [x] **Cosign / sigstore signing** for the published image.
+- [x] **GitHub artifact provenance attestation** for the published image
+  digest.
 - [x] **Multi-arch build** — `linux/amd64` and `linux/arm64` (Apple Silicon
   hint already in README).
 - [x] **`mill build --pull`** uses prebuilt image when available; falls

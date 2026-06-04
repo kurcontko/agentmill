@@ -1,14 +1,14 @@
 FROM node:22-slim@sha256:7af03b14a13c8cdd38e45058fd957bf00a72bbe17feac43b1c15a689c029c732
 COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /uvx /usr/local/bin/
 
-# Pin Claude Code CLI version. Floor is v2.1.111 — earlier versions ship with
-# a stale alias table (`opus` resolves to 4.6 instead of 4.7) and stale model-
-# capability metadata, so passing `claude --model claude-opus-4-7` silently
-# downshifts to an older Opus. Bump CLAUDE_CODE_VERSION to upgrade the CLI
+# Pin Claude Code CLI version. Floor is v2.1.154 — earlier versions ship with
+# a stale alias table (`opus` resolves below 4.8) and stale model-capability
+# metadata, so passing `claude --model claude-opus-4-8` can silently
+# downshift to an older Opus. Bump CLAUDE_CODE_VERSION to upgrade the CLI
 # (cache-busts the npm install layer cleanly).
 # Refs: https://github.com/anthropics/claude-code/issues/50810
 #       https://code.claude.com/docs/en/changelog
-ARG CLAUDE_CODE_VERSION=2.1.119
+ARG CLAUDE_CODE_VERSION=2.1.154
 ARG OPENCODE_VERSION=0.6.6
 ARG CODEX_CLI_VERSION=latest
 ARG QWEN_CODE_VERSION=latest
@@ -41,7 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # version even if the CLI's internal alias table goes stale again.
 # These are documented overrides:
 # https://code.claude.com/docs/en/model-config
-ENV ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-7 \
+ENV ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-8 \
     ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-6 \
     ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001
 WORKDIR /workspace

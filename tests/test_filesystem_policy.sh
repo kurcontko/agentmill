@@ -5,13 +5,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
+# shellcheck disable=SC2016
 grep -q 'read_only: ${AGENTMILL_READ_ONLY_ROOTFS:-true}' "$REPO_ROOT/docker-compose.yml"
 grep -q '/tmp:rw,nosuid,nodev,mode=1777' "$REPO_ROOT/docker-compose.yml"
 grep -q '/home/agent:rw,nosuid,nodev,uid=1000,gid=1000,mode=700' "$REPO_ROOT/docker-compose.yml"
 grep -q '/workspace:rw,nosuid,nodev,uid=1000,gid=1000,mode=755' "$REPO_ROOT/docker-compose.yml"
 grep -q './logs:/workspace/logs' "$REPO_ROOT/docker-compose.yml"
 grep -q './memory:/workspace/memory' "$REPO_ROOT/docker-compose.yml"
+# shellcheck disable=SC2016
 grep -q '${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo' "$REPO_ROOT/docker-compose.yml"
+# shellcheck disable=SC2016
 grep -q '${REPO_PATH:?Set REPO_PATH in .env}:/workspace/upstream:ro' "$REPO_ROOT/docker-compose.yml"
 grep -q 'AGENTMILL_READ_ONLY_ROOTFS=true' "$REPO_ROOT/.env.example"
 grep -q 'AGENTMILL_WRITE_ROOTS:' "$REPO_ROOT/docker-compose.yml"
@@ -29,6 +32,11 @@ grep -q '/tmp:rw,nosuid,nodev,mode=1777' "$rendered"
 grep -q '/home/agent:rw,nosuid,nodev,uid=1000,gid=1000,mode=700' "$rendered"
 grep -q '/workspace:rw,nosuid,nodev,uid=1000,gid=1000,mode=755' "$rendered"
 
+rendered_flags="$TMPDIR/agentmill-compose-flags.yml"
+REPO_PATH="$REPO_ROOT" PROMPT_FILE=/prompts/custom.md AUTO_COMMIT=off docker compose -f "$REPO_ROOT/docker-compose.yml" config > "$rendered_flags"
+grep -q 'PROMPT_FILE: /prompts/custom.md' "$rendered_flags"
+grep -q 'AUTO_COMMIT: "off"' "$rendered_flags"
+
 export LOG_DIR="$TMPDIR/logs"
 export EVENT_LOG="$LOG_DIR/events.jsonl"
 export AGENT_ID="fs"
@@ -36,6 +44,7 @@ export ITERATION=1
 export AGENTMILL_RUN_ID="filesystem-policy-test"
 
 # shellcheck source=../entrypoint-common.sh
+# shellcheck disable=SC1091
 . "$REPO_ROOT/entrypoint-common.sh"
 
 repo="$TMPDIR/repo"

@@ -1,10 +1,12 @@
 # AgentMill Security Threat Model
 
 This document captures the security baseline for long-running AgentMill runs.
-It is scoped to the current architecture: Claude Code runs in a Docker
-container with `--dangerously-skip-permissions`, mounted repo access, shared
-`memory/` and `logs/`, host Claude config forwarding, MCP/tool access, and
-optional multi-agent branches.
+It is scoped to the current architecture: a selected AI coding client runs in a
+Docker container, with Claude Code as the default client and additional
+adapters for Codex, OpenCode, Qwen Code, Gemini CLI, ACP, and the fake test
+client. Runs have mounted or read-only-clone repo access, shared `memory/` and
+`logs/`, optional host config forwarding, MCP/tool access, and optional
+multi-agent branches.
 
 The design goal is not to make the model trusted. The design goal is to keep
 untrusted model output, untrusted repository content, untrusted web content,

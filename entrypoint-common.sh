@@ -137,6 +137,18 @@ json_value() {
     esac
 }
 
+iteration_changed_file_count() {
+    local base="${1:-HEAD}" tmp count
+    tmp="$(mktemp)"
+    if git rev-parse --verify "$base^{commit}" >/dev/null 2>&1; then
+        git diff --name-only "$base"..HEAD >> "$tmp" 2>/dev/null || true
+    fi
+    git status --porcelain 2>/dev/null | sed -E 's/^...//' >> "$tmp" || true
+    count="$(sort -u "$tmp" | grep -c . || true)"
+    rm -f "$tmp"
+    printf '%s' "${count:-0}"
+}
+
 event_payload() {
     local first=true pair key value
     printf '{'
@@ -172,6 +184,31 @@ event_emit_kv() {
     local type="$1"
     shift || true
     event_emit "$type" "$(event_payload "$@")"
+}
+
+status_write() {
+    local iter="${1:-${ITERATION:-0}}" state="${2:-unknown}" detail="${3:-}" max_iter="${4:-${MAX_ITERATIONS:-0}}"
+    local agent="${AGENT_ID:-tui}" timestamp path payload lock
+    timestamp="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    path="$LOG_DIR/status-${agent}.json"
+    payload="$(event_payload \
+        agent="$agent" \
+        iteration="$iter" \
+        max_iterations="$max_iter" \
+        state="$state" \
+        detail="$detail" \
+        timestamp="$timestamp" \
+        client="${AGENTMILL_CLIENT:-}" \
+        model="${MODEL:-}" \
+        run_id="${AGENTMILL_RUN_ID:-}")"
+    mkdir -p "$LOG_DIR"
+    lock="${path}.lock"
+    if _lock_acquire "$lock" 5; then
+        printf '%s\n' "$payload" > "$path"
+        _lock_release "$lock"
+    else
+        log_warn "status file lock timeout for $agent"
+    fi
 }
 
 emit_iteration_failed() {
@@ -2734,14 +2771,14 @@ apply_agent_env_overrides() {
     done
 }
 
-# Resolve friendly model aliases (opus / sonnet / haiku / opus-4.7 / 4.7 / etc.)
+# Resolve friendly model aliases (opus / sonnet / haiku / opus-4.8 / 4.8 / etc.)
 # to fully-qualified Claude model IDs. The Claude CLI's own alias resolution
-# trails the latest releases (e.g. bare `opus` resolved to 4.6 even after 4.7
+# trails the latest releases (e.g. bare `opus` resolved to 4.6 even after 4.8
 # shipped), so we pin known aliases here. Unknown values pass through with a
 # WARN so users can still point at model IDs we don't know about yet.
 #
-# Latest known model IDs as of 2026-04-28:
-#   Opus 4.7    -> claude-opus-4-7
+# Latest known model IDs as of 2026-05-31:
+#   Opus 4.8    -> claude-opus-4-8
 #   Sonnet 4.6  -> claude-sonnet-4-6
 #   Haiku 4.5   -> claude-haiku-4-5-20251001
 #
@@ -2762,7 +2799,11 @@ resolve_model() {
 
     # Family aliases (latest in each family) + explicit version aliases.
     case "$lower" in
-        opus|opus-latest|opus-4.7|opus-4-7|opus-47|opus47|4.7|4-7)
+        opus|opus-latest|opus-4.8|opus-4-8|opus-48|opus48|4.8|4-8)
+            printf '%s' "claude-opus-4-8"
+            return 0
+            ;;
+        opus-4.7|opus-4-7|opus-47|opus47|4.7|4-7)
             printf '%s' "claude-opus-4-7"
             return 0
             ;;
@@ -2803,6 +2844,7 @@ log_claude_version() {
     # Floor checks — bump these as new model lines ship.
     # Format: "<model-substring>:<min-major>.<min-minor>.<min-patch>"
     local floor_pairs=(
+        "claude-opus-4-8:2.1.154"
         "claude-opus-4-7:2.1.111"
     )
     IFS='.' read -r major minor patch <<<"$version"
@@ -3763,6 +3805,7 @@ client_run_headless() {
         claude)
             ensure_usage_telemetry_for_budget
             local claude_args=(--dangerously-skip-permissions -p "$prompt_content")
+            [[ -n "${MODEL:-}" ]] && claude_args+=(--model "$MODEL")
             case "$AGENTMILL_CLAUDE_OUTPUT_FORMAT" in
                 text|"") ;;
                 json|stream-json) claude_args+=(--output-format "$AGENTMILL_CLAUDE_OUTPUT_FORMAT") ;;
@@ -3911,7 +3954,9 @@ client_run_tui() {
     case "${AGENTMILL_CLIENT:-claude}" in
         claude)
             if [[ "${SKIP_PROMPT:-false}" == "true" ]]; then
-                "$AGENTMILL_CLAUDE_COMMAND" || true
+                local claude_tui_args=()
+                [[ -n "${MODEL:-}" ]] && claude_tui_args+=(--model "$MODEL")
+                "$AGENTMILL_CLAUDE_COMMAND" "${claude_tui_args[@]}" || true
             else
                 "${AGENTMILL_AUTO_TRUST_COMMAND:-/auto-trust.exp}" || true
             fi
@@ -4388,7 +4433,8 @@ push_failure_is_retryable() {
 
 MEMORY_DIR="${MEMORY_DIR:-/workspace/memory}"
 
-# Portable exclusive lock: flock if available, mkdir fallback
+# Portable exclusive lock: flock if available, mkdir fallback.
+# flock mode uses fd 200, so callers should not hold nested locks in one shell.
 _lock_acquire() {
     local lockpath="$1" timeout="${2:-5}" i=0
     if command -v flock >/dev/null 2>&1; then
@@ -4415,6 +4461,19 @@ _lock_release() {
 
 memory_init() {
     mkdir -p "$MEMORY_DIR"
+}
+
+memory_validate_topic() {
+    local topic="${1:-}"
+    if [[ "$topic" =~ ^[A-Za-z0-9_.-]+$ && "$topic" != "." && "$topic" != ".." ]]; then
+        return 0
+    fi
+    if declare -F log_error >/dev/null; then
+        log_error "invalid memory topic '$topic' (expected letters, numbers, '.', '_' or '-')"
+    else
+        echo "ERROR invalid memory topic '$topic' (expected letters, numbers, '.', '_' or '-')" >&2
+    fi
+    return 1
 }
 
 memory_topic_type() {
@@ -4497,6 +4556,7 @@ PY
 # Appends a timestamped entry to memory/<topic>.md under exclusive lock.
 memory_write() {
     local topic="$1" content="$2" agent="${3:-${AGENT_ID:-unknown}}"
+    memory_validate_topic "$topic" || return 1
     local file="$MEMORY_DIR/${topic}.md"
     local lock="$MEMORY_DIR/.${topic}.lock"
     memory_init
@@ -4517,6 +4577,7 @@ memory_write() {
 # Reads memory/<topic>.md (no lock needed for reads).
 memory_read() {
     local topic="$1" lines="${2:-50}"
+    memory_validate_topic "$topic" || return 1
     local file="$MEMORY_DIR/${topic}.md"
     [[ -f "$file" ]] || { echo "(no memory for topic: $topic)"; return 0; }
     tail -n "$lines" "$file"
@@ -4540,6 +4601,7 @@ memory_search() {
 # memory_clear <topic> — remove a topic file (with lock)
 memory_clear() {
     local topic="$1"
+    memory_validate_topic "$topic" || return 1
     local file="$MEMORY_DIR/${topic}.md"
     local lock="$MEMORY_DIR/.${topic}.lock"
     [[ -f "$file" ]] || { echo "(no memory for topic: $topic)"; return 0; }
@@ -4575,7 +4637,7 @@ failed_approaches_append() {
 # --- Task-claim file (multi-agent coordination) ---
 # Single file: one line per active claim, format:
 #   <iso-timestamp>\t<agent-id>\t<task-id>
-# Atomic via flock; readers can `grep <task-id> in_progress.md` before claiming.
+# Atomic via flock; task matching compares the final TSV field exactly.
 
 CLAIMS_FILE="${CLAIMS_FILE:-${MEMORY_DIR:-/workspace/memory}/in_progress.md}"
 
@@ -4583,9 +4645,9 @@ claim_task() {
     local task="$1" agent="${2:-${AGENT_ID:-unknown}}"
     local lock="${CLAIMS_FILE}.lock"
     memory_init
-    [[ -f "$CLAIMS_FILE" ]] || printf '# In-progress task claims\n\n' > "$CLAIMS_FILE"
     if _lock_acquire "$lock" 5; then
-        if grep -qF "	${task}" "$CLAIMS_FILE" 2>/dev/null; then
+        [[ -f "$CLAIMS_FILE" ]] || printf '# In-progress task claims\n\n' > "$CLAIMS_FILE"
+        if awk -v task="$task" 'BEGIN { FS = sprintf("%c", 9) } NF >= 3 && $NF == task { found = 1; exit } END { exit found ? 0 : 1 }' "$CLAIMS_FILE" 2>/dev/null; then
             _lock_release "$lock"
             log_warn "claim_task: '$task' already claimed"
             return 1
@@ -4604,7 +4666,7 @@ release_task() {
     [[ -f "$CLAIMS_FILE" ]] || return 0
     if _lock_acquire "$lock" 5; then
         local tmp; tmp="$(mktemp)"
-        grep -vF "	${task}" "$CLAIMS_FILE" > "$tmp" || true
+        awk -v task="$task" 'BEGIN { FS = sprintf("%c", 9) } !(NF >= 3 && $NF == task)' "$CLAIMS_FILE" > "$tmp"
         mv "$tmp" "$CLAIMS_FILE"
         _lock_release "$lock"
     else

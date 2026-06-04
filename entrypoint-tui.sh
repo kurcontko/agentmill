@@ -26,6 +26,7 @@ client_select "${AGENTMILL_CLIENT:-${AGENTMILL_PROVIDER:-claude}}"
 
 MODEL_RAW="$MODEL"
 MODEL="$(client_resolve_model "$MODEL_RAW")"
+export MODEL
 [[ "$MODEL" != "$MODEL_RAW" ]] && log "Resolved MODEL '$MODEL_RAW' -> '$MODEL'"
 client_version "$MODEL"
 
@@ -109,6 +110,7 @@ event_emit_kv run.configured \
     workspace_mode="$AGENTMILL_WORKSPACE_MODE" \
     auto_commit="$AUTO_COMMIT" \
     repo_dir="$REPO_DIR"
+status_write 0 starting "configured" "${MAX_ITERATIONS:-0}"
 
 RALPH_RULE_FILE=".claude/rules/agentmill-ralph-task.md"
 client_prepare_project "$REPO_DIR"
@@ -168,8 +170,10 @@ while true; do
     ITER_HEAD_BEFORE="$(git rev-parse HEAD 2>/dev/null || echo HEAD)"
     log "Launching $AGENTMILL_CLIENT TUI (model=$MODEL, iteration=$ITERATION)"
     event_emit_kv iteration.started mode=tui client="$AGENTMILL_CLIENT" prompt_file="$PROMPT_FILE"
+    status_write "$ITERATION" running "tui"
 
     if ! enforce_mcp_manifest_stability; then
+        status_write "$ITERATION" policy_denied "mcp_manifest_changed"
         emit_iteration_failed "mcp_manifest_changed" "policy_denied" "mcp_manifest_changed" 0 "" 0
         event_emit_kv iteration.completed mode=tui status="policy_denied" reason="mcp_manifest_changed" commits=0
         break
@@ -183,11 +187,13 @@ while true; do
     set -e
     if [[ "$PRE_HOOK_RC" -ne 0 ]]; then
         log_warn "pre_iteration hook blocked TUI iteration $ITERATION"
+        status_write "$ITERATION" "policy_${HOOK_LAST_DECISION:-denied}" "pre_iteration:${HOOK_LAST_REASON:-blocked}"
         emit_iteration_failed "pre_iteration_${HOOK_LAST_DECISION:-denied}" "policy_${HOOK_LAST_DECISION:-denied}" "pre_iteration:${HOOK_LAST_REASON:-blocked}" 0 "" 0
         event_emit_kv iteration.completed mode=tui status="policy_${HOOK_LAST_DECISION:-denied}" reason="${HOOK_LAST_REASON:-blocked}" commits=0
         break
     fi
     if ! apply_hook_prompt_file_update; then
+        status_write "$ITERATION" "policy_${HOOK_LAST_DECISION:-denied}" "pre_iteration:${HOOK_LAST_REASON:-blocked}"
         emit_iteration_failed "pre_iteration_${HOOK_LAST_DECISION:-denied}" "policy_${HOOK_LAST_DECISION:-denied}" "pre_iteration:${HOOK_LAST_REASON:-blocked}" 0 "" 0
         event_emit_kv iteration.completed mode=tui status="policy_${HOOK_LAST_DECISION:-denied}" reason="${HOOK_LAST_REASON:-blocked}" commits=0
         break
@@ -344,6 +350,7 @@ while true; do
         emit_iteration_failed "merge_commits_disallowed" "$ITER_STATUS" "merge_commits_disallowed" 0 "" "$ITER_NEW_COMMITS"
     fi
     event_emit_kv iteration.completed mode=tui status="$ITER_STATUS" done_signaled="$DONE_SIGNALED" completion_accepted="$COMPLETION_ACCEPTED" commits="$ITER_NEW_COMMITS"
+    status_write "$ITERATION" "$ITER_STATUS" "done=$DONE_SIGNALED completion=$COMPLETION_ACCEPTED" "${MAX_ITERATIONS:-0}"
 
     if [[ "$COMPLETION_ACCEPTED" == true ]]; then
         event_emit_kv loop.stopped reason=completion gate="$COMPLETION_GATE_NAME" mode=tui

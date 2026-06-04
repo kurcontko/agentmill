@@ -18,20 +18,30 @@ TARGET_SETTINGS="${TARGET_SETTINGS:-/home/agent/.claude/settings.json}"
 export TARGET_CONFIG HOST_PLUGINS TARGET_PLUGINS HOST_SKILLS TARGET_SKILLS HOST_AGENTS TARGET_AGENTS HOST_COMMANDS TARGET_COMMANDS HOST_SETTINGS TARGET_SETTINGS
 
 # --- Merge ~/.claude.json and settings.json in one Python pass ----------------
-python3 << 'PYEOF' 2>/dev/null || true
-import json, re, os
+merge_error_file="$(mktemp)"
+if ! python3 2>"$merge_error_file" << 'PYEOF'
+import json, os, sys
 
 def load(path):
-    return json.load(open(path)) if os.path.exists(path) else {}
+    if not os.path.isfile(path):
+        return {}
+    try:
+        with open(path) as handle:
+            data = json.load(handle)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"[setup-claude-config] WARN: failed to load {path}: {exc}", file=sys.stderr)
+        return {}
+    if not isinstance(data, dict):
+        print(f"[setup-claude-config] WARN: ignoring non-object JSON in {path}", file=sys.stderr)
+        return {}
+    return data
 
 def save(path, data):
-    json.dump(data, open(path, "w"), indent=2)
-
-def rewrite_plugin_paths(data):
-    """Replace any host home dir paths with container path."""
-    s = json.dumps(data)
-    s = re.sub(r'"[^"]*?/\.claude/plugins/', '"/home/agent/.claude/plugins/', s)
-    return json.loads(s)
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w") as handle:
+        json.dump(data, handle, indent=2)
 
 # --- claude.json: merge MCP servers and trusted project config ----------------
 def truthy(name):
@@ -126,8 +136,9 @@ target_cfg["projects"] = projects
 save(target_config_path, target_cfg)
 
 # --- settings.json: permissions + plugins + hooks ----------------------------
-host_settings = load(os.environ.get("HOST_SETTINGS", "/home/agent/.claude/settings.host.json"))
-if host_settings:
+host_settings_path = os.environ.get("HOST_SETTINGS", "/home/agent/.claude/settings.host.json")
+host_settings = load(host_settings_path)
+if os.path.isfile(host_settings_path):
     target_settings_path = os.environ.get("TARGET_SETTINGS", "/home/agent/.claude/settings.json")
     target_settings = load(target_settings_path)
     perms = target_settings.get("permissions", {})
@@ -155,6 +166,13 @@ if host_settings:
 
     save(target_settings_path, target_settings)
 PYEOF
+then
+    echo "[setup-claude-config] WARN: failed to merge host Claude config/settings:" >&2
+    sed 's/^/[setup-claude-config]   /' "$merge_error_file" >&2 || true
+elif [[ -s "$merge_error_file" ]]; then
+    cat "$merge_error_file" >&2 || true
+fi
+rm -f "$merge_error_file"
 
 # Fallback: ensure claude.json exists
 if [[ ! -f "$TARGET_CONFIG" ]]; then
@@ -246,12 +264,38 @@ if host_extensions_allowed && [[ -d "$HOST_PLUGINS" ]] && [[ "$(ls -A "$HOST_PLU
     # Fix paths in plugin manifests
     for manifest in "$TARGET_PLUGINS/installed_plugins.json" "$TARGET_PLUGINS/known_marketplaces.json"; do
         [[ -f "$manifest" ]] || continue
-        python3 -c "
-import json, re
-data = json.load(open('$manifest'))
-fixed = json.loads(re.sub(r'\"[^\"]*?/\.claude/plugins/', '\"/home/agent/.claude/plugins/', json.dumps(data)))
-json.dump(fixed, open('$manifest', 'w'), indent=2)
-" 2>/dev/null || true
+        if ! python3 - "$manifest" <<'PY'
+import json
+import sys
+
+manifest = sys.argv[1]
+plugin_path_keys = {"installPath", "installLocation"}
+plugin_path_marker = "/.claude/plugins/"
+
+def rewrite_plugin_value(value):
+    if isinstance(value, str) and plugin_path_marker in value:
+        return "/home/agent/.claude/plugins/" + value.rsplit(plugin_path_marker, 1)[1]
+    return value
+
+def rewrite_manifest_paths(value):
+    if isinstance(value, dict):
+        return {
+            key: rewrite_plugin_value(item) if key in plugin_path_keys else rewrite_manifest_paths(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [rewrite_manifest_paths(item) for item in value]
+    return value
+
+with open(manifest) as handle:
+    data = json.load(handle)
+fixed = rewrite_manifest_paths(data)
+with open(manifest, 'w') as handle:
+    json.dump(fixed, handle, indent=2)
+PY
+        then
+            echo "[setup-claude-config] WARN: failed to rewrite plugin manifest paths: $manifest" >&2
+        fi
     done
 fi
 

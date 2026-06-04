@@ -59,17 +59,48 @@ EOF
     exit "${1:-0}"
 }
 
+env_strip_comment() {
+    local line="$1" out="" char quote="" prev="" i
+    for ((i = 0; i < ${#line}; i++)); do
+        char="${line:i:1}"
+        if [[ -z "$quote" ]]; then
+            case "$char" in
+                \"|\')
+                    quote="$char"
+                    ;;
+                '#')
+                    if [[ -z "$out" || "$prev" =~ [[:space:]] ]]; then
+                        break
+                    fi
+                    ;;
+            esac
+        elif [[ "$char" == "$quote" ]]; then
+            quote=""
+        fi
+        out+="$char"
+        prev="$char"
+    done
+    printf '%s' "$out"
+}
+
+env_trim() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+
 # Parse .env file if it exists (handles KEY=value, KEY="value", KEY='value')
 load_env() {
     [[ -f "$MILL_DIR/.env" ]] || return 0
     while IFS= read -r line || [[ -n "$line" ]]; do
-        line="${line%%\#*}"                         # strip comments
+        line="$(env_strip_comment "$line")"
         [[ "$line" =~ ^[[:space:]]*$ ]] && continue # skip blank lines
-        [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
+        [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
         local key="${BASH_REMATCH[1]}" val="${BASH_REMATCH[2]}"
+        val="$(env_trim "$val")"
         val="${val#\"}" val="${val%\"}"              # strip double quotes
         val="${val#\'}" val="${val%\'}"              # strip single quotes
-        val="${val%"${val##*[! ]}"}"                 # trim trailing spaces
         if [[ -z "${!key:-}" ]]; then
             export "$key=$val"
         fi
@@ -314,6 +345,64 @@ require_repo() {
     export REPO_PATH="$repo"
 }
 
+die() {
+    echo "Error: $*" >&2
+    exit 1
+}
+
+require_option_value() {
+    local opt="$1" value="${2-}"
+    [[ -n "$value" && "${value:0:1}" != "-" ]] || die "$opt requires a value"
+    OPTION_VALUE="$value"
+}
+
+reject_unexpected_arg() {
+    local command="$1" arg="$2"
+    if [[ "$arg" == -* ]]; then
+        die "unknown $command option: $arg"
+    fi
+    die "unexpected $command argument: $arg"
+}
+
+is_nonnegative_int() {
+    [[ "${1:-}" =~ ^[0-9]+$ ]]
+}
+
+is_positive_int() {
+    [[ "${1:-}" =~ ^[0-9]+$ && "$1" -ge 1 ]]
+}
+
+is_nonnegative_number() {
+    [[ "${1:-}" =~ ^[0-9]+([.][0-9]+)?$ ]]
+}
+
+validate_nonnegative_int() {
+    local opt="$1" value="$2"
+    [[ -z "$value" ]] || is_nonnegative_int "$value" || die "$opt must be a non-negative integer"
+}
+
+validate_positive_int() {
+    local opt="$1" value="$2"
+    [[ -z "$value" ]] || is_positive_int "$value" || die "$opt must be a positive integer"
+}
+
+validate_nonnegative_number() {
+    local opt="$1" value="$2"
+    [[ -z "$value" ]] || is_nonnegative_number "$value" || die "$opt must be a non-negative number"
+}
+
+validate_agent_id() {
+    local value="$1"
+    [[ "$value" =~ ^[A-Za-z0-9_.-]+$ ]] || die "invalid agent id '$value' (expected letters, numbers, '.', '_' or '-')"
+    [[ "$value" != "." && "$value" != ".." ]] || die "invalid agent id '$value'"
+}
+
+validate_memory_topic() {
+    local value="$1"
+    [[ "$value" =~ ^[A-Za-z0-9_.-]+$ ]] || die "invalid memory topic '$value' (expected letters, numbers, '.', '_' or '-')"
+    [[ "$value" != "." && "$value" != ".." ]] || die "invalid memory topic '$value'"
+}
+
 profile_file() {
     local role="$1" file
     [[ "$role" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "Error: invalid agent role '$role'" >&2; exit 1; }
@@ -379,28 +468,36 @@ cmd_run() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help)    usage 0 ;;
-            --agent)       agent="$2"; shift 2 ;;
-            --model)       model="$2"; shift 2 ;;
-            --iterations)  iterations="$2"; shift 2 ;;
-            --prompt)      prompt="$2"; shift 2 ;;
-            --delay)       delay="$2"; shift 2 ;;
-            --auto-commit) auto_commit="$2"; shift 2 ;;
-            --max-wall-seconds) max_wall="$2"; shift 2 ;;
-            --max-log-bytes) max_log="$2"; shift 2 ;;
-            --max-total-tokens) max_tokens="$2"; shift 2 ;;
-            --max-total-usd) max_usd="$2"; shift 2 ;;
-            --claude-output-format|--output-format) output_format="$2"; shift 2 ;;
-            --profile-level) profile_level="$2"; shift 2 ;;
-            --workspace-mode) workspace_mode="$2"; shift 2 ;;
+            --agent)       require_option_value "$1" "${2-}"; agent="$OPTION_VALUE"; shift 2 ;;
+            --model)       require_option_value "$1" "${2-}"; model="$OPTION_VALUE"; shift 2 ;;
+            --iterations)  require_option_value "$1" "${2-}"; iterations="$OPTION_VALUE"; shift 2 ;;
+            --prompt)      require_option_value "$1" "${2-}"; prompt="$OPTION_VALUE"; shift 2 ;;
+            --delay)       require_option_value "$1" "${2-}"; delay="$OPTION_VALUE"; shift 2 ;;
+            --auto-commit) require_option_value "$1" "${2-}"; auto_commit="$OPTION_VALUE"; shift 2 ;;
+            --max-wall-seconds) require_option_value "$1" "${2-}"; max_wall="$OPTION_VALUE"; shift 2 ;;
+            --max-log-bytes) require_option_value "$1" "${2-}"; max_log="$OPTION_VALUE"; shift 2 ;;
+            --max-total-tokens) require_option_value "$1" "${2-}"; max_tokens="$OPTION_VALUE"; shift 2 ;;
+            --max-total-usd) require_option_value "$1" "${2-}"; max_usd="$OPTION_VALUE"; shift 2 ;;
+            --claude-output-format|--output-format) require_option_value "$1" "${2-}"; output_format="$OPTION_VALUE"; shift 2 ;;
+            --profile-level) require_option_value "$1" "${2-}"; profile_level="$OPTION_VALUE"; shift 2 ;;
+            --workspace-mode) require_option_value "$1" "${2-}"; workspace_mode="$OPTION_VALUE"; shift 2 ;;
             --json)        json=true; shift ;;
             -d|--detach)   detach=true; shift ;;
-            *) repo="${repo:-$1}"; shift ;;
+            *)
+                [[ "$1" != -* && -z "$repo" ]] || reject_unexpected_arg "run" "$1"
+                repo="$1"; shift ;;
         esac
     done
     if [[ "$json" == true && "$detach" == true ]]; then
         echo "Error: mill run --json cannot be combined with --detach" >&2
         exit 1
     fi
+    validate_nonnegative_int "--iterations" "$iterations"
+    validate_nonnegative_number "--delay" "$delay"
+    validate_nonnegative_int "--max-wall-seconds" "$max_wall"
+    validate_nonnegative_int "--max-log-bytes" "$max_log"
+    validate_nonnegative_int "--max-total-tokens" "$max_tokens"
+    validate_nonnegative_number "--max-total-usd" "$max_usd"
     require_repo "$repo"
     [[ -n "$agent" ]]      && apply_agent_profile "$agent" 1
     [[ -n "$model" ]]       && export MODEL="$model"
@@ -437,24 +534,30 @@ cmd_exec() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help)    usage 0 ;;
-            --agent)       agent="$2"; shift 2 ;;
-            --model)       model="$2"; shift 2 ;;
-            --prompt)      prompt="$2"; shift 2 ;;
-            --auto-commit) auto_commit="$2"; shift 2 ;;
-            --max-wall-seconds) max_wall="$2"; shift 2 ;;
-            --max-log-bytes) max_log="$2"; shift 2 ;;
-            --max-total-tokens) max_tokens="$2"; shift 2 ;;
-            --max-total-usd) max_usd="$2"; shift 2 ;;
-            --claude-output-format|--output-format) output_format="$2"; shift 2 ;;
-            --profile-level) profile_level="$2"; shift 2 ;;
-            --workspace-mode) workspace_mode="$2"; shift 2 ;;
+            --agent)       require_option_value "$1" "${2-}"; agent="$OPTION_VALUE"; shift 2 ;;
+            --model)       require_option_value "$1" "${2-}"; model="$OPTION_VALUE"; shift 2 ;;
+            --prompt)      require_option_value "$1" "${2-}"; prompt="$OPTION_VALUE"; shift 2 ;;
+            --auto-commit) require_option_value "$1" "${2-}"; auto_commit="$OPTION_VALUE"; shift 2 ;;
+            --max-wall-seconds) require_option_value "$1" "${2-}"; max_wall="$OPTION_VALUE"; shift 2 ;;
+            --max-log-bytes) require_option_value "$1" "${2-}"; max_log="$OPTION_VALUE"; shift 2 ;;
+            --max-total-tokens) require_option_value "$1" "${2-}"; max_tokens="$OPTION_VALUE"; shift 2 ;;
+            --max-total-usd) require_option_value "$1" "${2-}"; max_usd="$OPTION_VALUE"; shift 2 ;;
+            --claude-output-format|--output-format) require_option_value "$1" "${2-}"; output_format="$OPTION_VALUE"; shift 2 ;;
+            --profile-level) require_option_value "$1" "${2-}"; profile_level="$OPTION_VALUE"; shift 2 ;;
+            --workspace-mode) require_option_value "$1" "${2-}"; workspace_mode="$OPTION_VALUE"; shift 2 ;;
             --iterations)
                 echo "Error: mill exec always runs exactly one iteration; use mill run for loops" >&2
                 exit 1
                 ;;
-            *) repo="${repo:-$1}"; shift ;;
+            *)
+                [[ "$1" != -* && -z "$repo" ]] || reject_unexpected_arg "exec" "$1"
+                repo="$1"; shift ;;
         esac
     done
+    validate_nonnegative_int "--max-wall-seconds" "$max_wall"
+    validate_nonnegative_int "--max-log-bytes" "$max_log"
+    validate_nonnegative_int "--max-total-tokens" "$max_tokens"
+    validate_nonnegative_number "--max-total-usd" "$max_usd"
     require_repo "$repo"
     [[ -n "$agent" ]]      && apply_agent_profile "$agent" 1
     [[ -n "$model" ]]       && export MODEL="$model"
@@ -485,22 +588,32 @@ cmd_watch() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help) usage 0 ;;
-            --agent)   agent="$2"; shift 2 ;;
-            --transport) transport="$2"; shift 2 ;;
+            --agent)   require_option_value "$1" "${2-}"; agent="$OPTION_VALUE"; shift 2 ;;
+            --transport) require_option_value "$1" "${2-}"; transport="$OPTION_VALUE"; shift 2 ;;
             --acp)     transport=acp; shift ;;
             --ralph)   ralph=true; shift ;;
             --respawn) respawn=true; shift ;;
-            --prompt)  prompt="$2"; shift 2 ;;
-            --model)   model="$2"; shift 2 ;;
-            --max-wall-seconds) max_wall="$2"; shift 2 ;;
-            --max-log-bytes) max_log="$2"; shift 2 ;;
-            --max-total-tokens) max_tokens="$2"; shift 2 ;;
-            --max-total-usd) max_usd="$2"; shift 2 ;;
-            --profile-level) profile_level="$2"; shift 2 ;;
-            --workspace-mode) workspace_mode="$2"; shift 2 ;;
-            *) repo="${repo:-$1}"; shift ;;
+            --prompt)  require_option_value "$1" "${2-}"; prompt="$OPTION_VALUE"; shift 2 ;;
+            --model)   require_option_value "$1" "${2-}"; model="$OPTION_VALUE"; shift 2 ;;
+            --max-wall-seconds) require_option_value "$1" "${2-}"; max_wall="$OPTION_VALUE"; shift 2 ;;
+            --max-log-bytes) require_option_value "$1" "${2-}"; max_log="$OPTION_VALUE"; shift 2 ;;
+            --max-total-tokens) require_option_value "$1" "${2-}"; max_tokens="$OPTION_VALUE"; shift 2 ;;
+            --max-total-usd) require_option_value "$1" "${2-}"; max_usd="$OPTION_VALUE"; shift 2 ;;
+            --profile-level) require_option_value "$1" "${2-}"; profile_level="$OPTION_VALUE"; shift 2 ;;
+            --workspace-mode) require_option_value "$1" "${2-}"; workspace_mode="$OPTION_VALUE"; shift 2 ;;
+            *)
+                [[ "$1" != -* && -z "$repo" ]] || reject_unexpected_arg "watch" "$1"
+                repo="$1"; shift ;;
         esac
     done
+    validate_nonnegative_int "--max-wall-seconds" "$max_wall"
+    validate_nonnegative_int "--max-log-bytes" "$max_log"
+    validate_nonnegative_int "--max-total-tokens" "$max_tokens"
+    validate_nonnegative_number "--max-total-usd" "$max_usd"
+    case "$transport" in
+        ""|native|acp) ;;
+        *) die "--transport must be one of: native, acp" ;;
+    esac
     require_repo "$repo"
     [[ -n "$agent" ]]          && apply_agent_profile "$agent" 1
     [[ "$ralph" == true ]]   && export AUTO_RALPH=true
@@ -532,23 +645,31 @@ cmd_multi() {
         fi
         shift
     fi
-    [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { count="$1"; shift; }
+    [[ $# -gt 0 && "${1:-}" =~ ^[0-9]+$ ]] && { count="$1"; shift; }
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help)    usage 0 ;;
             -d|--detach)   detach=true; shift ;;
-            --roles)       roles="$2"; shift 2 ;;
-            --model)       model="$2"; shift 2 ;;
-            --iterations)  iterations="$2"; shift 2 ;;
-            --delay)       delay="$2"; shift 2 ;;
-            --max-wall-seconds) max_wall="$2"; shift 2 ;;
-            --max-log-bytes) max_log="$2"; shift 2 ;;
-            --max-total-tokens) max_tokens="$2"; shift 2 ;;
-            --max-total-usd) max_usd="$2"; shift 2 ;;
-            --profile-level) profile_level="$2"; shift 2 ;;
-            *) repo="${repo:-$1}"; shift ;;
+            --roles)       require_option_value "$1" "${2-}"; roles="$OPTION_VALUE"; shift 2 ;;
+            --model)       require_option_value "$1" "${2-}"; model="$OPTION_VALUE"; shift 2 ;;
+            --iterations)  require_option_value "$1" "${2-}"; iterations="$OPTION_VALUE"; shift 2 ;;
+            --delay)       require_option_value "$1" "${2-}"; delay="$OPTION_VALUE"; shift 2 ;;
+            --max-wall-seconds) require_option_value "$1" "${2-}"; max_wall="$OPTION_VALUE"; shift 2 ;;
+            --max-log-bytes) require_option_value "$1" "${2-}"; max_log="$OPTION_VALUE"; shift 2 ;;
+            --max-total-tokens) require_option_value "$1" "${2-}"; max_tokens="$OPTION_VALUE"; shift 2 ;;
+            --max-total-usd) require_option_value "$1" "${2-}"; max_usd="$OPTION_VALUE"; shift 2 ;;
+            --profile-level) require_option_value "$1" "${2-}"; profile_level="$OPTION_VALUE"; shift 2 ;;
+            *)
+                [[ "$1" != -* && -z "$repo" ]] || reject_unexpected_arg "multi" "$1"
+                repo="$1"; shift ;;
         esac
     done
+    validate_nonnegative_int "--iterations" "$iterations"
+    validate_nonnegative_number "--delay" "$delay"
+    validate_nonnegative_int "--max-wall-seconds" "$max_wall"
+    validate_nonnegative_int "--max-log-bytes" "$max_log"
+    validate_nonnegative_int "--max-total-tokens" "$max_tokens"
+    validate_nonnegative_number "--max-total-usd" "$max_usd"
     require_repo "$repo"
     if [[ -n "$roles" ]]; then
         local role_list=()
@@ -630,12 +751,18 @@ cmd_shell() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help) usage 0 ;;
-            --transport) transport="$2"; shift 2 ;;
+            --transport) require_option_value "$1" "${2-}"; transport="$OPTION_VALUE"; shift 2 ;;
             --acp) transport=acp; shift ;;
-            --prompt) acp_prompt="$2"; shift 2 ;;
-            *) repo="${repo:-$1}"; shift ;;
+            --prompt) require_option_value "$1" "${2-}"; acp_prompt="$OPTION_VALUE"; shift 2 ;;
+            *)
+                [[ "$1" != -* && -z "$repo" ]] || reject_unexpected_arg "shell" "$1"
+                repo="$1"; shift ;;
         esac
     done
+    case "$transport" in
+        ""|native|acp) ;;
+        *) die "--transport must be one of: native, acp" ;;
+    esac
     require_repo "$repo"
     [[ -n "$transport" ]] && export AGENTMILL_CLIENT_TRANSPORT="$transport"
     [[ -n "$acp_prompt" ]] && export AGENTMILL_ACP_PROMPT="$acp_prompt"
@@ -647,7 +774,7 @@ cmd_status() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json=true; shift ;;
-            *) shift ;;
+            *) reject_unexpected_arg "status" "$1" ;;
         esac
     done
     if [[ ! -d "$log_dir" ]]; then echo "No logs directory found."; exit 0; fi
@@ -704,7 +831,7 @@ cmd_watch_status() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --once) once=true; shift ;;
-            --interval) interval="$2"; shift 2 ;;
+            --interval) require_option_value "$1" "${2-}"; interval="$OPTION_VALUE"; shift 2 ;;
             *) echo "Error: unknown watch-status option: $1" >&2; return 1 ;;
         esac
     done
@@ -730,7 +857,7 @@ cmd_web() {
     local port=8000 no_serve=false log_dir="$MILL_DIR/logs" output="$MILL_DIR/logs/index.html"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --port) port="$2"; shift 2 ;;
+            --port) require_option_value "$1" "${2-}"; port="$OPTION_VALUE"; shift 2 ;;
             --no-serve|--generate-only) no_serve=true; shift ;;
             *) echo "Error: unknown web option: $1" >&2; return 1 ;;
         esac
@@ -949,14 +1076,40 @@ PY
 }
 
 cmd_logs() {
-    local agent_id="${1:-1}" session=false
-    [[ "${1:-}" == "--session" ]] && { session=true; agent_id="${2:-1}"; }
-    [[ "${2:-}" == "--session" ]] && session=true
+    local agent_id="1" session=false agent_seen=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help) usage 0 ;;
+            --session) session=true; shift ;;
+            *)
+                [[ "$1" != -* && "$agent_seen" == false ]] || reject_unexpected_arg "logs" "$1"
+                agent_id="$1"; agent_seen=true; shift ;;
+        esac
+    done
+    validate_agent_id "$agent_id"
 
     if [[ "$session" == true ]]; then
         # Show latest session log for this agent
         local latest
-        latest="$(ls -t "$MILL_DIR/logs"/session_*_iter*.log 2>/dev/null | head -1)"
+        latest="$(python3 - "$MILL_DIR/logs" "$agent_id" <<'PY'
+import glob
+import sys
+from pathlib import Path
+
+log_dir = Path(sys.argv[1])
+agent_id = sys.argv[2]
+patterns = [
+    f"session_agent-{agent_id}_*_iter*.log",
+    f"acp-{agent_id}-iter*.jsonl",
+]
+paths = []
+for pattern in patterns:
+    paths.extend(Path(path) for path in glob.glob(str(log_dir / pattern)))
+paths = [path for path in paths if path.is_file()]
+if paths:
+    print(max(paths, key=lambda path: path.stat().st_mtime))
+PY
+)"
         if [[ -n "$latest" ]]; then
             echo "=== $(basename "$latest") ==="
             tail -f "$latest"
@@ -980,9 +1133,9 @@ cmd_build() {
     local platform="" pull=false prebuilt_image="${AGENTMILL_PREBUILT_IMAGE:-ghcr.io/kurcontko/agentmill:latest}" local_image="${AGENTMILL_IMAGE:-agentmill:latest}"
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --platform) platform="$2"; shift 2 ;;
+            --platform) require_option_value "$1" "${2-}"; platform="$OPTION_VALUE"; shift 2 ;;
             --pull) pull=true; shift ;;
-            *) shift ;;
+            *) reject_unexpected_arg "build" "$1" ;;
         esac
     done
     if [[ "$pull" == true ]]; then
@@ -1113,12 +1266,13 @@ cmd_stop() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --on-converge) on_converge=true; shift ;;
-            --timeout) timeout="$2"; shift 2 ;;
-            --agent) agent="$2"; shift 2 ;;
-            --run-id) run_id="$2"; shift 2 ;;
+            --timeout) require_option_value "$1" "${2-}"; timeout="$OPTION_VALUE"; shift 2 ;;
+            --agent) require_option_value "$1" "${2-}"; agent="$OPTION_VALUE"; shift 2 ;;
+            --run-id) require_option_value "$1" "${2-}"; run_id="$OPTION_VALUE"; shift 2 ;;
             *) echo "Error: unknown stop option: $1" >&2; return 1 ;;
         esac
     done
+    [[ -z "$agent" ]] || validate_agent_id "$agent"
 
     if [[ "$on_converge" == true ]]; then
         wait_for_convergence "$timeout" "$agent" "$run_id"
@@ -1249,11 +1403,9 @@ cmd_init() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --research)
-                [[ -n "${2:-}" ]] || { echo "Error: --research requires a topic" >&2; return 1; }
-                research_topic="$2"; shift 2 ;;
+                require_option_value "$1" "${2-}"; research_topic="$OPTION_VALUE"; shift 2 ;;
             --dir)
-                [[ -n "${2:-}" ]] || { echo "Error: --dir requires a path" >&2; return 1; }
-                research_dir="$2"; shift 2 ;;
+                require_option_value "$1" "${2-}"; research_dir="$OPTION_VALUE"; shift 2 ;;
             *) echo "Error: unknown init option: $1" >&2; return 1 ;;
         esac
     done
@@ -1289,7 +1441,6 @@ PROMPT
 
 cmd_memory() {
     local memory_dir="$MILL_DIR/memory" topic="" search="" clear=false action=""
-    [[ -n "${REPO_PATH:-}" && -d "$REPO_PATH/memory" ]] && memory_dir="$REPO_PATH/memory"
     [[ -d "$memory_dir" ]] || { echo "No memory directory found."; exit 0; }
 
     if [[ "${1:-}" == "rotate" || "${1:-}" == "dedup" ]]; then
@@ -1299,11 +1450,14 @@ cmd_memory() {
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --search) search="$2"; shift 2 ;;
+            --search) require_option_value "$1" "${2-}"; search="$OPTION_VALUE"; shift 2 ;;
             --clear)  clear=true; shift ;;
-            *) topic="${topic:-$1}"; shift ;;
+            *)
+                [[ "$1" != -* && -z "$topic" ]] || reject_unexpected_arg "memory" "$1"
+                topic="$1"; shift ;;
         esac
     done
+    [[ -z "$topic" ]] || validate_memory_topic "$topic"
 
     if [[ "$action" == "rotate" ]]; then
         local stamp archive moved=false f
@@ -1386,12 +1540,13 @@ cmd_report() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json=true; shift ;;
-            --repo) repo="$2"; shift 2 ;;
+            --repo) require_option_value "$1" "${2-}"; repo="$OPTION_VALUE"; shift 2 ;;
             *)
                 if [[ "${1:0:1}" == "-" ]]; then
                     echo "Error: unknown report status option: $1" >&2
                     return 1
                 fi
+                [[ -z "$repo" ]] || reject_unexpected_arg "report status" "$1"
                 repo="$1"
                 shift
                 ;;
@@ -1559,6 +1714,8 @@ PY
 
 cmd_diff() {
     local repo="${REPO_PATH:-}" n="${1:-5}"
+    [[ $# -le 1 ]] || reject_unexpected_arg "diff" "$2"
+    validate_positive_int "N" "$n"
     [[ -n "$repo" ]] || { echo "Set REPO_PATH or pass it via 'mill run <repo>' first." >&2; exit 1; }
     echo "=== Last $n commits ==="
     git -C "$repo" log --oneline -"$n" --stat 2>/dev/null || echo "(no git history)"
@@ -1596,7 +1753,7 @@ cmd_patches() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --latest) latest=true; shift ;;
-            *) shift ;;
+            *) reject_unexpected_arg "patches" "$1" ;;
         esac
     done
     [[ -d "$root" ]] || { echo "No patch artifacts found."; return 0; }
@@ -1664,8 +1821,8 @@ cmd_apply() {
     [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --repo) repo="$2"; shift 2 ;;
-            --branch) branch="$2"; shift 2 ;;
+            --repo) require_option_value "$1" "${2-}"; repo="$OPTION_VALUE"; shift 2 ;;
+            --branch) require_option_value "$1" "${2-}"; branch="$OPTION_VALUE"; shift 2 ;;
             --check) check=true; shift ;;
             --allow-dirty) allow_dirty=true; shift ;;
             *) echo "Error: unknown apply option: $1" >&2; return 1 ;;
@@ -1716,14 +1873,16 @@ cmd_history() {
     local results_log="$MILL_DIR/logs/results.tsv" tail_n="" json=false since="" agent="" failed_only=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --tail) tail_n="$2"; shift 2 ;;
+            --tail) require_option_value "$1" "${2-}"; tail_n="$OPTION_VALUE"; shift 2 ;;
             --json) json=true; shift ;;
-            --since) since="$2"; shift 2 ;;
-            --agent) agent="$2"; shift 2 ;;
+            --since) require_option_value "$1" "${2-}"; since="$OPTION_VALUE"; shift 2 ;;
+            --agent) require_option_value "$1" "${2-}"; agent="$OPTION_VALUE"; shift 2 ;;
             --failed-only) failed_only=true; shift ;;
-            *) shift ;;
+            *) reject_unexpected_arg "history" "$1" ;;
         esac
     done
+    validate_positive_int "--tail" "$tail_n"
+    [[ -z "$agent" ]] || validate_agent_id "$agent"
 
     [[ -f "$results_log" ]] || { echo "No results log found. Run some iterations first."; exit 0; }
 
@@ -1808,7 +1967,7 @@ cmd_cost() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --json) json=true; shift ;;
-            --by) by="$2"; shift 2 ;;
+            --by) require_option_value "$1" "${2-}"; by="$OPTION_VALUE"; shift 2 ;;
             *) echo "Error: unknown cost option: $1" >&2; return 1 ;;
         esac
     done
@@ -1978,11 +2137,12 @@ cmd_events() {
     local events_log="$MILL_DIR/logs/events.jsonl" tail_n="" follow=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --tail) tail_n="$2"; shift 2 ;;
+            --tail) require_option_value "$1" "${2-}"; tail_n="$OPTION_VALUE"; shift 2 ;;
             -f|--follow) follow=true; shift ;;
-            *) shift ;;
+            *) reject_unexpected_arg "events" "$1" ;;
         esac
     done
+    validate_positive_int "--tail" "$tail_n"
 
     [[ -f "$events_log" ]] || { echo "No events log found. Run some iterations first."; exit 0; }
 
@@ -2089,20 +2249,23 @@ cmd_tail() {
         case "$1" in
             --json) json=true; shift ;;
             --session) session=true; shift ;;
-            --tail|--lines) tail_n="$2"; shift 2 ;;
+            --tail|--lines) require_option_value "$1" "${2-}"; tail_n="$OPTION_VALUE"; shift 2 ;;
             -f|--follow) follow=true; shift ;;
             --no-follow) follow=false; shift ;;
-            --agent) agent_id="$2"; shift 2 ;;
+            --agent) require_option_value "$1" "${2-}"; agent_id="$OPTION_VALUE"; shift 2 ;;
             *)
                 if [[ "${1:0:1}" == "-" ]]; then
                     echo "Error: unknown tail option: $1" >&2
                     return 1
                 fi
+                [[ -z "$agent_id" ]] || reject_unexpected_arg "tail" "$1"
                 agent_id="$1"
                 shift
                 ;;
         esac
     done
+    validate_positive_int "--tail" "$tail_n"
+    [[ -z "$agent_id" ]] || validate_agent_id "$agent_id"
 
     if [[ "$json" == true ]]; then
         local events_log="$MILL_DIR/logs/events.jsonl"
@@ -2194,7 +2357,7 @@ cmd_mcp() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --json) json=true; shift ;;
-                    --manifest) manifest="$2"; shift 2 ;;
+                    --manifest) require_option_value "$1" "${2-}"; manifest="$OPTION_VALUE"; shift 2 ;;
                     *) echo "Error: unknown mcp list option: $1" >&2; return 1 ;;
                 esac
             done
@@ -2204,7 +2367,7 @@ cmd_mcp() {
             name="$1"; shift
             while [[ $# -gt 0 ]]; do
                 case "$1" in
-                    --manifest) manifest="$2"; shift 2 ;;
+                    --manifest) require_option_value "$1" "${2-}"; manifest="$OPTION_VALUE"; shift 2 ;;
                     --require-reachable|--reachable) require_reachable=true; shift ;;
                     *) echo "Error: unknown mcp test option: $1" >&2; return 1 ;;
                 esac
@@ -2419,7 +2582,11 @@ doctor_model_floor_check() {
     resolved_model="$model"
     lower="$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')"
     case "$lower" in
-        opus|opus-latest|opus-4.7|opus-4-7|opus-47|opus47|4.7|4-7|claude-opus-4-7*)
+        opus|opus-latest|opus-4.8|opus-4-8|opus-48|opus48|4.8|4-8|claude-opus-4-8*)
+            resolved_model="claude-opus-4-8"
+            floor="2.1.154"
+            ;;
+        opus-4.7|opus-4-7|opus-47|opus47|4.7|4-7|claude-opus-4-7*)
             resolved_model="claude-opus-4-7"
             floor="2.1.111"
             ;;
@@ -2726,9 +2893,11 @@ cmd_doctor() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --fix) fix=true; shift ;;
-            --profile-level) profile_level="$2"; shift 2 ;;
-            --repo) repo="$2"; shift 2 ;;
-            *) repo="${repo:-$1}"; shift ;;
+            --profile-level) require_option_value "$1" "${2-}"; profile_level="$OPTION_VALUE"; shift 2 ;;
+            --repo) require_option_value "$1" "${2-}"; repo="$OPTION_VALUE"; shift 2 ;;
+            *)
+                [[ "$1" != -* && -z "$repo" ]] || reject_unexpected_arg "doctor" "$1"
+                repo="$1"; shift ;;
         esac
     done
 

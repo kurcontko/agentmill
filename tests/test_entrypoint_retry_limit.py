@@ -128,7 +128,8 @@ class PushBranchWithRetriesTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertNotIn("Push rejected, rebasing and retrying", result.stdout)
-        self.assertIn("ERROR: git push failed permanently:", result.stdout)
+        self.assertIn("ERROR: git push failed permanently for branch agent-1", result.stdout)
+        self.assertIn("git push:", result.stdout)
         self.assertIn("remote rejected", result.stdout)
 
     def test_retries_non_fast_forward_failures(self) -> None:

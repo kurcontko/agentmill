@@ -5,8 +5,8 @@
 <h1 align="center">AgentMill</h1>
 
 <p align="center">
-  A Docker container that runs Claude Code in a respawning loop.<br>
-  Point it at a repo and a prompt — it works, commits, pushes, and repeats.<br>
+  A Docker harness that runs AI coding clients in a respawning loop.<br>
+  Point it at a repo and a prompt — it works, audits, commits when allowed, and repeats.<br>
   <strong>Tasks go in, code comes out.</strong>
 </p>
 
@@ -16,7 +16,7 @@
   <a href="https://github.com/kurcontko/agentmill/actions/workflows/codeql.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/codeql.yml/badge.svg" alt="CodeQL"></a>
   <a href="https://sonarcloud.io/summary/overall?id=kurcontko_agentmill"><img src="https://sonarcloud.io/api/project_badges/measure?project=kurcontko_agentmill&metric=security_rating" alt="Security Rating"></a>
   <a href="https://sonarcloud.io/summary/overall?id=kurcontko_agentmill"><img src="https://sonarcloud.io/api/project_badges/measure?project=kurcontko_agentmill&metric=reliability_rating" alt="Reliability Rating"></a>
-  <a href="https://github.com/ossf/scorecard"><img src="https://api.scorecard.dev/projects/github.com/kurcontko/agentmill/badge" alt="OpenSSF Scorecard"></a>
+  <a href="https://github.com/kurcontko/agentmill/actions/workflows/scorecard.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/scorecard.yml/badge.svg" alt="OpenSSF Scorecard"></a>
 </p>
 
 ## Quick Start
@@ -99,7 +99,9 @@ forces `MAX_ITERATIONS=1` and uses a one-off container.
 
 ### 3. `watch` — autonomous TUI, you observe
 
-Full Claude Code TUI in your terminal. Claude works autonomously (all tool calls auto-approved) while you watch file edits, tool calls, and reasoning in real time. You're an observer, not a driver.
+Full selected-client TUI in your terminal. The agent works autonomously under
+the active profile policy while you watch file edits, tool calls, and reasoning
+in real time. You're an observer, not a driver.
 
 ```bash
 # Single autonomous session, then exit
@@ -117,7 +119,9 @@ REPO_PATH=/path/to/repo RESPAWN=true docker compose run watch
 
 ### 4. `interactive` — you drive
 
-Plain Claude Code TUI. No prompt injected, no automation. You type, Claude responds. Same as running `claude` locally, but inside the container with the repo and tools already set up.
+Plain selected-client TUI. No prompt injected, no automation. You type, the
+client responds. Same idea as running the client locally, but inside the
+container with the repo and tools already set up.
 
 ```bash
 REPO_PATH=/path/to/repo docker compose run interactive
@@ -166,6 +170,8 @@ limit, log-size limit, profile level, commit mode, completion gate, verifier
 command, network label, and MCP allowlist. Non-empty env values from `.env` or
 the shell win over profile defaults, and CLI flags win over both.
 See `docs/PROFILES.md` for the full field list.
+See `docs/AGENTS.md` for the role-contract patterns borrowed from OpenClaw and
+the larger agent patterns intentionally left out.
 
 ## Workspace Isolation
 
@@ -212,6 +218,12 @@ high-risk change policy, hooks, `.env` schema, model/version compatibility,
 latest MCP manifest reachability, and the host Claude CLI.
 `./mill doctor --fix` creates starter local files and directories such as
 `.env`, `prompts/`, `logs/`, `memory/`, and `hooks/`.
+
+## CI
+
+CI is intentionally small and split into focused gates. See
+[`docs/CI.md`](docs/CI.md) for the workflow layout and the OpenClaw patterns
+that were adapted here.
 
 ## Configuration
 
@@ -337,12 +349,13 @@ When `AUTO_SETUP=true` (default), AgentMill bootstraps the repo's dev environmen
 1. `REPO_SETUP_COMMAND` if set, otherwise:
 2. `Makefile` with an `install` target → `make install`
 3. `pyproject.toml` + `uv.lock` → `uv sync --frozen`
-4. `pyproject.toml` alone → `pip install .`
-5. `requirements.txt` → `pip install -r requirements.txt`
-6. Node lockfiles → `npm ci`, `pnpm install --frozen-lockfile`, or
+4. `pyproject.toml` + `poetry.lock` → `poetry install --no-interaction`
+5. `pyproject.toml` alone → editable `pip install`
+6. `requirements.txt` → `pip install -r requirements.txt`
+7. Node lockfiles → `npm ci`, `pnpm install --frozen-lockfile`, or
    `yarn install --immutable`
-7. `go.mod` → `go mod download`
-8. `Cargo.toml` + `Cargo.lock` → `cargo fetch`
+8. `go.mod` → `go mod download`
+9. `Cargo.toml` + `Cargo.lock` → `cargo fetch`
 
 The `.venv/bin` is prepended to `PATH`, so tools like `pytest` and `ruff` are available to Claude.
 

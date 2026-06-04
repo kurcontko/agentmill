@@ -24,6 +24,22 @@ write_fixture() {
     printf 'command\n' > "$case_dir/host-commands/release.md"
     printf 'project skill\n' > "$case_dir/workspace/repo/.claude/skills/skill-a/SKILL.md"
     printf 'project agent\n' > "$case_dir/workspace/repo/.claude/agents/agent-a.md"
+    cat > "$case_dir/host-plugins/installed_plugins.json" <<'JSON'
+{
+  "plugins": [
+    {
+      "name": "plugin-a",
+      "installPath": "/Users/test/.claude/plugins/plugin-a"
+    },
+    {
+      "name": "plugin-b",
+      "installLocation": "/Users/test/.claude/plugins/plugin-b/.claude/plugins/nested",
+      "note": "/Users/test/.claude/plugins/should-not-change"
+    }
+  ],
+  "note": "/Users/test/.claude/plugins/should-not-change"
+}
+JSON
 
     cat > "$case_dir/host-claude.json" <<'JSON'
 {
@@ -161,6 +177,12 @@ assert explicit_settings["enabledPlugins"] == ["plugin-a"]
 assert "hooks" in explicit_settings
 assert explicit_settings["env"]["HOST_SECRET"] == "should-not-forward-by-default"
 assert (explicit_root / "home/.claude/plugins/plugin-a/plugin.txt").is_file()
+plugin_manifest = json.loads((explicit_root / "home/.claude/plugins/installed_plugins.json").read_text())
+plugin_a, plugin_b = plugin_manifest["plugins"]
+assert plugin_a["installPath"] == "/home/agent/.claude/plugins/plugin-a", plugin_manifest
+assert plugin_b["installLocation"] == "/home/agent/.claude/plugins/nested", plugin_manifest
+assert plugin_b["note"] == "/Users/test/.claude/plugins/should-not-change", plugin_manifest
+assert plugin_manifest["note"] == "/Users/test/.claude/plugins/should-not-change", plugin_manifest
 assert (explicit_root / "home/.claude/skills/skill-a/SKILL.md").is_file()
 assert not (explicit_root / "home/.claude/skills/skill-b/SKILL.md").exists()
 assert (explicit_root / "home/.claude/agents/agent-a/agent.md").is_file()
@@ -186,5 +208,61 @@ assert (trusted_root / "home/.claude/commands/release.md").is_file()
 PY
 
 grep -q '~/.claude/commands:/home/agent/.host-commands:ro' "$REPO_ROOT/docker-compose.yml"
+
+empty_settings_dir="$TMPDIR/empty-settings"
+mkdir -p "$empty_settings_dir/home/.claude"
+printf '{}\n' > "$empty_settings_dir/host-claude.json"
+printf '{}\n' > "$empty_settings_dir/settings.host.json"
+env \
+    HOME="$empty_settings_dir/home" \
+    HOST_CONFIG="$empty_settings_dir/host-claude.json" \
+    TARGET_CONFIG="$empty_settings_dir/home/.claude.json" \
+    HOST_SETTINGS="$empty_settings_dir/settings.host.json" \
+    TARGET_SETTINGS="$empty_settings_dir/home/.claude/settings.json" \
+    AGENTMILL_PROFILE_LEVEL=trusted \
+    bash "$REPO_ROOT/setup-claude-config.sh"
+python3 - "$empty_settings_dir/home/.claude/settings.json" <<'PY'
+import json
+import sys
+
+settings = json.load(open(sys.argv[1]))
+assert settings["permissions"]["defaultMode"] == "bypassPermissions", settings
+assert settings["skipDangerousModePermissionPrompt"] is True, settings
+assert settings["enableAllProjectMcpServers"] is True, settings
+PY
+
+bad_dir="$TMPDIR/bad-config"
+mkdir -p "$bad_dir/home/.claude"
+printf '{not json\n' > "$bad_dir/host-claude.json"
+printf '{}\n' > "$bad_dir/settings.host.json"
+set +e
+bad_output="$(
+    env \
+        HOME="$bad_dir/home" \
+        HOST_CONFIG="$bad_dir/host-claude.json" \
+        TARGET_CONFIG="$bad_dir/home/.claude.json" \
+        HOST_SETTINGS="$bad_dir/settings.host.json" \
+        TARGET_SETTINGS="$bad_dir/home/.claude/settings.json" \
+        AGENTMILL_PROFILE_LEVEL=trusted \
+        bash "$REPO_ROOT/setup-claude-config.sh" 2>&1
+)"
+bad_rc=$?
+set -e
+[[ "$bad_rc" -eq 0 ]] || { echo "setup should warn, not fail, on unreadable host config" >&2; printf '%s\n' "$bad_output" >&2; exit 1; }
+[[ "$bad_output" == *"[setup-claude-config] WARN: failed to load"* ]] || {
+    echo "expected visible host config merge warning" >&2
+    printf '%s\n' "$bad_output" >&2
+    exit 1
+}
+[[ -f "$bad_dir/home/.claude.json" ]]
+python3 - "$bad_dir/home/.claude/settings.json" <<'PY'
+import json
+import sys
+
+settings = json.load(open(sys.argv[1]))
+assert settings["permissions"]["defaultMode"] == "bypassPermissions", settings
+assert settings["skipDangerousModePermissionPrompt"] is True, settings
+assert settings["enableAllProjectMcpServers"] is True, settings
+PY
 
 echo "PASS test_host_config_forwarding"

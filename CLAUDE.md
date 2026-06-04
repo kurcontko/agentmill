@@ -1,6 +1,10 @@
 # AgentMill
 
-Docker-based framework for running autonomous AI agents (Claude Code) in respawning loops. Give it a git repo and a prompt — it clones, works, commits, pushes, and repeats.
+Docker-based framework for running autonomous coding agents in respawning
+loops. Claude Code is the default client, and Codex, OpenCode, Qwen Code,
+Gemini CLI, and the fake test client use the same harness surface. Give it a
+git repo and a prompt: it works in bounded iterations, records events, applies
+policy, commits when allowed, pushes when allowed, and repeats.
 
 ## Commands
 
@@ -8,11 +12,15 @@ Docker-based framework for running autonomous AI agents (Claude Code) in respawn
 # CLI (preferred)
 ./mill run ~/myrepo                        # headless loop
 ./mill run ~/myrepo --model opus --iterations 5
+./mill exec ~/myrepo --agent reviewer      # one bounded iteration
 ./mill watch ~/myrepo --ralph              # autonomous TUI with Ralph Loop
 ./mill multi ~/myrepo 3                    # 3 parallel agents
-./mill shell ~/myrepo                      # interactive Claude session
-./mill status                              # show agent iteration status
-./mill history                             # show iteration results log
+./mill shell ~/myrepo                      # interactive selected-client session
+./mill profiles                            # list built-in role profiles
+./mill doctor ~/myrepo                     # preflight auth, Docker, repo, policy
+./mill status --json                       # show agent iteration status
+./mill history --json                      # show iteration results log
+./mill events --tail 20                    # show structured events
 ./mill memory                              # list memory topics
 ./mill memory decisions                    # read a memory topic
 ./mill memory --search "pattern"           # search across memory
@@ -29,7 +37,7 @@ REPO_PATH=/path/to/repo docker compose run watch
 REPO_PATH=/path/to/repo docker compose run interactive
 
 # Test
-python3 -m unittest tests.test_entrypoint_retry_limit
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_*.py'
 bash tests/test_entrypoint_push_retry.sh
 
 # Lint
@@ -40,25 +48,33 @@ shellcheck entrypoint.sh entrypoint-tui.sh mill
 
 ```
 mill                   # CLI wrapper — run/watch/multi/shell/status/memory/history
-entrypoint.sh          # Claude headless agent loop
-entrypoint-tui.sh      # Claude interactive TUI mode
-entrypoint-common.sh   # Shared functions: logging, auth, git, settings, sentinel, memory
-setup-repo-env.sh      # Auto-bootstrap repo (uv/poetry/pip detection)
-setup-claude-config.sh # Merge host Claude config into container
+entrypoint.sh          # Headless selected-client loop
+entrypoint-tui.sh      # TUI/watch/interactive client mode
+entrypoint-common.sh   # Shared runtime: logging, policy, events, git, clients, gates
+setup-repo-env.sh      # Auto-bootstrap repo (make/uv/poetry/pip/node/go/rust)
+setup-claude-config.sh # Generate isolated Claude config and policy hooks
+scripts/               # Helper CLIs for profiles, policy, ACP bridge, egress proxy
 prompts/               # Agent task prompts (PROMPT.md, PROMPT_LITE.md, PROMPT_MEMORY.md)
 memory/                # Shared markdown memory (flock-guarded, multi-agent safe)
-logs/results.tsv       # Iteration results log (Karpathy autoresearch pattern)
+logs/results.tsv       # Iteration results log
+logs/events.jsonl      # Structured redacted event log
 ```
 
 ## Key Patterns
 
-- **Respawning Loop**: Each iteration runs Claude in a fresh context, commits results, waits, repeats. No context rot. This is a productionized Ralph loop (Huntley 2025); see `docs/LONG_RUNNING.md` for pedigree and Anthropic's Mar 2026 post endorsing the pattern.
+- **Respawning Loop**: Each iteration runs the selected client in a fresh
+  context, commits allowed results, waits, repeats. No context rot. This is a
+  productionized Ralph loop (Huntley 2025); see `docs/LONG_RUNNING.md`.
 - **Multi-Agent Sync**: Agents push to their own branches (`agent-1`, `agent-2`, etc.). On conflict: rebase + retry (max 3).
 - **Graceful Shutdown**: Entrypoints trap SIGTERM/SIGINT, complete current session, commit WIP, exit.
-- **Settings Override**: Agents backup `.claude/settings.local.json`, apply permissive config, restore on exit.
-- **Auto-Setup**: Detects `pyproject.toml`/`requirements.txt` and runs appropriate installer (uv > poetry > pip).
+- **Profile Policy**: `agents/*.toml` controls prompt, model, trust level,
+  branch pattern, network, MCP allowlist, budgets, and completion gate.
+- **Settings Projection**: The harness generates client-specific settings and
+  policy for Claude, Codex, OpenCode, Qwen, Gemini, and ACP where supported.
+- **Auto-Setup**: Detects Make, Python, Node, Go, and Rust setup paths.
 - **Shared Memory**: Agents write to `memory/` via flock-guarded append-only markdown files. Read freely, write safely.
-- **Iteration Log**: Every iteration appends to `logs/results.tsv` (agent, files changed, commits, status). View with `mill history`.
+- **Iteration Logs**: Every iteration appends to `logs/results.tsv`,
+  `logs/events.jsonl`, and gate-specific files such as `logs/convergence.tsv`.
 
 ## Code Conventions
 
@@ -68,17 +84,24 @@ logs/results.tsv       # Iteration results log (Karpathy autoresearch pattern)
 - Git operations must have retry limits; never retry infinitely
 - All user-facing config via environment variables (see docker-compose.yml)
 - Status files go under `logs/` directory hierarchy
+- Keep generated bytecode, cache directories, and local run artifacts out of
+  reviews.
 
 ## Testing
 
 - Python tests use `unittest` (no pytest dependency in the framework itself)
-- Shell tests use plain bash assertions or bats
+- Shell tests use plain bash assertions
 - Run individual test files, not the full suite, during development
+- For broad verification, run Python discovery and then the shell scripts,
+  skipping `tests/test_smoke_integration.sh` unless Docker integration is
+  intended.
 
 ## Important
 
 - Container runs as non-root `agent` user (UID 1000)
 - Claude runs with `--dangerously-skip-permissions` inside containers — this is intentional for automation
+- Standard and untrusted `mill run/watch` modes default to read-only clone
+  workspaces; direct writable host mounts are for trusted work.
 - Multi-agent services share `REPO_PATH` as upstream but clone into isolated workspaces
 - PROMPT files are mounted at `/prompts/` inside the container
 

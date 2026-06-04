@@ -1,0 +1,8 @@
+# actionlint configuration
+# https://github.com/rhysd/actionlint/blob/main/docs/config.md
+
+paths:
+  .github/workflows/**/*.yml:
+    ignore:
+      # Shell snippets are covered by ShellCheck in the main CI workflow.
+      - "shellcheck reported issue.+"

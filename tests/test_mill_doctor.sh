@@ -208,7 +208,7 @@ rm -rf "$harness/agents" "$harness/scripts"
 
 sed -i 's/^ARG CLAUDE_CODE_VERSION=.*/ARG CLAUDE_CODE_VERSION=2.1.1/' "$harness/Dockerfile"
 old_model_output="$(env "${doctor_env[@]}" MODEL=opus "$harness/mill" doctor "$repo")"
-assert_contains "$old_model_output" "[WARN] model: MODEL=opus resolves to claude-opus-4-7 but Dockerfile CLAUDE_CODE_VERSION=2.1.1 is older than floor 2.1.111"
+assert_contains "$old_model_output" "[WARN] model: MODEL=opus resolves to claude-opus-4-8 but Dockerfile CLAUDE_CODE_VERSION=2.1.1 is older than floor 2.1.154"
 
 docker_bin="$TMPDIR/docker-bin"
 mkdir -p "$docker_bin"

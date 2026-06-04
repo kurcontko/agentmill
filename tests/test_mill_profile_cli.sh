@@ -4,6 +4,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
+export AGENTMILL_EGRESS_ALLOWLIST=api.anthropic.com
 
 repo="$TMPDIR/repo"
 mkdir -p "$repo"
@@ -13,6 +14,12 @@ git -C "$repo" config user.email test@example.com
 printf 'test\n' > "$repo/README.md"
 git -C "$repo" add README.md
 git -C "$repo" commit -q -m init
+
+harness="$TMPDIR/harness"
+mkdir -p "$harness"
+cp "$REPO_ROOT/mill" "$REPO_ROOT/docker-compose.yml" "$harness/"
+cp -R "$REPO_ROOT/agents" "$REPO_ROOT/scripts" "$harness/"
+chmod +x "$harness/mill"
 
 mkdir -p "$TMPDIR/bin"
 cat > "$TMPDIR/bin/docker" <<'SH'
@@ -45,8 +52,9 @@ assert_contains() {
     fi
 }
 
-run_output="$(PATH="$TMPDIR/bin:$PATH" "$REPO_ROOT/mill" run "$repo" --agent researcher-depth --iterations 2 --max-log-bytes 12345 --max-total-tokens 1000 --max-total-usd 1.25 --model haiku)"
-assert_contains "$run_output" "ARGS:compose -f $REPO_ROOT/docker-compose.yml up headless-clone"
+run_output="$(PATH="$TMPDIR/bin:$PATH" "$harness/mill" run "$repo" --agent researcher-depth --iterations 2 --max-log-bytes 12345 --max-total-tokens 1000 --max-total-usd 1.25 --model haiku)"
+assert_contains "$run_output" "ARGS:compose -f $harness/docker-compose.yml"
+assert_contains "$run_output" " up headless-clone"
 assert_contains "$run_output" "AGENTMILL_ROLE=researcher-depth"
 assert_contains "$run_output" "AGENTMILL_WORKSPACE_MODE=readonly-clone"
 assert_contains "$run_output" "PROMPT_FILE=/prompts/PROMPT_RESEARCH_DEPTH.md"
@@ -58,13 +66,15 @@ assert_contains "$run_output" "MAX_LOG_BYTES=12345"
 assert_contains "$run_output" "MAX_TOTAL_TOKENS=1000"
 assert_contains "$run_output" "MAX_TOTAL_USD=1.25"
 
-trusted_output="$(PATH="$TMPDIR/bin:$PATH" "$REPO_ROOT/mill" run "$repo" --profile-level trusted --iterations 1)"
-assert_contains "$trusted_output" "ARGS:compose -f $REPO_ROOT/docker-compose.yml up headless"
+trusted_output="$(PATH="$TMPDIR/bin:$PATH" "$harness/mill" run "$repo" --profile-level trusted --iterations 1)"
+assert_contains "$trusted_output" "ARGS:compose -f $harness/docker-compose.yml"
+assert_contains "$trusted_output" " up headless"
 assert_contains "$trusted_output" "AGENTMILL_PROFILE_LEVEL=trusted"
 assert_contains "$trusted_output" "AGENTMILL_WORKSPACE_MODE=direct"
 
-exec_output="$(PATH="$TMPDIR/bin:$PATH" "$REPO_ROOT/mill" exec "$repo" --agent reviewer --max-log-bytes 999)"
-assert_contains "$exec_output" "ARGS:compose -f $REPO_ROOT/docker-compose.yml run --rm headless-clone"
+exec_output="$(PATH="$TMPDIR/bin:$PATH" "$harness/mill" exec "$repo" --agent reviewer --max-log-bytes 999)"
+assert_contains "$exec_output" "ARGS:compose -f $harness/docker-compose.yml"
+assert_contains "$exec_output" " run --rm headless-clone"
 assert_contains "$exec_output" "AGENTMILL_RUN_MODE=exec"
 assert_contains "$exec_output" "AGENTMILL_ROLE=reviewer"
 assert_contains "$exec_output" "AGENTMILL_WORKSPACE_MODE=readonly-clone"
@@ -74,14 +84,15 @@ assert_contains "$exec_output" "AUTO_COMMIT=off"
 assert_contains "$exec_output" "MAX_LOG_BYTES=999"
 
 set +e
-direct_output="$(PATH="$TMPDIR/bin:$PATH" "$REPO_ROOT/mill" run "$repo" --agent researcher-depth --workspace-mode direct 2>&1)"
+direct_output="$(PATH="$TMPDIR/bin:$PATH" "$harness/mill" run "$repo" --agent researcher-depth --workspace-mode direct 2>&1)"
 direct_rc=$?
 set -e
 [[ "$direct_rc" -ne 0 ]] || { echo "expected standard direct workspace mode to fail without override" >&2; exit 1; }
 assert_contains "$direct_output" "standard/untrusted direct workspace mode requires AGENTMILL_ALLOW_DIRECT_HOST_REPO=true"
 
-multi_output="$(PATH="$TMPDIR/bin:$PATH" "$REPO_ROOT/mill" multi "$repo" --roles coder,researcher-depth)"
-assert_contains "$multi_output" "ARGS:compose -f $REPO_ROOT/docker-compose.yml up agent-1 agent-2"
+multi_output="$(PATH="$TMPDIR/bin:$PATH" "$harness/mill" multi "$repo" --roles coder,researcher-depth)"
+assert_contains "$multi_output" "ARGS:compose -f $harness/docker-compose.yml"
+assert_contains "$multi_output" " up agent-1 agent-2"
 assert_contains "$multi_output" "AGENTMILL_ROLE_1=coder"
 assert_contains "$multi_output" "AGENTMILL_ROLE_2=researcher-depth"
 assert_contains "$multi_output" "PROMPT_FILE_1=/prompts/PROMPT.md"
