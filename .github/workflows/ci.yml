@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, "split/**"]
+    branches: [main]
   pull_request:
-    branches: [main, "split/**"]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -30,7 +30,7 @@ jobs:
           persist-credentials: false
 
       - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # v2.0.0
         with:
           scandir: "."
           format: gcc
@@ -64,7 +64,7 @@ jobs:
           persist-credentials: false
 
       - name: Compile Python sources
-        run: python3 -m compileall -q tests
+        run: python3 -m compileall -q agentmill scripts tests/test_entrypoint_retry_limit.py
 
       - name: Run Python unit tests
         run: python3 -m unittest discover -s tests -p 'test_*.py'

@@ -1,6 +1,7 @@
 .git
 .github
 .claude
+.agents
 .docs
 .env
 .env.*

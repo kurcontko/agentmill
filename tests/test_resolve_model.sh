@@ -34,20 +34,24 @@ assert_resolves() {
 }
 
 # Family aliases default to the latest in each family.
-assert_resolves "opus"            "claude-opus-4-7"
+assert_resolves "opus"            "claude-opus-4-8"
 assert_resolves "sonnet"          "claude-sonnet-4-6"
 assert_resolves "haiku"           "claude-haiku-4-5-20251001"
 
 # Case-insensitive.
-assert_resolves "Opus"            "claude-opus-4-7"
+assert_resolves "Opus"            "claude-opus-4-8"
 assert_resolves "SONNET"          "claude-sonnet-4-6"
 
 # *-latest synonyms.
-assert_resolves "opus-latest"     "claude-opus-4-7"
+assert_resolves "opus-latest"     "claude-opus-4-8"
 assert_resolves "sonnet-latest"   "claude-sonnet-4-6"
 assert_resolves "haiku-latest"    "claude-haiku-4-5-20251001"
 
 # Explicit version aliases — multiple separators.
+assert_resolves "opus-4.8"        "claude-opus-4-8"
+assert_resolves "opus-4-8"        "claude-opus-4-8"
+assert_resolves "opus-48"         "claude-opus-4-8"
+assert_resolves "opus48"          "claude-opus-4-8"
 assert_resolves "opus-4.7"        "claude-opus-4-7"
 assert_resolves "opus-4-7"        "claude-opus-4-7"
 assert_resolves "opus-47"         "claude-opus-4-7"
@@ -58,14 +62,15 @@ assert_resolves "haiku-4.5"       "claude-haiku-4-5-20251001"
 assert_resolves "haiku-45"        "claude-haiku-4-5-20251001"
 
 # Bare version numbers: documented mapping (current flagship of each tier).
+assert_resolves "4.8"             "claude-opus-4-8"
 assert_resolves "4.7"             "claude-opus-4-7"
 assert_resolves "4.6"             "claude-sonnet-4-6"
 assert_resolves "4.5"             "claude-haiku-4-5-20251001"
 
 # Already-qualified IDs pass through (lowercased).
-assert_resolves "claude-opus-4-7" "claude-opus-4-7"
+assert_resolves "claude-opus-4-8" "claude-opus-4-8"
 assert_resolves "claude-sonnet-4-6" "claude-sonnet-4-6"
-assert_resolves "Claude-Opus-4-7" "claude-opus-4-7"  # case-folded passthrough
+assert_resolves "Claude-Opus-4-8" "claude-opus-4-8"  # case-folded passthrough
 
 # Unknown values pass through as-is and emit a WARN to stderr.
 : > "$WARN_LOG"

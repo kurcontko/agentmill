@@ -1,0 +1,17 @@
+description = "Research red-team role for citation and claim audits."
+prompt_file = "/prompts/PROMPT_RESEARCH_REDTEAM.md"
+model = "sonnet"
+branch_pattern = "main"
+max_iterations = 10
+loop_delay = 30
+max_wall_seconds = 7200
+max_log_bytes = 52428800
+profile_level = "standard"
+auto_commit_mode = "on"
+completion_gate = "research_saturation"
+research_saturation_iterations = 3
+research_open_questions_max = 0
+network = "allowlist"
+mcp_allowlist = ["BrightData"]
+skill_allowlist = []
+forward_host_mcp = true

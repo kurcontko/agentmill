@@ -1,0 +1,16 @@
+description = "Focused refactor agent with bounded iterations."
+prompt_file = "/prompts/REFACTOR_ELITE.md"
+model = "sonnet"
+branch_pattern = "refactor-{agent_id}"
+max_iterations = 7
+loop_delay = 5
+max_wall_seconds = 7200
+max_log_bytes = 52428800
+profile_level = "standard"
+auto_commit_mode = "wip"
+completion_gate = "refactor_verified"
+refactor_max_loc_delta = -1
+network = "allowlist"
+mcp_allowlist = []
+skill_allowlist = []
+forward_host_mcp = false

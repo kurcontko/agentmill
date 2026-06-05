@@ -38,7 +38,6 @@ class PushBranchWithRetriesTests(unittest.TestCase):
         self.root = Path(self.tempdir.name)
         self.origin = self.root / "origin.git"
         self.seed = self.root / "seed"
-        self.worker = self.root / "worker"
         self.logs = self.root / "logs"
         self.helper = (
             extract_shell_function(Path("entrypoint-common.sh"), "push_failure_is_retryable")
@@ -59,38 +58,43 @@ class PushBranchWithRetriesTests(unittest.TestCase):
         run(["git", "push", "origin", "agent-1"], cwd=self.seed)
         run(["git", "symbolic-ref", "HEAD", "refs/heads/main"], cwd=self.origin)
 
-        run(["git", "clone", str(self.origin), str(self.worker)], cwd=self.root)
-        run(["git", "checkout", "agent-1"], cwd=self.worker)
-        run(["git", "config", "user.name", "Test User"], cwd=self.worker)
-        run(["git", "config", "user.email", "test@example.com"], cwd=self.worker)
-
-        self.upstream_worker = self.root / "upstream-worker"
-        run(["git", "clone", str(self.origin), str(self.upstream_worker)], cwd=self.root)
-        run(["git", "checkout", "agent-1"], cwd=self.upstream_worker)
-        run(["git", "config", "user.name", "Test User"], cwd=self.upstream_worker)
-        run(["git", "config", "user.email", "test@example.com"], cwd=self.upstream_worker)
+        self.worker = self.clone_worker("worker")
+        self.upstream_worker = self.clone_worker("upstream-worker")
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
+    def clone_worker(self, name: str) -> Path:
+        worker = self.root / name
+        run(["git", "clone", str(self.origin), str(worker)], cwd=self.root)
+        run(["git", "checkout", "agent-1"], cwd=worker)
+        run(["git", "config", "user.name", "Test User"], cwd=worker)
+        run(["git", "config", "user.email", "test@example.com"], cwd=worker)
+        return worker
+
+    def make_commit(self, worker: Path, path: str, message: str, contents: str | None = None) -> None:
+        target = worker / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents if contents is not None else f"{message}\n")
+        run(["git", "add", path], cwd=worker)
+        run(["git", "commit", "-m", message], cwd=worker)
+
     def make_worker_commit(self, message: str) -> None:
-        target = self.worker / "change.txt"
-        target.write_text(f"{message}\n")
-        run(["git", "add", "change.txt"], cwd=self.worker)
-        run(["git", "commit", "-m", message], cwd=self.worker)
+        self.make_commit(self.worker, "change.txt", message)
 
     def make_upstream_commit(self, message: str) -> None:
-        target = self.upstream_worker / "upstream.txt"
-        target.write_text(f"{message}\n")
-        run(["git", "add", "upstream.txt"], cwd=self.upstream_worker)
-        run(["git", "commit", "-m", message], cwd=self.upstream_worker)
+        self.make_commit(self.upstream_worker, "upstream.txt", message)
         run(["git", "push", "origin", "agent-1"], cwd=self.upstream_worker)
 
-    def run_helper(self) -> subprocess.CompletedProcess[str]:
+    def remote_file(self, path: str) -> str:
+        return run(["git", "--git-dir", str(self.origin), "show", f"agent-1:{path}"], cwd=self.root).stdout
+
+    def run_helper(self, worker: Path | None = None, retries: int = 3) -> subprocess.CompletedProcess[str]:
+        worker = worker or self.worker
         script = textwrap.dedent(
             f"""
             set -euo pipefail
-            PUSH_REBASE_MAX_RETRIES=3
+            PUSH_REBASE_MAX_RETRIES={retries}
             AGENT_ID=1
             LOG_DIR="{self.logs}"
             mkdir -p "$LOG_DIR"
@@ -99,10 +103,14 @@ class PushBranchWithRetriesTests(unittest.TestCase):
                 printf '%s\\n' "$*"
             }}
 
+            enforce_git_remote_action_policy() {{
+                return 0
+            }}
+
             {self.helper}
 
-            cd "{self.worker}"
-            if push_branch_with_retries agent-1 3; then
+            cd "{worker}"
+            if push_branch_with_retries agent-1 {retries}; then
                 exit 0
             fi
             exit 1
@@ -142,6 +150,37 @@ class PushBranchWithRetriesTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("Push rejected, rebasing and retrying", result.stdout)
         self.assertNotIn("ERROR: push failed after 3 retries", result.stdout)
+
+    def test_two_agents_push_same_branch_and_second_rebases_successfully(self) -> None:
+        first_agent = self.clone_worker("first-agent")
+        second_agent = self.clone_worker("second-agent")
+        self.make_commit(first_agent, "first.txt", "first agent change")
+        self.make_commit(second_agent, "second.txt", "second agent change")
+
+        first_result = self.run_helper(first_agent)
+        second_result = self.run_helper(second_agent)
+
+        self.assertEqual(first_result.returncode, 0, first_result.stdout + first_result.stderr)
+        self.assertEqual(second_result.returncode, 0, second_result.stdout + second_result.stderr)
+        self.assertNotIn("Push rejected, rebasing and retrying", first_result.stdout)
+        self.assertEqual(second_result.stdout.count("Push rejected, rebasing and retrying"), 1)
+        self.assertEqual(self.remote_file("first.txt"), "first agent change\n")
+        self.assertEqual(self.remote_file("second.txt"), "second agent change\n")
+
+    def test_two_agents_conflict_and_second_fails_after_retry_limit(self) -> None:
+        first_agent = self.clone_worker("conflict-first-agent")
+        second_agent = self.clone_worker("conflict-second-agent")
+        self.make_commit(first_agent, "shared.txt", "first conflict change", "first\n")
+        self.make_commit(second_agent, "shared.txt", "second conflict change", "second\n")
+
+        first_result = self.run_helper(first_agent, retries=2)
+        second_result = self.run_helper(second_agent, retries=2)
+
+        self.assertEqual(first_result.returncode, 0, first_result.stdout + first_result.stderr)
+        self.assertEqual(second_result.returncode, 1, second_result.stdout + second_result.stderr)
+        self.assertEqual(second_result.stdout.count("WARN: Rebase conflict on retry"), 2)
+        self.assertIn("ERROR: push failed after 2 retries", second_result.stdout)
+        self.assertEqual(self.remote_file("shared.txt"), "first\n")
 
 
 if __name__ == "__main__":

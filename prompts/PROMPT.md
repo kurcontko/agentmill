@@ -71,9 +71,13 @@ Do not edit code, run task verifiers, or make git commits until you are inside t
 - If you are not inside the claimed task worktree yet, stop and create or enter it now.
 - Do all code edits, tests, and git operations in the task worktree.
 - The shared repo root is for coordination only: `TASK.md`, `PROGRESS.md`, and `current_tasks/`.
+- Before writing implementation code, define the **verification contract** for this session: the exact acceptance criterion, the command or human-like smoke check that proves it, and the file where pass/fail state will be recorded. If `TASK.md` already defines this, restate the one item you are handling and use that.
+- Treat pass/fail status as structured state. If the repo has `tests.json`, `feature_list.json`, task checkboxes, or another status ledger, update only the relevant status after evidence passes. Do not delete, weaken, or rewrite acceptance criteria to make completion easier.
 - One logical change at a time. Follow existing patterns.
 - **Test-first.** Every new module gets a test file BEFORE implementation. When you find a bug, write a failing test that reproduces it BEFORE fixing it. No exceptions, even for one-line fixes — the test is the receipt that the fix worked.
 - **Fast inner loop, full suite at the gate.** Use the project's fast subset (e.g. `pytest -q -m 'not slow'`, `pytest --fast`, `npm test -- --shard`, `cargo test --lib`) after every change. Run the full suite only before commit. **You cannot tell time** — do not burn a session on a 30-minute suite when a 1-minute subset catches the same regression.
+- For user-facing UI or workflow changes, include a human-like end-to-end check when tools are available (browser automation, CLI scenario, API flow). Unit tests alone do not prove an interactive feature works.
+- If a reviewer, evaluator, or red-team role exists, leave a concrete review request in `PROGRESS.md` or the task ledger. Do not treat your own positive assessment as equivalent to an external verifier.
 - Max 3 serious attempts per sub-problem, then document blocker and change approach.
 - If task requires recent knowledge or documentation do not hesitate to use web search. It's recommended to ground your work if needed.
 - If stuck on a broad problem, decompose: split by test, by component, by file. Compare against known-good implementations when available.
@@ -90,6 +94,8 @@ If you have spent more than ~20% of your token budget on the same failing check 
 
 Then exit. A fresh respawn often sees the bug instantly because its context isn't poisoned by your dead-end traces. Flailing burns tokens; stopping creates a handoff the next session can act on.
 
+If context pressure is the problem, do not rush to declare completion. Checkpoint verified partial work, write the next exact step and failing/passing verifier output to `PROGRESS.md`, and exit cleanly without the completion sentinel unless the original verifier contract is actually satisfied.
+
 ### Persist & Exit
 
 🛑 **STOP. You are DONE after ONE task. Do not pick another task. Do not start another Orient-Claim-Execute cycle.**
@@ -103,6 +109,8 @@ Before exit:
 5. Sync or publish the worktree branch according to the repo workflow.
 6. Do not leave unpublished or unmerged changes stranded only in the worktree.
 7. Leave both the shared repo root and the task worktree clean and restartable.
+
+The `PROGRESS.md` update must include the verification evidence: command or scenario run, result, and any known residual risk. Future respawns should not have to infer why you believed the task was done.
 
 #### Failed approaches log — long-term memory across sessions
 

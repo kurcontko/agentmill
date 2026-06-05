@@ -56,17 +56,21 @@ help_output="$(run_mill run --help)"
 }
 
 run_mill run --iterations 1
+run_mill exec
 run_mill watch
 run_mill shell
 run_mill multi
 run_mill multi 2
+run_mill multi "$explicit_repo" --model opus
 run_mill run "$explicit_repo" --iterations 1
 
 grep -Fx "$repo :: compose -f $harness/docker-compose.yml up headless" "$docker_log"
+grep -Fx "$repo :: compose -f $harness/docker-compose.yml run --rm headless" "$docker_log"
 grep -Fx "$repo :: compose -f $harness/docker-compose.yml run watch" "$docker_log"
 grep -Fx "$repo :: compose -f $harness/docker-compose.yml run interactive" "$docker_log"
 grep -Fx "$repo :: compose -f $harness/docker-compose.yml up agent-1 agent-2 agent-3" "$docker_log"
 grep -Fx "$repo :: compose -f $harness/docker-compose.yml up agent-1 agent-2" "$docker_log"
+grep -Fx "$explicit_repo :: compose -f $harness/docker-compose.yml up agent-1 agent-2 agent-3" "$docker_log"
 grep -Fx "$explicit_repo :: compose -f $harness/docker-compose.yml up headless" "$docker_log"
 
 echo "PASS test_mill_repo_path_env"
