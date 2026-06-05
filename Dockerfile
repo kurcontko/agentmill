@@ -43,6 +43,7 @@ RUN chown agent:agent /workspace
 COPY entrypoint.sh /entrypoint.sh
 COPY entrypoint-tui.sh /entrypoint-tui.sh
 COPY entrypoint-common.sh /entrypoint-common.sh
+COPY lib/agentmill/sh /lib/agentmill/sh
 COPY setup-claude-config.sh /setup-claude-config.sh
 COPY setup-repo-env.sh /setup-repo-env.sh
 COPY auto-trust.exp /auto-trust.exp

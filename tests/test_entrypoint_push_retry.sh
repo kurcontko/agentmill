@@ -3,15 +3,9 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-extract_function() {
-    local func_name="$1"
-    local file="$2"
-    sed -n "/^${func_name}()/,/^}/p" "$REPO_ROOT/$file"
-    return 0
-}
-
 test_push_failure_is_retryable_matches_only_sync_failures() {
-    eval "$(extract_function push_failure_is_retryable entrypoint-common.sh)"
+    # shellcheck source=../lib/agentmill/sh/runtime/git.sh
+    . "$REPO_ROOT/lib/agentmill/sh/runtime/git.sh"
 
     push_failure_is_retryable '!	refs/heads/agent-1:refs/heads/agent-1	[rejected] (fetch first)'
     push_failure_is_retryable 'error: failed to push some refs to origin
@@ -25,12 +19,12 @@ hint: Updates were rejected because the tip of your current branch is behind
 }
 
 test_log_preserves_entrypoint_log_paths() {
-    eval "$(extract_function log entrypoint-common.sh)"
-
     local tmpdir
     tmpdir="$(mktemp -d)"
-    # shellcheck disable=SC2034 # Used by the eval'd log() helper.
+    # shellcheck disable=SC2034 # Used by the sourced log() helper.
     LOG_DIR="$tmpdir"
+    # shellcheck source=../lib/agentmill/sh/core/log.sh
+    . "$REPO_ROOT/lib/agentmill/sh/core/log.sh"
 
     unset AGENT_ID
     log "tui message" >/dev/null

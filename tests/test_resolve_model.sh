@@ -3,13 +3,6 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-extract_function() {
-    local func_name="$1"
-    local file="$2"
-    sed -n "/^${func_name}()/,/^}/p" "$REPO_ROOT/$file"
-    return 0
-}
-
 # Stub log_warn so resolve_model emits warnings to stderr (which is what
 # the real logger does for the warn path inside resolve_model). Variable
 # state can't leak out of $(...) command substitutions, so the test
@@ -18,7 +11,8 @@ log_warn() {
     echo "WARN $*" >&2
 }
 
-eval "$(extract_function resolve_model entrypoint-common.sh)"
+# shellcheck source=../lib/agentmill/sh/runtime/models.sh
+. "$REPO_ROOT/lib/agentmill/sh/runtime/models.sh"
 
 WARN_LOG="$(mktemp)"
 trap 'rm -f "$WARN_LOG"' EXIT
