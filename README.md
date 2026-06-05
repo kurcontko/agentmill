@@ -57,6 +57,9 @@ into the isolated Codex home only for trusted-profile runs. Standard and
 untrusted runs should use `CODEX_API_KEY`, `OPENAI_API_KEY`, or
 `CODEX_ACCESS_TOKEN` instead.
 
+For GitHub Actions PR review with Claude Code and DeepSeek, see
+[`docs/claude-code-github-actions.md`](docs/claude-code-github-actions.md).
+
 ## How to Run
 
 Pick the mode that fits your workflow:
