@@ -17,7 +17,21 @@
   <a href="https://sonarcloud.io/summary/overall?id=kurcontko_agentmill"><img src="https://sonarcloud.io/api/project_badges/measure?project=kurcontko_agentmill&metric=security_rating" alt="Security Rating"></a>
   <a href="https://sonarcloud.io/summary/overall?id=kurcontko_agentmill"><img src="https://sonarcloud.io/api/project_badges/measure?project=kurcontko_agentmill&metric=reliability_rating" alt="Reliability Rating"></a>
   <a href="https://github.com/ossf/scorecard"><img src="https://api.scorecard.dev/projects/github.com/kurcontko/agentmill/badge" alt="OpenSSF Scorecard"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
 </p>
+
+## Why AgentMill
+
+There are plenty of autonomous loop runners now. AgentMill differs on four things:
+
+- **Container-first, not sandbox-as-a-flag.** The loop is *defined* by `docker-compose.yml` — isolation isn't an opt-in mode bolted onto a host script. Nothing touches your machine's Claude config, `PATH`, or working tree.
+- **Real multi-agent, not multi-window.** `mill multi ~/repo 3` starts three headless agents on the same upstream, each in its own workspace, each pushing to its own branch (`agent-1`, `agent-2`, …), rebasing and retrying on conflict with a hard retry cap. No tmux, no supervision, no worktree juggling.
+- **Shared memory between agents.** Agents read and write `memory/` as flock-guarded append-only markdown, so what agent 2 learns at iteration 40 is available to agent 1 at iteration 41. Inspect it with `mill memory`.
+- **Fresh context every iteration.** Each pass runs Claude from a clean context, commits, and respawns — long runs don't degrade as the window fills.
+
+Every iteration appends to `logs/results.tsv` (agent, files changed, commits, status), so a 200-iteration overnight run is auditable after the fact with `mill history`.
+
+**Use something else if** you want to supervise parallel agents from a GUI and review each diff by hand — that's a different job, well served by the worktree-and-dashboard tools. AgentMill is for work you want to leave running.
 
 ## Quick Start
 
@@ -176,3 +190,13 @@ If a dependency lacks a Linux `arm64` wheel, build or force x86 emulation:
 ```bash
 DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose build
 ```
+
+## Security
+
+Claude runs with `--dangerously-skip-permissions` inside the container. That is intentional — the container *is* the boundary, which is why AgentMill is container-first. Do not run the entrypoints directly on your host.
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
+## License
+
+[MIT](LICENSE) © Michal Kurc
