@@ -1,5 +1,6 @@
 x-common-env: &common-env
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
   CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
   MODEL: ${MODEL:-sonnet}
   GIT_USER: ${GIT_USER:-agentmill}
@@ -117,3 +118,31 @@ services:
       RESPAWN: "false"
       SKIP_PROMPT: "true"
     volumes: *repo-volumes
+
+  # LongHorizon-Harness driving the mounted repo. AgentMill is not the agent
+  # here — it supplies the sandbox and a terminal, and the harness runs its own
+  # manager -> executor -> auditor loop against $REPO_PATH.
+  #
+  # NOTE: `docker compose run` ignores `ports:` unless you pass --service-ports,
+  # so the dashboard is only reachable from the host with:
+  #   docker compose run --rm --service-ports harness
+  harness:
+    <<: *agent-base
+    entrypoint: ["/entrypoint-harness.sh"]
+    tty: true
+    stdin_open: true
+    restart: "no"
+    environment:
+      <<: *common-env
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DASHBOARD_PORT: ${DASHBOARD_PORT:-8080}
+      AUTO_SETUP: "false"
+    ports:
+      - "${DASHBOARD_PORT:-8080}:${DASHBOARD_PORT:-8080}"
+    volumes:
+      - ${LH_HARNESS_PATH:-../LongHorizon-Harness}:/opt/lh-harness:ro
+      - ${REPO_PATH:?Set REPO_PATH in .env}:/workspace/repo
+      - ./runs:/workspace/runs
+      - ./logs:/workspace/logs
+      - ~/.claude.json:/home/agent/.host-claude.json:ro
+      - ~/.claude/settings.json:/home/agent/.claude/settings.host.json:ro

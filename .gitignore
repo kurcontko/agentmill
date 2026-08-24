@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 logs/
+runs/
 .claude/
 .docs/
 .DS_Store
@@ -19,3 +20,4 @@ credentials*
 !*secret*.sh
 .ssh/
 *.kube/config
+__pycache__/

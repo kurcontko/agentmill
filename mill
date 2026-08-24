@@ -12,6 +12,9 @@ Usage:
   mill watch [repo] [--model M] [--prompt FILE] [--ralph] [--respawn]
   mill multi [repo] [N] [-d] [--model M] [--iterations N]
   mill shell [repo]                 Interactive Claude session
+  mill mea   [repo] [--task T|--task-file F] [--rounds N] [--agent A] [--model M]
+             [--unattended] [--shell]
+                                    Long-horizon Manage-Execute-Audit run
   mill ps                           Show running containers
   mill status                       Show agent iteration status
   mill logs   [agent-id] [--session]  Tail agent or session logs
@@ -32,6 +35,8 @@ Examples:
   mill run ~/projects/myapp --model opus --iterations 5 -d
   mill watch ~/projects/myapp --ralph
   mill multi ~/projects/myapp 2
+  mill mea ~/projects/myapp --task "port the CLI to argparse and cover it with tests"
+  mill mea ~/projects/myapp --task-file TASK.md --rounds 8
   mill status
 EOF
     exit "${1:-0}"
@@ -148,6 +153,68 @@ cmd_multi() {
     [[ "$detach" == true ]] && up_args+=(-d)
     # shellcheck disable=SC2086
     compose "${up_args[@]}" $services
+}
+
+# LongHorizon-Harness Manage-Execute-Audit run. AgentMill supplies the sandbox;
+# the harness runs its own manager -> executor -> auditor loop against the repo.
+cmd_mea() {
+    local repo="" task="" task_file="" rounds="" agent="" model=""
+    local open_shell=false unattended=false
+    [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help)    usage 0 ;;
+            --task)       task="$2"; shift 2 ;;
+            --task-file)  task_file="$2"; shift 2 ;;
+            --rounds)     rounds="$2"; shift 2 ;;
+            --agent)      agent="$2"; shift 2 ;;
+            --model)      model="$2"; shift 2 ;;
+            --shell)      open_shell=true; shift ;;
+            --unattended) unattended=true; shift ;;
+            *) repo="${repo:-$1}"; shift ;;
+        esac
+    done
+    require_repo "$repo"
+
+    if [[ "$open_shell" == false ]]; then
+        if [[ -n "$task_file" ]]; then
+            [[ "$task_file" == /* ]] || task_file="$PWD/$task_file"
+            [[ -f "$task_file" ]] || { echo "Error: task file not found: $task_file" >&2; exit 1; }
+            task="$(cat "$task_file")"
+        fi
+        [[ -n "$task" ]] || {
+            echo "Error: --task or --task-file required (or use --shell for a prompt)" >&2
+            exit 1
+        }
+    fi
+
+    local lh_args=(--dashboard-host 0.0.0.0)
+    [[ -n "$rounds" ]] && lh_args+=(--max-rounds "$rounds")
+    [[ -n "$agent" ]]  && lh_args+=(--agent "$agent")
+    [[ -n "$model" ]]  && lh_args+=(--model "$model")
+    # The harness raises a blocking human gate at the end of a round (and when
+    # the round budget runs out). That gate is only answerable from the
+    # dashboard, so an unwatched run parks there forever instead of exiting.
+    if [[ "$unattended" == true ]]; then
+        lh_args+=(--no-dashboard)
+    else
+        echo "Dashboard: http://localhost:${DASHBOARD_PORT:-8080}/"
+        echo "The run pauses at each end-of-round gate — approve it there, or use --unattended."
+        echo
+    fi
+
+    if [[ "$open_shell" == true ]]; then
+        compose run --rm --service-ports harness
+        return
+    fi
+
+    # The task goes in via a file rather than the command line: it can be long,
+    # multi-line, and contain characters the shell would mangle.
+    local task_dir="$MILL_DIR/runs/.task"
+    mkdir -p "$task_dir"
+    printf '%s\n' "$task" > "$task_dir/TASK.md"
+    compose run --rm --service-ports harness bash -lc \
+        "lh-harness run \$LH_RUN_FLAGS_STR ${lh_args[*]} --task @/workspace/runs/.task/TASK.md"
 }
 
 cmd_shell() {
@@ -338,6 +405,7 @@ case "${1:-}" in
     watch)  shift; cmd_watch "$@" ;;
     multi)  shift; cmd_multi "$@" ;;
     shell)  shift; cmd_shell "$@" ;;
+    mea)    shift; cmd_mea "$@" ;;
     ps)     shift; cmd_ps "$@" ;;
     status) shift; cmd_status "$@" ;;
     logs)   shift; cmd_logs "$@" ;;

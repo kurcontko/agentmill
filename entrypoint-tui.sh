@@ -97,7 +97,7 @@ while true; do
     start_sentinel_watcher "$$" process_group
 
     if [[ "${SKIP_PROMPT:-false}" == "true" ]]; then
-        claude || true
+        claude --model "$MODEL" || true
     else
         /auto-trust.exp || true
     fi

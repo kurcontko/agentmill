@@ -10,6 +10,11 @@ COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /uvx /usr/local/bin/
 #       https://code.claude.com/docs/en/changelog
 ARG CLAUDE_CODE_VERSION=2.1.119
 
+# Codex CLI, for the `harness` service. LongHorizon-Harness can assign a
+# different backend per role (manager/executor/auditor), so both CLIs need to
+# be present for `--agent codex` and mixed-backend runs to resolve.
+ARG CODEX_VERSION=0.147.0
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
@@ -26,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
     && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm install -g "@openai/codex@${CODEX_VERSION}" \
     && useradd -m -s /bin/bash agent
 
 # Belt-and-suspenders: pin per-family aliases at the env layer so any code
@@ -39,15 +45,21 @@ ENV ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-7 \
 WORKDIR /workspace
 RUN chown agent:agent /workspace
 
+# The harness service editable-installs LongHorizon-Harness into this venv at
+# start. Put it on PATH for login shells too, so `docker compose run harness
+# bash -lc ...` and `docker exec` both resolve `lh-harness`.
+RUN echo 'export PATH="/home/agent/.lh-venv/bin:$PATH"' > /etc/profile.d/lh-harness.sh
+
 # Entrypoints
 COPY entrypoint.sh /entrypoint.sh
 COPY entrypoint-tui.sh /entrypoint-tui.sh
+COPY entrypoint-harness.sh /entrypoint-harness.sh
 COPY entrypoint-common.sh /entrypoint-common.sh
 COPY lib/agentmill/sh /lib/agentmill/sh
 COPY setup-claude-config.sh /setup-claude-config.sh
 COPY setup-repo-env.sh /setup-repo-env.sh
 COPY auto-trust.exp /auto-trust.exp
-RUN chmod +x /entrypoint.sh /entrypoint-tui.sh /entrypoint-common.sh /setup-claude-config.sh /setup-repo-env.sh /auto-trust.exp
+RUN chmod +x /entrypoint.sh /entrypoint-tui.sh /entrypoint-harness.sh /entrypoint-common.sh /setup-claude-config.sh /setup-repo-env.sh /auto-trust.exp
 
 USER agent
 
