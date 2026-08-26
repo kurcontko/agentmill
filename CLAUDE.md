@@ -11,6 +11,7 @@ Docker-based framework for running autonomous AI agents (Claude Code) in respawn
 ./mill watch ~/myrepo --ralph              # autonomous TUI with Ralph Loop
 ./mill multi ~/myrepo 3                    # 3 parallel agents
 ./mill shell ~/myrepo                      # interactive Claude session
+./mill mea ~/myrepo --task "..."           # LongHorizon-Harness manage-execute-audit run
 ./mill status                              # show agent iteration status
 ./mill history                             # show iteration results log
 ./mill memory                              # list memory topics
@@ -42,6 +43,7 @@ shellcheck entrypoint.sh entrypoint-tui.sh mill
 mill                   # CLI wrapper — run/watch/multi/shell/status/memory/history
 entrypoint.sh          # Claude headless agent loop
 entrypoint-tui.sh      # Claude interactive TUI mode
+entrypoint-harness.sh  # LongHorizon-Harness sandbox (harness drives claude/codex itself)
 entrypoint-common.sh   # Shared functions: logging, auth, git, settings, sentinel, memory
 setup-repo-env.sh      # Auto-bootstrap repo (uv/poetry/pip detection)
 setup-claude-config.sh # Merge host Claude config into container
