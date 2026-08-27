@@ -11,7 +11,8 @@ on:
 # Top-level permissions must stay read-only: ossf/scorecard-action rejects
 # publish_results when security-events/id-token are granted globally.
 # See https://github.com/ossf/scorecard-action#workflow-restrictions
-permissions: read-all
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
