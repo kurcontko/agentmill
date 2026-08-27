@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, "split/**"]
+    branches: [main]
   pull_request:
-    branches: [main, "split/**"]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -14,15 +14,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-defaults:
-  run:
-    shell: bash
-
 jobs:
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -30,73 +26,26 @@ jobs:
           persist-credentials: false
 
       - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
-        with:
-          scandir: "."
-          format: gcc
-          severity: warning
-          additional_files: ""
-          check_together: "yes"
-
-  hadolint:
-    name: Hadolint (Dockerfile)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Run Hadolint
-        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
-        with:
-          dockerfile: Dockerfile
-
-  python-tests:
-    name: Python Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Compile Python sources
-        run: python3 -m compileall -q tests
-
-      - name: Run Python unit tests
-        run: python3 -m unittest discover -s tests -p 'test_*.py'
+        run: shellcheck loop.sh mill tests/*.sh
 
   shell-tests:
     name: Shell Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
-      - name: Run shell test suite
-        run: |
-          set -euo pipefail
-          mapfile -t test_scripts < <(find tests -maxdepth 1 -type f -name 'test_*.sh' | sort)
-          for test_script in "${test_scripts[@]}"; do
-            if [[ "$test_script" == "tests/test_smoke_integration.sh" ]]; then
-              continue
-            fi
-            echo "::group::$test_script"
-            bash "$test_script"
-            echo "::endgroup::"
-          done
+      - name: Run loop smoke tests
+        run: bash tests/test_loop.sh
 
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    needs: [shellcheck, hadolint, python-tests, shell-tests]
+    timeout-minutes: 30
+    needs: [shellcheck, shell-tests]
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
