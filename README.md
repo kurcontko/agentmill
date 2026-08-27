@@ -5,194 +5,92 @@
 <h1 align="center">AgentMill</h1>
 
 <p align="center">
-  A Docker container that runs Claude Code in a respawning loop.<br>
-  Point it at a repo and a prompt — it works, commits, pushes, and repeats.<br>
+  A Docker container that runs an AI agent CLI in a respawning loop.<br>
+  Point it at a repo and a prompt — it works, commits, and repeats.<br>
   <strong>Tasks go in, code comes out.</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/kurcontko/agentmill/actions/workflows/ci.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/kurcontko/agentmill/actions/workflows/security-scan.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/security-scan.yml/badge.svg" alt="Security Scan"></a>
-  <a href="https://github.com/kurcontko/agentmill/actions/workflows/codeql.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/codeql.yml/badge.svg" alt="CodeQL"></a>
-  <a href="https://sonarcloud.io/summary/overall?id=kurcontko_agentmill"><img src="https://sonarcloud.io/api/project_badges/measure?project=kurcontko_agentmill&metric=security_rating" alt="Security Rating"></a>
-  <a href="https://sonarcloud.io/summary/overall?id=kurcontko_agentmill"><img src="https://sonarcloud.io/api/project_badges/measure?project=kurcontko_agentmill&metric=reliability_rating" alt="Reliability Rating"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
 </p>
 
-## Why AgentMill
+The whole framework is one shell script. Each iteration runs `claude -p` or
+`codex exec` with fresh context, lets the agent work and commit, then respawns.
+The repo — `TODO.md` plus git history — is the only memory, so long runs never
+degrade as a context window fills.
 
-There are plenty of autonomous loop runners now. AgentMill differs on four things:
+What the loop adds around the bare `while true; do claude -p ...` idea:
 
-- **Container-first, not sandbox-as-a-flag.** The loop is *defined* by `docker-compose.yml` — isolation isn't an opt-in mode bolted onto a host script. Nothing touches your machine's Claude config, `PATH`, or working tree.
-- **Real multi-agent, not multi-window.** `mill multi ~/repo 3` starts three headless agents on the same upstream, each in its own workspace, each pushing to its own branch (`agent-1`, `agent-2`, …), rebasing and retrying on conflict with a hard retry cap. No tmux, no supervision, no worktree juggling.
-- **Shared memory between agents.** Agents read and write `memory/` as flock-guarded append-only markdown, so what agent 2 learns at iteration 40 is available to agent 1 at iteration 41. Inspect it with `mill memory`.
-- **Fresh context every iteration.** Each pass runs Claude from a clean context, commits, and respawns — long runs don't degrade as the window fills.
+- **Structured output** — the agent's final message, error status, and event
+  stream are parsed, not scraped, for both backends.
+- **Stop conditions** — the agent ending its reply with `TASK_COMPLETE`,
+  an iteration cap, N no-progress iterations, or N consecutive failures
+  (with exponential backoff). A hung CLI is killed by a per-iteration timeout.
+- **The ratchet** — set `CHECK_CMD` (e.g. your test suite) and any iteration
+  that breaks it is reverted. Kept history is always green; a bad iteration
+  costs only tokens.
+- **A paper trail** — commit-keyed session logs plus one JSON line per
+  iteration in `logs/results.jsonl`.
 
-Every iteration appends to `logs/results.tsv` (agent, files changed, commits, status), so a 200-iteration overnight run is auditable after the fact with `mill history`.
-
-**Use something else if** you want to supervise parallel agents from a GUI and review each diff by hand — that's a different job, well served by the worktree-and-dashboard tools. AgentMill is for work you want to leave running.
-
-## Quick Start
-
-1. **Configure** — copy `.env.example` to `.env`, set `REPO_PATH` and auth
-2. **Write your prompt** — edit `prompts/PROMPT.md` with the task
-3. **Run** — pick a mode below
-4. **Stop** — `docker compose down` (finishes current session, commits WIP, exits cleanly)
+## Quick start
 
 ```bash
-cp .env.example .env   # then edit REPO_PATH and auth
-nano prompts/PROMPT.md  # describe the task
+./mill init                      # create .env — set auth + REPO_PATH
+./mill build                     # build the container image
+nano prompts/PROMPT.md           # describe the task (or drop a TASK.md in the repo)
+./mill run ~/path/to/repo        # go. Ctrl-C finishes the iteration and exits.
 ```
 
-## Authentication
+Auth in `.env`: `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_OAUTH_TOKEN` from
+`claude setup-token`) for claude; `OPENAI_API_KEY` for codex.
 
-Set one of these in `.env`:
-
-- **API Key** — set `ANTHROPIC_API_KEY`
-- **OAuth Token** — run `claude setup-token` on the host, set `CLAUDE_CODE_OAUTH_TOKEN`
-
-For GitHub Actions PR review with Claude Code and DeepSeek, see [`docs/claude-code-github-actions.md`](docs/claude-code-github-actions.md).
-
-## How to Run
-
-Pick the mode that fits your workflow:
-
----
-
-### 1. `headless` — fire and forget
-
-Claude runs in a loop in the background. No UI — output goes to `./logs/`. Restarts automatically on crash. Best for CI, overnight runs, or when you don't need to watch.
+## Usage
 
 ```bash
-REPO_PATH=/path/to/repo docker compose up headless
-
-# Use REPO_PATH from .env, or pass /path/to/repo to override it
-./mill run --iterations 3
+mill run [repo] [--agent claude|codex] [--model M] [--iterations N]
+         [--prompt FILE] [--dind] [-d]
+mill shell [repo]      # interactive shell inside the container
+mill logs              # follow the running loop
+mill ps | stop | build | init
 ```
 
-Loop: pull → run Claude → commit → push → wait → repeat.
-
----
-
-### 2. `watch` — autonomous TUI, you observe
-
-Full Claude Code TUI in your terminal. Claude works autonomously (all tool calls auto-approved) while you watch file edits, tool calls, and reasoning in real time. You're an observer, not a driver.
+Parallel agents need no framework — one worktree per agent:
 
 ```bash
-# Single autonomous session, then exit
-REPO_PATH=/path/to/repo docker compose run watch
-
-# With Ralph loop — bounded iteration (runs up to N times, then stops)
-REPO_PATH=/path/to/repo AUTO_RALPH=true AUTO_RALPH_MAX_ITERATIONS=10 \
-  docker compose run watch
-
-# With respawn — restart Claude automatically after each session
-REPO_PATH=/path/to/repo RESPAWN=true docker compose run watch
-```
-
----
-
-### 3. `interactive` — you drive
-
-Plain Claude Code TUI. No prompt injected, no automation. You type, Claude responds. Same as running `claude` locally, but inside the container with the repo and tools already set up.
-
-```bash
-REPO_PATH=/path/to/repo docker compose run interactive
-```
-
----
-
-### 4. `agent-1`, `agent-2`, `agent-3` — parallel workers
-
-Multiple headless agents on the same repo. Each pushes to its own branch (`agent-1`, `agent-2`, etc.) and rebases on conflict. Assign different prompts for different roles.
-
-```bash
-# Two agents, different tasks
-PROMPT_FILE_1=/prompts/features.md PROMPT_FILE_2=/prompts/tests.md \
-  REPO_PATH=/path/to/repo docker compose up agent-1 agent-2
-
-# Three agents, same branch (rebase on conflict)
-AGENT_BRANCH=main REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agent-3
+git -C ~/repo worktree add ../repo-b agent-b
+./mill run ~/repo -d && ./mill run ../repo-b -d
 ```
 
 ## Configuration
 
-**All modes:**
+Everything lives in `.env` (see `.env.example`); flags override it.
 
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `REPO_PATH` | *(required unless passed)* | Absolute path to the repo on your host; `mill run/watch/multi/shell [repo]` can override it |
-| `ANTHROPIC_API_KEY` | — | API key auth |
-| `CLAUDE_CODE_OAUTH_TOKEN` | — | OAuth token auth (alternative to API key) |
-| `MODEL` | `sonnet` | Claude model (`sonnet`, `opus`, etc.) |
-| `PROMPT_FILE` | `/prompts/PROMPT.md` | Prompt file path inside the container |
-| `GIT_USER` | `agentmill` | Git commit author name |
-| `GIT_EMAIL` | `agent@agentmill` | Git commit author email |
-| `AUTO_SETUP` | `true` | Auto-detect and install repo dependencies on start |
-| `REPO_SETUP_COMMAND` | — | Custom bootstrap command (overrides auto-detect) |
-| `EXTRA_PYTHON_TOOLS` | — | Additional pip packages to install (e.g. `ruff pytest`) |
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `AGENT` | `claude` | `claude` or `codex` |
+| `MODEL` | `sonnet` | passed through to the CLI |
+| `MAX_ITERATIONS` | `0` | 0 = unbounded |
+| `MAX_ERRORS` / `MAX_NOOPS` | `3` / `3` | consecutive failures / no-progress iterations before stopping |
+| `ITER_TIMEOUT` | `3600` | seconds per iteration |
+| `DONE_PROMISE` | `TASK_COMPLETE` | substring of the final message that stops the loop |
+| `SETUP_CMD` | — | runs once before the loop (`uv sync`, `npm ci`, …) |
+| `CHECK_CMD` | — | the ratchet: failure reverts the iteration |
 
-**Headless / multi-agent only:**
+## How the agent installs things
 
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `MAX_ITERATIONS` | `0` (infinite) | Stop after N loop iterations |
-| `LOOP_DELAY` | `5` | Seconds between iterations |
-| `AUTO_COMMIT` | `wip` | `wip` = commit uncommitted changes as safety net, `on` = always commit, `off` = never |
-| `AGENT_BRANCH` | auto | Branch name for multi-agent (default: `agent-$ID`) |
-| `PROMPT_FILE_1/2/3` | `PROMPT_FILE` | Per-agent prompt overrides (multi-agent only) |
-
-**Watch / interactive only:**
-
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `RESPAWN` | `false` | Restart Claude automatically after each session |
-| `LOOP_DELAY` | `5` | Seconds between respawns |
-| `SKIP_PROMPT` | `false` | Skip prompt injection (set automatically for `interactive`) |
-| `AUTO_RALPH` | `false` | Auto-start Ralph loop for bounded autonomous iteration |
-| `AUTO_RALPH_MAX_ITERATIONS` | `10` | Max Ralph loop iterations |
-| `AUTO_RALPH_COMPLETION_PROMISE` | `TASK_COMPLETE` | Token that signals task completion to Ralph |
-
-## Auto-Setup
-
-When `AUTO_SETUP=true` (default), AgentMill bootstraps the repo's dev environment:
-
-1. `REPO_SETUP_COMMAND` if set, otherwise:
-2. `pyproject.toml` + `uv.lock` → `uv sync --frozen`
-3. `pyproject.toml` alone → `pip install .`
-4. `requirements.txt` → `pip install -r requirements.txt`
-
-The `.venv/bin` is prepended to `PATH`, so tools like `pytest` and `ruff` are available to Claude.
-
-**Recommendation:** Add a `Makefile` to your upstream repo with an `install` target that sets up the full dev environment. Then point AgentMill at it:
-
-```bash
-REPO_SETUP_COMMAND='make install' docker compose up headless
-```
-
-This keeps build logic in the repo where it belongs, and any setup — system deps, virtual envs, code generation — just works.
-
-## Volumes
-
-| Host | Container | Purpose |
-|------|-----------|---------|
-| `./prompts` | `/prompts` | Agent prompt files |
-| `./logs` | `/workspace/logs` | Session logs |
-| `$REPO_PATH` | `/workspace/repo` or `/workspace/upstream` | Target repository |
-| `~/.claude.json` | `/home/agent/.host-claude.json` | Host Claude config (read-only) |
-| `~/.claude/settings.json` | `/home/agent/.claude/settings.host.json` | Host settings (read-only) |
-
-## Apple Silicon
-
-If a dependency lacks a Linux `arm64` wheel, build or force x86 emulation:
-
-```bash
-DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose build
-```
+The image is deliberately generic — node (for the CLIs), git, jq, python3.
+Repo toolchains are the agent's job: it has passwordless `sudo apt-get`
+(scoped to apt only) and installs what the work needs, or you make it
+deterministic with `SETUP_CMD`. For repos whose work itself needs Docker
+(testcontainers, image builds), `--dind` starts a docker:dind sidecar and
+points the agent at it — the host docker socket is never mounted.
 
 ## Security
 
-Claude runs with `--dangerously-skip-permissions` inside the container. That is intentional — the container *is* the boundary, which is why AgentMill is container-first. Do not run the entrypoints directly on your host.
+The agent runs with permission checks bypassed **inside the container** —
+that is the point: the container is the boundary. It gets your API key and
+your repo, nothing else. Don't run `loop.sh` on your host.
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 

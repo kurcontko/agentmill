@@ -1,89 +1,50 @@
 # AgentMill
 
-Docker-based framework for running autonomous AI agents (Claude Code) in respawning loops. Give it a git repo and a prompt — it clones, works, commits, pushes, and repeats.
+A Docker container that runs an AI agent CLI (`claude -p` or `codex exec`) in
+a respawning loop. Fresh context each iteration; the target repo (TODO.md +
+git history) is the only memory.
 
 ## Commands
 
 ```bash
-# CLI (preferred)
-./mill run ~/myrepo                        # headless loop
-./mill run ~/myrepo --model opus --iterations 5
-./mill watch ~/myrepo --ralph              # autonomous TUI with Ralph Loop
-./mill multi ~/myrepo 3                    # 3 parallel agents
-./mill shell ~/myrepo                      # interactive Claude session
-./mill status                              # show agent iteration status
-./mill history                             # show iteration results log
-./mill memory                              # list memory topics
-./mill memory decisions                    # read a memory topic
-./mill memory --search "pattern"           # search across memory
-./mill memory decisions --clear            # clear a memory topic
-./mill diff                                # show recent changes across iterations
-./mill logs 1                              # tail agent-1 logs
-./mill build                               # build container image
-./mill stop                                # stop all services
+./mill run ~/myrepo                        # run the loop
+./mill run ~/myrepo --agent codex --model gpt-5.2-codex --iterations 5
+./mill shell ~/myrepo                      # interactive shell in the container
+./mill logs                                # follow the running loop
+./mill build / stop / ps / init
 
-# Direct docker compose (still works)
-REPO_PATH=/path/to/repo docker compose up headless
-REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agent-3
-REPO_PATH=/path/to/repo docker compose run watch
-REPO_PATH=/path/to/repo docker compose run interactive
-
-# Test
-python3 -m unittest tests.test_entrypoint_retry_limit
-bash tests/test_entrypoint_push_retry.sh
-
-# Lint
-shellcheck entrypoint.sh entrypoint-tui.sh mill
+# Test / lint
+bash tests/test_loop.sh
+shellcheck loop.sh mill tests/*.sh
 ```
 
 ## Architecture
 
 ```
-mill                   # CLI wrapper — run/watch/multi/shell/status/memory/history
-entrypoint.sh          # Claude headless agent loop
-entrypoint-tui.sh      # Claude interactive TUI mode
-entrypoint-common.sh   # Shared functions: logging, auth, git, settings, sentinel, memory
-setup-repo-env.sh      # Auto-bootstrap repo (uv/poetry/pip detection)
-setup-claude-config.sh # Merge host Claude config into container
-prompts/               # Agent task prompts (PROMPT.md, PROMPT_LITE.md, PROMPT_MEMORY.md)
-memory/                # Shared markdown memory (flock-guarded, multi-agent safe)
-logs/results.tsv       # Iteration results log (Karpathy autoresearch pattern)
+loop.sh            # the whole framework: agent loop, stop conditions, ratchet
+mill               # CLI wrapper — plain docker run (no compose)
+Dockerfile         # node:22-slim + claude + codex + git/jq/python3/sudo
+prompts/PROMPT.md  # stock prompt: TODO.md convention + TASK_COMPLETE promise
+tests/test_loop.sh # smoke tests with a stubbed CLI (no network, no docker)
+logs/results.jsonl # one line per iteration: status, commits, head
 ```
 
-## Key Patterns
+## Key patterns
 
-- **Respawning Loop**: Each iteration runs Claude in a fresh context, commits results, waits, repeats. No context rot.
-- **Multi-Agent Sync**: Agents push to their own branches (`agent-1`, `agent-2`, etc.). On conflict: rebase + retry (max 3).
-- **Graceful Shutdown**: Entrypoints trap SIGTERM/SIGINT, complete current session, commit WIP, exit.
-- **Settings Override**: Agents backup `.claude/settings.local.json`, apply permissive config, restore on exit.
-- **Auto-Setup**: Detects `pyproject.toml`/`requirements.txt` and runs appropriate installer (uv > poetry > pip).
-- **Shared Memory**: Agents write to `memory/` via flock-guarded append-only markdown files. Read freely, write safely.
-- **Iteration Log**: Every iteration appends to `logs/results.tsv` (agent, files changed, commits, status). View with `mill history`.
+- **Respawning loop**: fresh context per iteration; carry-forward is only a
+  preamble (recent commits + head of TODO.md).
+- **Agent commits its own work**; the loop safety-nets leftovers as `[wip]`.
+- **Ratchet**: `CHECK_CMD` failure reverts the iteration (`git reset --hard`).
+- **Stop conditions**: `DONE_PROMISE` in the final message, `MAX_ITERATIONS`,
+  `MAX_NOOPS`, `MAX_ERRORS` (exponential backoff), `ITER_TIMEOUT` per session.
+- **Parallelism**: no framework code — one git worktree per agent, run mill twice.
+- **Agent installs its own deps**: scoped passwordless sudo for apt; optional
+  `SETUP_CMD` for determinism; `--dind` sidecar when the work needs docker.
 
-## Code Conventions
+## Conventions
 
-- Shell scripts use `set -euo pipefail` and `shellcheck` compliance
-- Python targets 3.11+, stdlib only (no third-party deps)
-- Entrypoints must handle signals and clean up — never leave orphan processes
-- Git operations must have retry limits; never retry infinitely
-- All user-facing config via environment variables (see docker-compose.yml)
-- Status files go under `logs/` directory hierarchy
-
-## Testing
-
-- Python tests use `unittest` (no pytest dependency in the framework itself)
-- Shell tests use plain bash assertions or bats
-- Run individual test files, not the full suite, during development
-
-## Important
-
-- Container runs as non-root `agent` user (UID 1000)
-- Claude runs with `--dangerously-skip-permissions` inside containers — this is intentional for automation
-- Multi-agent services share `REPO_PATH` as upstream but clone into isolated workspaces
-- PROMPT files are mounted at `/prompts/` inside the container
-
-## Web Search
-
-Always prefer using Brightdata MCP (scrape as markdown, search engine) instead of built-in web tools.
-
-When scraping git repos, consider cloning into /tmp and perform file-level ops on it.
+- Shell only, `set -euo pipefail`, shellcheck-clean; no third-party deps.
+- All config via env vars (`.env`, docker --env-file format — no inline comments).
+- Git operations bounded — never retry infinitely.
+- Container runs as non-root `agent`; permission bypass inside the container
+  is intentional (the container is the boundary).
