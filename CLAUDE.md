@@ -1,7 +1,7 @@
 # AgentMill
 
 A Docker container that runs an AI agent CLI (`claude -p` or `codex exec`) in
-a respawning loop. Fresh context each iteration; the target repo (TODO.md +
+a respawning loop. Fresh context each iteration; the target repo (PROGRESS.md +
 git history) is the only memory.
 
 ## Commands
@@ -24,7 +24,8 @@ shellcheck loop.sh mill tests/*.sh
 loop.sh            # the whole framework: agent loop, stop conditions, ratchet
 mill               # CLI wrapper — plain docker run (no compose)
 Dockerfile         # node:22-slim + claude + codex + git/jq/python3/sudo
-prompts/PROMPT.md  # stock prompt: TODO.md convention + TASK_COMPLETE promise
+prompts/PROMPT.md  # one task per session, PROGRESS.md + failed-approaches log,
+                   #   TASK_COMPLETE promise when the whole mission is done
 tests/test_loop.sh # smoke tests with a stubbed CLI (no network, no docker)
 logs/results.jsonl # one line per iteration: status, commits, head
 ```
@@ -32,7 +33,7 @@ logs/results.jsonl # one line per iteration: status, commits, head
 ## Key patterns
 
 - **Respawning loop**: fresh context per iteration; carry-forward is only a
-  preamble (recent commits + head of TODO.md).
+  preamble (recent commits + head of PROGRESS.md).
 - **Agent commits its own work**; the loop safety-nets leftovers as `[wip]`.
 - **Ratchet**: `CHECK_CMD` failure reverts the iteration (`git reset --hard`).
 - **Stop conditions**: `DONE_PROMISE` in the final message, `MAX_ITERATIONS`,

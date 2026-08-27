@@ -17,7 +17,7 @@
 
 The whole framework is one shell script. Each iteration runs `claude -p` or
 `codex exec` with fresh context, lets the agent work and commit, then respawns.
-The repo — `TODO.md` plus git history — is the only memory, so long runs never
+The repo — `PROGRESS.md` plus git history — is the only memory, so long runs never
 degrade as a context window fills.
 
 What the loop adds around the bare `while true; do claude -p ...` idea:

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # AgentMill — run an agent CLI against a repo in a respawning loop.
-# Fresh context every iteration; the repo (TODO.md + git history) is the memory.
+# Fresh context every iteration; the repo (PROGRESS.md + git history) is the memory.
 
 AGENT="${AGENT:-claude}"                 # claude | codex
 MODEL="${MODEL:-sonnet}"
@@ -57,14 +57,14 @@ if [[ -n "$SETUP_CMD" ]]; then
 fi
 
 # Minimal carry-forward between fresh contexts: recent history + the agent's
-# own TODO list. Everything else the agent reads from the repo itself.
+# own progress file. Everything else the agent reads from the repo itself.
 preamble() {
     echo "<loop-context>"
     echo "You are iteration $iter of an autonomous loop. Recent commits:"
     git log --oneline -5 2>/dev/null || echo "(no commits yet)"
-    if [[ -f TODO.md ]]; then
-        printf '\nTODO.md:\n'
-        head -40 TODO.md
+    if [[ -f PROGRESS.md ]]; then
+        printf '\nPROGRESS.md:\n'
+        head -40 PROGRESS.md
     fi
     echo "</loop-context>"
     echo
