@@ -384,4 +384,145 @@ grep -q 'no mission file' "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected
 rm -rf "$TMP"
 echo "PASS: missing MILL.md is refused"
 
+# --- 17: a result event marking failure is an error even when the CLI exits 0 ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+echo change >> stub.txt
+git add -A && git commit -qm "agent: half-finished work"
+printf '{"type":"result","subtype":"error_during_execution","is_error":true,'
+printf '"result":"crashed but TASK_COMPLETE","total_cost_usd":0.25,"num_turns":4,'
+printf '"duration_ms":1200,"usage":{"input_tokens":100,"output_tokens":20}}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ITERATIONS=1 MAX_ERRORS=5
+grep -q "signaled TASK_COMPLETE" "$TMP/out.log" && { cat "$TMP/out.log"; fail "done promise honored on an errored session"; }
+grep -q "agent reported an error (error_during_execution" "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "is_error:true with exit 0 was not treated as an error"; }
+grep -q '"status":"error"' "$TMP/logs/results.jsonl" || fail "results.jsonl missing error status"
+grep -q '"subtype":"error_during_execution"' "$TMP/logs/results.jsonl" || fail "subtype not recorded"
+grep -q '"cost_usd":0.25' "$TMP/logs/results.jsonl" || { cat "$TMP/logs/results.jsonl"; fail "cost not recorded"; }
+grep -q '"turns":4' "$TMP/logs/results.jsonl" || fail "turns not recorded"
+grep -q '"tokens_in":100,"tokens_out":20' "$TMP/logs/results.jsonl" || fail "token counts not recorded"
+grep -q '"duration_s":' "$TMP/logs/results.jsonl" || fail "wall-clock duration not recorded"
+rm -rf "$TMP"
+echo "PASS: a failed result event beats exit 0 and blocks the done promise"
+
+# --- 18: error_* subtypes count as failures even with is_error:false ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+echo change >> stub.txt
+git add -A && git commit -qm "agent: ran out of turns"
+printf '{"type":"result","subtype":"error_max_turns","is_error":false,"result":"ran out","num_turns":9}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ERRORS=1
+grep -q "1 consecutive errors" "$TMP/out.log" || { cat "$TMP/out.log"; fail "error_max_turns did not stop the loop"; }
+grep -q '"subtype":"error_max_turns"' "$TMP/logs/results.jsonl" || fail "subtype not recorded"
+rm -rf "$TMP"
+echo "PASS: an error_* subtype is a failed iteration"
+
+# --- 19: session costs accumulate and MAX_TOTAL_BUDGET_USD stops the loop ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+echo change >> "stub-$RANDOM.txt"
+git add -A && git commit -qm "agent: paid work"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"more to do",'
+printf '"total_cost_usd":0.6,"num_turns":5}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ITERATIONS=10 MAX_TOTAL_BUDGET_USD=1
+grep -q 'budget exhausted ([$]1.20 of [$]1.00)' "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected a budget stop"; }
+[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 2 ]] || fail "budget stop came at the wrong iteration"
+grep -q 'total [$]1.20' "$TMP/out.log" || { cat "$TMP/out.log"; fail "cumulative cost missing from the iteration line"; }
+grep -q 'total cost: [$]1.20 across 2 iterations' "$TMP/out.log" || fail "final cost summary missing"
+rm -rf "$TMP"
+echo "PASS: costs accumulate and MAX_TOTAL_BUDGET_USD stops the loop"
+
+# --- 20: MAX_TURNS / MAX_BUDGET_USD reach the claude CLI ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$ARGV_LOG"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"done TASK_COMPLETE","num_turns":3}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ITERATIONS=1 MAX_TURNS=7 MAX_BUDGET_USD=2.50 ARGV_LOG="$TMP/argv.log"
+grep -q -- '--max-turns 7' "$TMP/argv.log" || { cat "$TMP/argv.log"; fail "MAX_TURNS not forwarded"; }
+grep -q -- '--max-budget-usd 2.50' "$TMP/argv.log" || { cat "$TMP/argv.log"; fail "MAX_BUDGET_USD not forwarded"; }
+rm -rf "$TMP"
+echo "PASS: turn and budget caps are forwarded to the CLI"
+
+# --- 21: a quick, empty-handed session is an error, not a no-op (health check) ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+printf '{"type":"result","subtype":"success","is_error":false,"result":"nothing to do","num_turns":1}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ERRORS=1 MAX_NOOPS=5
+grep -q 'agent produced no work in 1 turns' "$TMP/out.log" || { cat "$TMP/out.log"; fail "health check did not fire"; }
+grep -q "1 consecutive errors" "$TMP/out.log" || { cat "$TMP/out.log"; fail "health check did not count as an error"; }
+grep -q '"status":"error"' "$TMP/logs/results.jsonl" || fail "health-check iteration not recorded as an error"
+: > "$TMP/logs/results.jsonl"
+run_loop env MAX_ITERATIONS=2 MAX_NOOPS=5 MIN_TURNS=0
+grep -q '"status":"noop"' "$TMP/logs/results.jsonl" || { cat "$TMP/out.log"; fail "MIN_TURNS=0 did not disable the health check"; }
+rm -rf "$TMP"
+echo "PASS: MIN_TURNS catches an agent that does nothing"
+
+# --- 22: every iteration leaves a human-readable summary next to its log ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+echo change >> stub.txt
+git add -A && git commit -qm "agent: summarized work"
+printf '{"type":"result","subtype":"success","is_error":false,'
+printf '"result":"wrote stub.txt. TASK_COMPLETE","total_cost_usd":0.42,"num_turns":7}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ITERATIONS=1
+summary="$(echo "$TMP"/logs/iter-1-*.summary)"
+[[ -f "$summary" ]] || { ls "$TMP/logs"; fail "no summary file written"; }
+grep -q '^status: kept$' "$summary" || { cat "$summary"; fail "summary missing status"; }
+grep -q '^subtype: success$' "$summary" || { cat "$summary"; fail "summary missing subtype"; }
+grep -q '^cost_usd: 0.42$' "$summary" || { cat "$summary"; fail "summary missing cost"; }
+grep -q '^turns: 7$' "$summary" || { cat "$summary"; fail "summary missing turns"; }
+grep -q 'agent: summarized work' "$summary" || { cat "$summary"; fail "summary missing the commit list"; }
+grep -q 'stub.txt' "$summary" || { cat "$summary"; fail "summary missing the diffstat"; }
+grep -q 'wrote stub.txt. TASK_COMPLETE' "$summary" || { cat "$summary"; fail "summary missing the final message"; }
+rm -rf "$TMP"
+echo "PASS: each iteration writes a summary file"
+
+# --- 23: codex JSONL events give turns, tokens, and failures ---
+make_env
+cat > "$TMP/bin/codex" <<'STUB'
+#!/usr/bin/env bash
+out=""
+while [[ $# -gt 0 ]]; do [[ "$1" == -o ]] && out="$2"; shift; done
+echo change >> stub.txt
+git add -A && git commit -qm "agent: codex work"
+printf '{"type":"item.completed","item":{"type":"command_execution"}}\n'
+printf '{"type":"item.completed","item":{"type":"agent_message"}}\n'
+if [[ -f "$TMP_FAIL" ]]; then
+    printf '{"type":"error","message":"stream broke"}\n'
+else
+    printf '{"type":"turn.completed","usage":{"input_tokens":900,"cached_input_tokens":100,"output_tokens":50}}\n'
+    printf 'done TASK_COMPLETE\n' > "$out"
+fi
+STUB
+chmod +x "$TMP/bin/codex"
+run_loop env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=1 TMP_FAIL="$TMP/nope"
+grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "codex done promise ignored"; }
+grep -q '"subtype":"success"' "$TMP/logs/results.jsonl" || { cat "$TMP/logs/results.jsonl"; fail "codex subtype missing"; }
+grep -q '"turns":2' "$TMP/logs/results.jsonl" || { cat "$TMP/logs/results.jsonl"; fail "codex turns miscounted"; }
+grep -q '"tokens_in":900,"tokens_out":50' "$TMP/logs/results.jsonl" || fail "codex usage missing"
+: > "$TMP/logs/results.jsonl"
+touch "$TMP/fail"
+run_loop env AGENT=codex OPENAI_API_KEY=test MAX_ERRORS=1 TMP_FAIL="$TMP/fail"
+grep -q "1 consecutive errors" "$TMP/out.log" || { cat "$TMP/out.log"; fail "codex error event ignored"; }
+rm -rf "$TMP"
+echo "PASS: codex event stream yields turns, tokens, and errors"
+
 echo "OK: all loop.sh smoke tests passed"

@@ -280,4 +280,57 @@ run_line | grep -q -- "-v $TMP/prompts:/prompts:ro" || { run_line; fail "symlink
 rm -rf "$TMP"
 echo "PASS: init, per-checkout logs, symlink-safe MILL_DIR"
 
+# --- 12: budget/turn caps are forwarded to the container ---
+make_env
+cat > "$TMP/config" <<'ENV'
+MAX_TURNS=12
+MIN_TURNS=3
+MAX_BUDGET_USD=1.50
+MAX_TOTAL_BUDGET_USD=20
+ENV
+mill -C "$TMP/a/api" run >/dev/null || fail "mill run exited nonzero"
+for kv in 'MAX_TURNS=12' 'MIN_TURNS=3' 'MAX_BUDGET_USD=1.50' 'MAX_TOTAL_BUDGET_USD=20'; do
+    run_line | grep -q -- "-e $kv " || { run_line; fail "$kv not forwarded to the container"; }
+done
+rm -rf "$TMP"
+echo "PASS: budget and turn caps reach the container"
+
+# --- 13: mill logs shows summaries, --raw the event stream, --results a table ---
+make_env
+mill -C "$TMP/a/api" run >/dev/null
+name="$(run_line | sed 's/.*--name \([^ ]*\).*/\1/')"
+logs="$TMP/logs/$name"
+printf '{"iter":1,"agent":"claude","status":"kept","commits":2,"head":"abc1234","ts":"t","subtype":"success","cost_usd":0.42,"duration_s":83,"turns":7}\n' \
+    > "$logs/results.jsonl"
+printf 'raw event stream\n' > "$logs/iter-1-abc1234.log"
+printf 'iteration: 1\nstatus: kept\n' > "$logs/iter-1-abc1234.summary"
+cat > "$TMP/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DOCKER_LOG"
+exit 0
+STUB
+chmod +x "$TMP/bin/docker"
+mill -C "$TMP/a/api" logs > "$TMP/out" || { cat "$TMP/out"; fail "mill logs (summaries) failed"; }
+grep -q '=== iter-1-abc1234.summary ===' "$TMP/out" || { cat "$TMP/out"; fail "summaries not shown"; }
+grep -q '^status: kept$' "$TMP/out" || { cat "$TMP/out"; fail "summary body not shown"; }
+if command -v jq >/dev/null; then
+    mill -C "$TMP/a/api" logs --results > "$TMP/out" || { cat "$TMP/out"; fail "mill logs --results failed"; }
+    grep -q '^ITER ' "$TMP/out" || { cat "$TMP/out"; fail "results table has no header"; }
+    grep -q '^1 *kept *2 *[$]0.42 *7 *83s$' "$TMP/out" || { cat "$TMP/out"; fail "results row malformed"; }
+fi
+# --raw ends in `tail -f`; job control gives it its own group to terminate.
+set -m
+PATH="$TMP/bin:$PATH" bash "$TMP/mill" -C "$TMP/a/api" logs --raw > "$TMP/out" 2>&1 &
+raw_pid=$!
+for _ in $(seq 1 50); do grep -q 'raw event stream' "$TMP/out" && break; sleep 0.1; done
+kill -TERM -- "-$raw_pid" 2>/dev/null || kill "$raw_pid" 2>/dev/null || true
+wait "$raw_pid" 2>/dev/null || true
+set +m
+grep -q '=== iter-1-abc1234.log ===' "$TMP/out" || { cat "$TMP/out"; fail "--raw did not tail the event log"; }
+grep -q 'raw event stream' "$TMP/out" || { cat "$TMP/out"; fail "--raw showed no log content"; }
+if mill -C "$TMP/a/api" logs --bogus >/dev/null 2>"$TMP/err"; then fail "unknown logs option accepted"; fi
+grep -q 'unknown option' "$TMP/err" || { cat "$TMP/err"; fail "expected an unknown-option error"; }
+rm -rf "$TMP"
+echo "PASS: mill logs summaries, --raw, and --results"
+
 echo "OK: all mill smoke tests passed"

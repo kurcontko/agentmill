@@ -19,6 +19,10 @@ LOOP_DELAY="${LOOP_DELAY:-5}"            # seconds between iterations
 ERROR_BACKOFF="${ERROR_BACKOFF:-30}"     # backoff base after a failure
 MAX_BACKOFF="${MAX_BACKOFF:-900}"        # cap on the error backoff
 SHUTDOWN_GRACE="${SHUTDOWN_GRACE:-30}"   # seconds a signalled agent gets before SIGKILL
+MAX_TURNS="${MAX_TURNS:-0}"              # claude only: --max-turns per session (0 = unbounded)
+MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"     # claude only: --max-budget-usd per session (empty = none)
+MAX_TOTAL_BUDGET_USD="${MAX_TOTAL_BUDGET_USD:-}"  # loop-wide spend cap in USD (empty = none)
+MIN_TURNS="${MIN_TURNS:-2}"              # fewer turns than this with no repo change = broken agent
 DONE_PROMISE="${DONE_PROMISE:-TASK_COMPLETE}"
 SETUP_CMD="${SETUP_CMD:-}"               # runs once before the loop
 CHECK_CMD="${CHECK_CMD:-}"               # ratchet: iteration is reverted if this fails
@@ -225,16 +229,54 @@ wait_session() {
     SESSION_PID=""
 }
 
+# One jq pass over claude's stream-json log: the metrics of the last result
+# event as a tab-separated line, then the final message. A run without a
+# result event prints nothing at all, which the loop reads as "unknown".
+# shellcheck disable=SC2016  # jq program: $r and $ev are jq's, not the shell's
+CLAUDE_RESULT_JQ='
+  ([inputs | fromjson? | select(.type == "result")] | last) as $r
+  | if $r == null then empty else
+      ([ ($r.subtype // ""), (($r.is_error // false) | tostring),
+         (($r.total_cost_usd // 0) | tostring), (($r.num_turns // "") | tostring),
+         (($r.duration_ms // 0) | tostring),
+         (($r.usage.input_tokens // "") | tostring),
+         (($r.usage.output_tokens // "") | tostring) ] | @tsv),
+      ($r.result // "")
+    end'
+
+# The same for codex --json (JSONL, no cost reported): usage comes from the
+# final turn.completed, turns are the completed items, and an error event or a
+# turn that never completed marks the session failed.
+# shellcheck disable=SC2016  # jq program, not shell expansion
+CODEX_RESULT_JQ='
+  [inputs | fromjson?] as $ev
+  | if ($ev | length) == 0 then empty else
+      ($ev | map(select(.type == "turn.completed")) | last) as $done
+      | ($ev | any(.type == "error")) as $err
+      | ($ev | map(select(.type == "item.completed"
+                          and ((.item.type // "") | test("agent_message|command_execution|file_change|mcp_tool_call|web_search"))))
+             | length) as $turns
+      | ($err or ($done == null)) as $failed
+      | [ (if $failed then "error" else "success" end), ($failed | tostring),
+          "0", ($turns | tostring), "0",
+          (($done.usage.input_tokens // "") | tostring),
+          (($done.usage.output_tokens // "") | tostring) ] | @tsv
+    end'
+
 # Runs one agent session. Prints the agent's final message; exit code is the
-# agent's. Full event stream goes to the iteration log.
+# agent's. Full event stream goes to the iteration log, session metrics (one
+# tab-separated line, empty when unparseable) to $metrics_file.
 run_agent() {
     local rc=0 model_args=()
     SESSION_PID="" SESSION_WATCHDOG_PID="" SESSION_RC=0 SESSION_STOP_REQUESTED=false
+    : > "$metrics_file"
     trap on_session_signal TERM INT
     case "$AGENT" in
         claude)
             [[ -n "$MODEL" ]] && model_args=(--model "$MODEL")
             [[ -n "$FALLBACK_MODEL" ]] && model_args+=(--fallback-model "$FALLBACK_MODEL")
+            [[ "$MAX_TURNS" -gt 0 ]] && model_args+=(--max-turns "$MAX_TURNS")
+            [[ -n "$MAX_BUDGET_USD" ]] && model_args+=(--max-budget-usd "$MAX_BUDGET_USD")
             "${TIMEOUT_CMD[@]}" claude -p "$1" \
                 --dangerously-skip-permissions \
                 ${model_args[@]+"${model_args[@]}"} \
@@ -243,11 +285,13 @@ run_agent() {
             [[ "$SESSION_STOP_REQUESTED" == false ]] || on_session_signal
             wait_session
             rc="$SESSION_RC"
-            jq -Rr 'fromjson? | select(.type == "result") | .result // empty' \
-                "$iter_log" 2>/dev/null || true
+            jq -Rnr "$CLAUDE_RESULT_JQ" "$iter_log" >"$parse_file" 2>/dev/null || : > "$parse_file"
+            head -1 "$parse_file" > "$metrics_file"
+            tail -n +2 "$parse_file"
             ;;
         codex)
             [[ -n "$MODEL" ]] && model_args=(-m "$MODEL")
+            # MAX_TURNS/MAX_BUDGET_USD have no codex equivalent; ignored, not an error.
             # Truncate first: a run that exits without a final message would
             # otherwise replay the previous iteration's (maybe DONE_PROMISE).
             : > "$codex_msg"
@@ -259,6 +303,8 @@ run_agent() {
             [[ "$SESSION_STOP_REQUESTED" == false ]] || on_session_signal
             wait_session
             rc="$SESSION_RC"
+            jq -Rnr "$CODEX_RESULT_JQ" "$iter_log" >"$metrics_file" 2>/dev/null \
+                || : > "$metrics_file"
             cat "$codex_msg" 2>/dev/null || true
             ;;
     esac
@@ -283,6 +329,42 @@ count_iteration_commits() {
         count="$(git rev-list --count HEAD 2>/dev/null)" || count=0
     fi
     printf '%s' "${count:-0}"
+}
+
+# Session metrics from run_agent's tab-separated line. Every field may be
+# empty ("unknown"); nothing here is allowed to abort the loop.
+read_metrics() {
+    m_subtype="" m_is_error="" m_cost="" m_turns="" m_duration_ms="" m_tokens_in="" m_tokens_out=""
+    [[ -s "$metrics_file" ]] || return 0
+    IFS=$'\t' read -r m_subtype m_is_error m_cost m_turns m_duration_ms m_tokens_in m_tokens_out \
+        < "$metrics_file" || true
+    [[ "$m_turns" =~ ^[0-9]+$ ]] || m_turns=""
+    [[ "$m_tokens_in" =~ ^[0-9]+$ ]] || m_tokens_in=""
+    [[ "$m_tokens_out" =~ ^[0-9]+$ ]] || m_tokens_out=""
+    [[ "$m_cost" =~ ^[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]] || m_cost=""
+}
+
+# Money is floating point; the shell only does integers, so awk does the sums
+# and comparisons (bc is not installed in the image).
+add_cost() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6f", a + b }'; }
+fmt_cost() { awk -v a="$1" 'BEGIN { printf "%.2f", a }'; }
+cost_reached() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 >= b + 0) }'; }
+
+# A human-readable digest of one iteration, next to its raw log: what the
+# session cost, what it committed, and what it said at the end.
+write_summary() {
+    local range=""
+    [[ "$new_commits" -gt 0 ]] && range="${start_ref:+$start_ref..}HEAD"
+    {
+        printf 'iteration: %s\nstatus: %s\nsubtype: %s\ncost_usd: %s\nturns: %s\nduration_s: %s (agent reported %sms)\n' \
+            "$iter" "$status" "${m_subtype:-unknown}" "$(fmt_cost "$cost")" \
+            "${m_turns:-unknown}" "$duration_s" "${m_duration_ms:-0}"
+        printf '\ncommits (%s):\n' "$new_commits"
+        [[ -z "$range" ]] || git log --oneline "$range" 2>/dev/null || true
+        printf '\nfiles changed:\n'
+        [[ -z "$range" ]] || git diff --stat "$range" 2>/dev/null || true
+        printf '\nfinal message:\n%s\n' "$last_msg"
+    } > "${iter_log%.log}.summary" 2>/dev/null || true
 }
 
 # Restore every initialized submodule to the commit recorded by the current
@@ -325,7 +407,9 @@ log "starting loop: agent=$AGENT model=${MODEL:-<cli default>} max_iterations=$M
 results_log="$LOG_DIR/results.jsonl"
 codex_msg="$LOG_DIR/.codex-last-msg"
 msg_file="$LOG_DIR/.last-msg"
-iter=0 errors=0 noops=0 stop_reason=""
+metrics_file="$LOG_DIR/.last-metrics"
+parse_file="$LOG_DIR/.last-parse"
+iter=0 errors=0 noops=0 stop_reason="" total_cost=0
 
 while true; do
     if [[ "$SHUTDOWN" == true ]]; then stop_reason="shutdown signal"; break; fi
@@ -340,16 +424,29 @@ while true; do
     : > "$msg_file"
     # Backgrounded so TERM/INT is handled while the agent runs, not after it.
     note_mission_changes
+    started_at="$(date +%s)"
     run_agent "$(build_prompt)" >"$msg_file" &
     AGENT_PID=$!
     wait_agent
+    duration_s=$(( $(date +%s) - started_at ))
     last_msg="$(cat "$msg_file" 2>/dev/null || true)"
-    if [[ "$rc" -eq 0 ]]; then
+    read_metrics
+    cost="${m_cost:-0}"
+    total_cost="$(add_cost "$total_cost" "$cost")"
+    # The CLI can report failure with exit 0 (max turns, an execution error);
+    # trust the result event over the exit code.
+    agent_error=false
+    [[ "$m_is_error" == true || "$m_subtype" == error* ]] && agent_error=true
+    if [[ "$rc" -eq 0 && "$agent_error" == false ]]; then
         errors=0
     else
         errors=$((errors + 1))
         status=error
-        log "agent failed (exit $rc; consecutive errors: $errors/$MAX_ERRORS)"
+        if [[ "$rc" -ne 0 ]]; then
+            log "agent failed (exit $rc; consecutive errors: $errors/$MAX_ERRORS)"
+        else
+            log "agent reported an error (${m_subtype:-unknown}; consecutive errors: $errors/$MAX_ERRORS)"
+        fi
     fi
 
     # The prompt asks the agent to commit its own work with real messages;
@@ -397,6 +494,17 @@ while true; do
         fi
     fi
 
+    # Health check: a session that "succeeded" in a couple of turns without
+    # touching the repo is almost always a broken key or model, not a genuine
+    # no-op — count it as an error so MAX_ERRORS trips fast instead of burning
+    # MAX_NOOPS iterations. Skipped when the turn count is unknown.
+    if [[ "$status" != error && "$mutated" == false && -n "$m_turns" \
+          && "$MIN_TURNS" -gt 0 && "$m_turns" -lt "$MIN_TURNS" ]]; then
+        errors=$((errors + 1))
+        status=error
+        log "agent produced no work in $m_turns turns — treating as error (auth/model problem?)"
+    fi
+
     # Repeated reverts make no progress either, so they count toward MAX_NOOPS.
     if [[ "$status" == kept && "$mutated" == false ]]; then
         status=noop
@@ -406,14 +514,26 @@ while true; do
         kept)          noops=0 ;;
     esac
 
-    printf '{"iter":%d,"agent":"%s","status":"%s","commits":%d,"head":"%s","ts":"%s"}\n' \
+    # Fields the agent CLI did not report are simply left out, never guessed.
+    extra=""
+    [[ -z "$m_turns" ]]      || extra+=",\"turns\":$m_turns"
+    [[ -z "$m_tokens_in" ]]  || extra+=",\"tokens_in\":$m_tokens_in"
+    [[ -z "$m_tokens_out" ]] || extra+=",\"tokens_out\":$m_tokens_out"
+    printf '{"iter":%d,"agent":"%s","status":"%s","commits":%d,"head":"%s","ts":"%s"' \
         "$iter" "$AGENT" "$status" "$new_commits" \
         "$(git rev-parse --short=7 --verify HEAD 2>/dev/null || echo none)" \
         "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >>"$results_log"
-    log "iteration $iter: $status ($new_commits commits)"
+    printf ',"subtype":"%s","cost_usd":%s,"duration_s":%d%s}\n' \
+        "$m_subtype" "$(add_cost "$cost" 0)" "$duration_s" "$extra" >>"$results_log"
+    log "iteration $iter: $status ($new_commits commits, \$$(fmt_cost "$cost"), ${m_turns:-?} turns, ${duration_s}s; total \$$(fmt_cost "$total_cost"))"
+    write_summary
 
     if [[ "$status" != error && "$status" != reverted && "$last_msg" == *"$DONE_PROMISE"* ]]; then
         stop_reason="agent signaled $DONE_PROMISE"; break
+    fi
+    if [[ -n "$MAX_TOTAL_BUDGET_USD" ]] && cost_reached "$total_cost" "$MAX_TOTAL_BUDGET_USD"; then
+        stop_reason="budget exhausted (\$$(fmt_cost "$total_cost") of \$$(fmt_cost "$MAX_TOTAL_BUDGET_USD"))"
+        break
     fi
     [[ "$MAX_ERRORS" -gt 0 && "$errors" -ge "$MAX_ERRORS" ]] && { stop_reason="$MAX_ERRORS consecutive errors"; break; }
     [[ "$MAX_NOOPS" -gt 0 && "$noops" -ge "$MAX_NOOPS" ]] && { stop_reason="$MAX_NOOPS consecutive no-progress iterations"; break; }
@@ -432,3 +552,4 @@ while true; do
 done
 
 log "loop finished after $iter iterations: $stop_reason"
+log "total cost: \$$(fmt_cost "$total_cost") across $iter iterations"
