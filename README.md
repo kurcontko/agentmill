@@ -54,7 +54,8 @@ mill run [repo] [--agent claude|codex] [--model M] [--iterations N]
          [--prompt FILE] [--dind] [-d]
 mill shell [repo]      # interactive shell inside the container
 mill logs              # follow the running loop
-mill ps | stop | build | init
+mill stop [repo]       # stop one checkout's container, or all of them
+mill ps | build | init
 ```
 
 Parallel agents need no framework — one worktree per agent:
@@ -62,18 +63,27 @@ Parallel agents need no framework — one worktree per agent:
 ```bash
 git -C ~/repo worktree add ../repo-b agent-b
 ./mill run ~/repo -d && ./mill run ../repo-b -d
+./mill stop ../repo-b            # stops only that one
 ```
+
+On a Linux host, `mill build` builds the image with your uid/gid so the
+container can write the bind-mounted repo (Docker Desktop maps ownership
+itself).
 
 ## Configuration
 
-Everything lives in `.env` (see `.env.example`); flags override it.
+Everything lives in `.env` (see `.env.example`); flags override it, and so
+does the caller's environment. Values may be quoted; an unquoted value ends
+at an inline ` # comment`.
 
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `AGENT` | `claude` | `claude` or `codex` |
-| `MODEL` | `sonnet` (claude) | passed through to the CLI; empty = the CLI's own default |
+| `MODEL` | — | passed through to the CLI; empty = the CLI's own default |
+| `FALLBACK_MODEL` | — | claude only: `--fallback-model` when `MODEL` is overloaded |
 | `MAX_ITERATIONS` | `0` | 0 = unbounded |
 | `MAX_ERRORS` / `MAX_NOOPS` | `3` / `3` | consecutive failures / no-progress iterations before stopping (0 = unbounded) |
+| `ERROR_BACKOFF` / `MAX_BACKOFF` | `30` / `900` | seconds: `ERROR_BACKOFF * 2^n` after n failures, capped |
 | `ITER_TIMEOUT` | `3600` | seconds per iteration |
 | `DONE_PROMISE` | `TASK_COMPLETE` | substring of the final message that stops the loop |
 | `SETUP_CMD` | — | runs once before the loop (`uv sync`, `npm ci`, …) |

@@ -67,7 +67,48 @@ mill run "$TMP/a/api-b" >/dev/null
 common="$(sed -n 's/^gitdir: *//p' "$TMP/a/api-b/.git")"   # exactly what git will dereference
 common="${common%/worktrees/*}"
 run_line | grep -q -- "-v $common:$common" || { run_line; fail "worktree git dir not mounted"; }
+# ...and every recorded worktree .git file, so `git worktree prune` inside sees them.
+wt_git="$(head -1 "$common"/worktrees/*/gitdir)"
+run_line | grep -q -- "-v $wt_git:$wt_git:ro" || { run_line; fail "worktree .git file not mounted"; }
 rm -rf "$TMP"
 echo "PASS: linked worktrees mount their git dir"
+
+# --- 5: .env values: inline comments, quotes, whitespace; host-only keys stay home ---
+make_env
+cat > "$TMP/.env" <<'ENV'
+ANTHROPIC_API_KEY=sk-test   
+MODEL=opus   # Claude model
+SETUP_CMD="uv sync"
+CHECK_CMD='pytest -q # not a comment'
+PATH=/nowhere
+AGENTMILL_IMAGE=custom-image
+ENV
+mill run "$TMP/a/api" >/dev/null || fail "mill run exited nonzero"
+run_line | grep -q -- '-e ANTHROPIC_API_KEY=sk-test -e' || { run_line; fail "trailing whitespace kept"; }
+run_line | grep -q -- '-e MODEL=opus -e' || { run_line; fail "inline comment kept"; }
+run_line | grep -q -- '-e SETUP_CMD=uv sync -e' || { run_line; fail "double quotes kept"; }
+run_line | grep -q -- '-e CHECK_CMD=pytest -q # not a comment -v' || { run_line; fail "single quotes mishandled"; }
+run_line | grep -q -- '-e PATH=' && fail "PATH from .env forwarded to the container"
+run_line | grep -q -- ' custom-image$' || { run_line; fail "AGENTMILL_IMAGE from .env ignored"; }
+rm -rf "$TMP"
+echo "PASS: .env quoting, comments, and host-only keys"
+
+# --- 6: mill stop <repo> stops that checkout only ---
+make_env
+cat > "$TMP/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DOCKER_LOG"
+[[ "$*" == "ps -aq --filter label=agentmill" ]] && printf 'aaa\nbbb\n'
+exit 0
+STUB
+mill stop "$TMP/a/api" >/dev/null || fail "mill stop exited nonzero"
+grep -q '^rm -f agentmill-api-' "$DOCKER_LOG" || { cat "$DOCKER_LOG"; fail "checkout container not removed"; }
+grep -q '^rm -f aaa' "$DOCKER_LOG" && fail "other containers were removed"
+grep -q '^network rm' "$DOCKER_LOG" && fail "network removed while other agents run"
+: > "$DOCKER_LOG"
+mill stop >/dev/null || fail "mill stop (all) exited nonzero"
+grep -q '^rm -f aaa' "$DOCKER_LOG" || { cat "$DOCKER_LOG"; fail "mill stop did not stop everything"; }
+rm -rf "$TMP"
+echo "PASS: mill stop is per-checkout with a repo, global without"
 
 echo "OK: all mill smoke tests passed"

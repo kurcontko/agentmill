@@ -4,8 +4,8 @@ set -euo pipefail
 # mill — run an AI agent (claude or codex) in a respawning loop, inside Docker.
 
 MILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-IMAGE="${AGENTMILL_IMAGE:-agentmill}"
 NET="agentmill"
+DIND="agentmill-dind"
 
 usage() {
     cat <<'EOF'
@@ -18,7 +18,8 @@ Usage:
   mill logs                      Follow the running loop's output
   mill ps                        List running agentmill containers
   mill build                     Build the container image
-  mill stop                      Stop agentmill containers (and dind sidecar)
+  mill stop  [repo]              Stop one checkout's container, or all of them
+                                 (the dind sidecar goes when the last one does)
   mill init                      Create .env from .env.example
 
 Config comes from .env (see .env.example); flags override it.
@@ -46,7 +47,7 @@ path_hash() { printf '%s' "$1" | (shasum 2>/dev/null || cksum) | tr -cd 'a-f0-9'
 # command. Use the recorded path verbatim — it is what git will dereference.
 worktree_mount() {
     [[ -f "$REPO_PATH/.git" ]] || return 0
-    local gitdir common
+    local gitdir common entry path
     gitdir="$(sed -n 's/^gitdir: *//p' "$REPO_PATH/.git" | head -1)"
     [[ -n "$gitdir" ]] || { echo "Error: $REPO_PATH/.git has no gitdir: pointer" >&2; exit 1; }
     [[ "$gitdir" == /* ]] || {
@@ -57,23 +58,60 @@ worktree_mount() {
     common="${gitdir%/worktrees/*}"          # the main repo's git dir
     [[ -d "$common" ]] || { echo "Error: git dir $common not found for worktree $REPO_PATH" >&2; exit 1; }
     RUN_ARGS+=(-v "$common:$common")
+    # Each worktrees/<name>/gitdir records the host path of that checkout's
+    # .git file. `git worktree prune` (also run by gc) deletes any entry whose
+    # path does not exist — inside the container none of them would, so one
+    # prune would wreck this worktree and every sibling's on the host. Make
+    # every recorded path resolve by mounting the .git file itself, read-only.
+    for entry in "$common"/worktrees/*/gitdir; do
+        [[ -f "$entry" ]] || continue
+        path="$(head -1 "$entry")"
+        [[ "$path" == /* && -f "$path" ]] || continue
+        RUN_ARGS+=(-v "$path:$path:ro")
+    done
 }
 
 # Config the container understands. .env keys are appended by load_env, so a
 # custom var set there reaches the agent too.
 ENV_KEYS=(ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY
           AGENT MODEL FALLBACK_MODEL MAX_ITERATIONS MAX_ERRORS MAX_NOOPS
-          ITER_TIMEOUT LOOP_DELAY ERROR_BACKOFF DONE_PROMISE
-          SETUP_CMD CHECK_CMD GIT_USER GIT_EMAIL)
+          ITER_TIMEOUT LOOP_DELAY ERROR_BACKOFF MAX_BACKOFF SHUTDOWN_GRACE
+          DONE_PROMISE SETUP_CMD CHECK_CMD GIT_USER GIT_EMAIL)
+ENV_FILE_KEYS=() ENV_FILE_VALS=()   # parallel arrays: bash 3 has no assoc arrays
 
-# .env is KEY=value, full-line comments only. The caller's environment wins,
-# so `ANTHROPIC_API_KEY=... ./mill run repo` overrides the file.
+# Resolved config value: the caller's environment wins over .env, so
+# `ANTHROPIC_API_KEY=... ./mill run repo` overrides the file.
+cfg() {
+    local i
+    if [[ -n "${!1:-}" ]]; then printf '%s' "${!1}"; return; fi
+    for i in ${ENV_FILE_KEYS[@]+"${!ENV_FILE_KEYS[@]}"}; do
+        [[ "${ENV_FILE_KEYS[$i]}" == "$1" ]] && { printf '%s' "${ENV_FILE_VALS[$i]}"; return 0; }
+    done
+    return 0
+}
+
+# .env is KEY=value. Values may be "double" or 'single' quoted; unquoted
+# values end at an inline ` # comment` and lose surrounding whitespace.
+# Parsed into ENV_FILE_*, never exported: a PATH= or DOCKER_HOST= line must
+# not redirect mill's own commands.
 load_env() {
     [[ -f "$MILL_DIR/.env" ]] || return 0
-    local key val k seen
-    while IFS='=' read -r key val || [[ -n "$key" ]]; do   # || : last line may lack a newline
-        [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-        [[ -n "${!key:-}" ]] || export "$key=$val"
+    local line key val k seen
+    while IFS= read -r line || [[ -n "$line" ]]; do   # || : last line may lack a newline
+        [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]] || continue
+        key="${BASH_REMATCH[2]}" val="${BASH_REMATCH[3]}"
+        val="${val#"${val%%[![:space:]]*}"}"                       # ltrim
+        if [[ "$val" =~ ^\"(([^\"\\]|\\.)*)\"[[:space:]]*(#.*)?$ ]]; then
+            val="${BASH_REMATCH[1]}"; val="${val//\\\"/\"}"; val="${val//\\\\/\\}"
+        elif [[ "$val" =~ ^\'([^\']*)\'[[:space:]]*(#.*)?$ ]]; then
+            val="${BASH_REMATCH[1]}"
+        else
+            [[ "$val" == \#* ]] && val=""
+            val="${val%%[[:space:]]#*}"                            # inline comment
+            val="${val%"${val##*[![:space:]]}"}"                   # rtrim
+        fi
+        ENV_FILE_KEYS+=("$key") ENV_FILE_VALS+=("$val")
+        case "$key" in PATH|HOME|REPO_PATH|AGENTMILL_IMAGE) continue ;; esac   # mill-only / host-only
         seen=false
         for k in "${ENV_KEYS[@]}"; do [[ "$k" == "$key" ]] && { seen=true; break; }; done
         [[ "$seen" == true ]] || ENV_KEYS+=("$key")
@@ -85,21 +123,22 @@ load_env() {
 # docker socket.
 ensure_dind() {
     docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
-    docker container inspect agentmill-dind >/dev/null 2>&1 || {
+    docker container inspect "$DIND" >/dev/null 2>&1 || {
         echo "Starting dind sidecar..."
-        docker run -d --rm --name agentmill-dind --label agentmill --privileged \
+        docker run -d --rm --name "$DIND" --label agentmill --label agentmill.dind --privileged \
             --network "$NET" -e DOCKER_TLS_CERTDIR= docker:27-dind >/dev/null
     }
-    DIND_ARGS=(--network "$NET" -e DOCKER_HOST=tcp://agentmill-dind:2375)
+    DIND_ARGS=(--network "$NET" -e "DOCKER_HOST=tcp://$DIND:2375")
 }
 
 common_args() {  # fills RUN_ARGS with env + mounts shared by run/shell
     RUN_ARGS=(--label agentmill --init --memory 4g --pids-limit 512)
     # Forwarded explicitly (not --env-file) so values resolved from the caller's
     # environment reach the container too; docker inherits nothing by itself.
-    local key
+    local key val
     for key in "${ENV_KEYS[@]}"; do
-        [[ -n "${!key:-}" ]] && RUN_ARGS+=(-e "$key=${!key}")
+        val="$(cfg "$key")"
+        [[ -n "$val" ]] && RUN_ARGS+=(-e "$key=$val")
     done
     LOG_DIR_HOST="$MILL_DIR/logs/$CONTAINER_NAME"   # per checkout: parallel runs must not interleave
     mkdir -p "$LOG_DIR_HOST" "$MILL_DIR/prompts"
@@ -187,10 +226,26 @@ cmd_logs() {
 }
 
 cmd_ps()    { docker ps --filter label=agentmill; }
-cmd_build() { docker build -t "$IMAGE" "$MILL_DIR"; }
 
+# The container user must own the bind-mounted repo and logs. Docker Desktop
+# maps ownership for you; on a Linux host the uids have to match for real.
+cmd_build() {
+    local args=()
+    [[ "$(uname -s)" == Linux ]] && args=(--build-arg "AGENT_UID=$(id -u)" --build-arg "AGENT_GID=$(id -g)")
+    docker build ${args[@]+"${args[@]}"} -t "$IMAGE" "$MILL_DIR"
+}
+
+# With a repo: stop that checkout only, so parallel worktree runs survive
+# each other's stops. The shared dind sidecar and network go when the last
+# agent container is gone. Without a repo: everything.
 cmd_stop() {
     local ids
+    if [[ $# -gt 0 ]]; then
+        require_repo "$1"
+        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+        ids="$(docker ps -aq --filter label=agentmill | grep -v -x -F "$(docker ps -aq --filter label=agentmill.dind)" || true)"
+        [[ -z "$ids" ]] || { echo "Stopped $CONTAINER_NAME."; return 0; }
+    fi
     ids="$(docker ps -aq --filter label=agentmill)"
     [[ -n "$ids" ]] && echo "$ids" | xargs docker rm -f >/dev/null
     docker network rm "$NET" >/dev/null 2>&1 || true
@@ -207,6 +262,7 @@ cmd_init() {
 }
 
 load_env
+IMAGE="$(cfg AGENTMILL_IMAGE)"; IMAGE="${IMAGE:-agentmill}"
 case "${1:-}" in
     run)    shift; cmd_run "$@" ;;
     shell)  shift; cmd_shell "$@" ;;

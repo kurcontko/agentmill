@@ -5,8 +5,8 @@ set -euo pipefail
 # Fresh context every iteration; the repo (PROGRESS.md + git history) is the memory.
 
 AGENT="${AGENT:-claude}"                 # claude | codex
-MODEL="${MODEL:-}"                       # blank = backend-specific default
-FALLBACK_MODEL="${FALLBACK_MODEL:-sonnet}"   # claude only
+MODEL="${MODEL:-}"                       # blank = the CLI's own default
+FALLBACK_MODEL="${FALLBACK_MODEL:-}"     # claude only: --fallback-model when MODEL is overloaded
 PROMPT_FILE="${PROMPT_FILE:-/prompts/PROMPT.md}"
 REPO_DIR="${REPO_DIR:-/workspace/repo}"
 LOG_DIR="${LOG_DIR:-/workspace/logs}"
@@ -16,6 +16,8 @@ MAX_NOOPS="${MAX_NOOPS:-3}"              # consecutive no-progress iterations be
 ITER_TIMEOUT="${ITER_TIMEOUT:-3600}"     # seconds per iteration
 LOOP_DELAY="${LOOP_DELAY:-5}"            # seconds between iterations
 ERROR_BACKOFF="${ERROR_BACKOFF:-30}"     # backoff base after a failure
+MAX_BACKOFF="${MAX_BACKOFF:-900}"        # cap on the error backoff
+SHUTDOWN_GRACE="${SHUTDOWN_GRACE:-30}"   # seconds a signalled agent gets before SIGKILL
 DONE_PROMISE="${DONE_PROMISE:-TASK_COMPLETE}"
 SETUP_CMD="${SETUP_CMD:-}"               # runs once before the loop
 CHECK_CMD="${CHECK_CMD:-}"               # ratchet: iteration is reverted if this fails
@@ -23,7 +25,11 @@ GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
 
 # GNU timeout is always present in the container; degrade without it (host tests).
-if command -v timeout >/dev/null 2>&1; then
+# --foreground keeps timeout in the pipeline's process group (by default it
+# calls setpgid(0,0)), so on_signal's group-wide TERM reaches it and the CLI.
+if timeout --foreground 1 true >/dev/null 2>&1; then
+    TIMEOUT_CMD=(timeout --foreground "$ITER_TIMEOUT")
+elif command -v timeout >/dev/null 2>&1; then
     TIMEOUT_CMD=(timeout "$ITER_TIMEOUT")
 else
     TIMEOUT_CMD=(env)
@@ -37,20 +43,54 @@ die() { log "FATAL: $*"; exit 1; }
 set -m
 SHUTDOWN=false
 AGENT_PID=""
+WATCHDOG_PID=""
 on_signal() {
     log "shutdown requested — stopping the current agent session"
     SHUTDOWN=true
-    [[ -n "$AGENT_PID" ]] || return 0
+    [[ -n "$AGENT_PID" && -z "$WATCHDOG_PID" ]] || return 0
     kill -TERM -- "-$AGENT_PID" 2>/dev/null || kill -TERM "$AGENT_PID" 2>/dev/null || true
+    # An agent that ignores TERM is killed after the grace period; the loop
+    # keeps waiting for it either way (see wait_agent).
+    { sleep "$SHUTDOWN_GRACE"; kill -KILL -- "-$AGENT_PID" 2>/dev/null; } &
+    WATCHDOG_PID=$!
 }
 trap on_signal TERM INT
+
+# Wait for the backgrounded agent. A trap interrupts `wait`, which then
+# returns 128+signal while the agent is still running; keep waiting until it
+# has really exited so commit/check/revert never race a live agent.
+wait_agent() {
+    rc=0
+    until wait "$AGENT_PID"; do
+        rc=$?
+        kill -0 "$AGENT_PID" 2>/dev/null || break
+        rc=0
+    done
+    if [[ -n "$WATCHDOG_PID" ]]; then
+        kill -- "-$WATCHDOG_PID" 2>/dev/null || kill "$WATCHDOG_PID" 2>/dev/null || true
+        wait "$WATCHDOG_PID" 2>/dev/null || true
+        WATCHDOG_PID=""
+    fi
+    AGENT_PID=""
+}
+
+# Interruptible sleep: a foreground `sleep` defers the TERM/INT trap until it
+# ends, so a shutdown during LOOP_DELAY or the error backoff would start one
+# more full agent session. Backgrounded, the trap runs at once.
+pause() {
+    local pid
+    sleep "$1" &
+    pid=$!
+    wait "$pid" 2>/dev/null || true
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
 
 [[ -e "$REPO_DIR/.git" ]] || die "no git repo at $REPO_DIR (mount one)"
 [[ -f "$PROMPT_FILE" ]] || die "no prompt file at $PROMPT_FILE"
 case "$AGENT" in
     claude) [[ -n "${ANTHROPIC_API_KEY:-}${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] \
-                || die "set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN"
-            MODEL="${MODEL:-sonnet}" ;;
+                || die "set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN" ;;
     codex)  [[ -n "${OPENAI_API_KEY:-}" || -d "$HOME/.codex" ]] \
                 || die "set OPENAI_API_KEY or mount ~/.codex" ;;
     *) die "AGENT must be claude or codex, got: $AGENT" ;;
@@ -68,8 +108,11 @@ if [[ -f "$REPO_DIR/.git" ]]; then
     [[ -z "$git_common_dir" ]] \
         || git config --global --add safe.directory "$git_common_dir" 2>/dev/null || true
 fi
-git config user.name "$GIT_USER"
-git config user.email "$GIT_EMAIL"
+# Identity via the environment, not `git config`: the repo is a bind mount, so
+# a repo-local setting would outlive the container and shadow the host user's
+# global identity (for a worktree, in every checkout of that repo).
+export GIT_AUTHOR_NAME="$GIT_USER" GIT_COMMITTER_NAME="$GIT_USER"
+export GIT_AUTHOR_EMAIL="$GIT_EMAIL" GIT_COMMITTER_EMAIL="$GIT_EMAIL"
 
 worktree_status() {
     git status --porcelain --untracked-files=all 2>/dev/null
@@ -108,16 +151,21 @@ preamble() {
 # agent's. Full event stream goes to the iteration log.
 run_agent() {
     local rc=0 model_args=()
+    # Runs backgrounded, so on_signal's TERM hits this subshell too. Defer it
+    # (bash runs the trap after the foreground pipeline) so the subshell
+    # outlives the CLI and wait_agent really waits for the CLI to exit.
+    trap ':' TERM INT
     case "$AGENT" in
         claude)
-            [[ -n "$MODEL" ]] && model_args=(--model "$MODEL" --fallback-model "$FALLBACK_MODEL")
+            [[ -n "$MODEL" ]] && model_args=(--model "$MODEL")
+            [[ -n "$FALLBACK_MODEL" ]] && model_args+=(--fallback-model "$FALLBACK_MODEL")
             "${TIMEOUT_CMD[@]}" claude -p "$1" \
                 --dangerously-skip-permissions \
-                "${model_args[@]}" \
+                ${model_args[@]+"${model_args[@]}"} \
                 --output-format stream-json --verbose \
-                | tee -a "$iter_log" \
-                | jq -r 'select(.type == "result") | .result // empty' \
-                || rc=$?
+                | (trap '' TERM INT; exec tee -a "$iter_log") \
+                | (trap '' TERM INT; exec jq -r 'select(.type == "result") | .result // empty') \
+                || rc=$?   # tee/jq ignore the signal and drain until the CLI exits
             ;;
         codex)
             [[ -n "$MODEL" ]] && model_args=(-m "$MODEL")
@@ -126,7 +174,7 @@ run_agent() {
             : > "$codex_msg"
             "${TIMEOUT_CMD[@]}" codex exec "$1" \
                 --dangerously-bypass-approvals-and-sandbox \
-                "${model_args[@]}" -C "$REPO_DIR" --json \
+                ${model_args[@]+"${model_args[@]}"} -C "$REPO_DIR" --json \
                 -o "$codex_msg" >>"$iter_log" 2>&1 \
                 || rc=$?
             cat "$codex_msg" 2>/dev/null || true
@@ -183,6 +231,7 @@ msg_file="$LOG_DIR/.last-msg"
 iter=0 errors=0 noops=0 stop_reason=""
 
 while true; do
+    if [[ "$SHUTDOWN" == true ]]; then stop_reason="shutdown signal"; break; fi
     iter=$((iter + 1))
     # --verify so an unborn HEAD leaves start_ref empty instead of the literal "HEAD".
     start_ref="$(head_oid)"
@@ -195,8 +244,7 @@ while true; do
     # Backgrounded so TERM/INT is handled while the agent runs, not after it.
     run_agent "$(printf '%s\n\n%s' "$(preamble)" "$(cat "$PROMPT_FILE")")" >"$msg_file" &
     AGENT_PID=$!
-    wait "$AGENT_PID" || rc=$?
-    AGENT_PID=""
+    wait_agent
     last_msg="$(cat "$msg_file" 2>/dev/null || true)"
     if [[ "$rc" -eq 0 ]]; then
         errors=0
@@ -270,9 +318,13 @@ while true; do
     [[ "$SHUTDOWN" == true ]] && { stop_reason="shutdown signal"; break; }
 
     if [[ "$rc" -ne 0 ]]; then
-        sleep $((ERROR_BACKOFF * 2 ** errors))   # 60s, 120s, 240s at the default base
+        # 60s, 120s, 240s ... at the default base, capped so an unbounded
+        # MAX_ERRORS neither sleeps for hours nor overflows the arithmetic.
+        backoff=$((ERROR_BACKOFF * 2 ** (errors < 16 ? errors : 16)))
+        [[ "$backoff" -le "$MAX_BACKOFF" ]] || backoff="$MAX_BACKOFF"
+        pause "$backoff"
     else
-        sleep "$LOOP_DELAY"
+        pause "$LOOP_DELAY"
     fi
 done
 

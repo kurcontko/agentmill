@@ -5,6 +5,12 @@ ARG CLAUDE_CODE_VERSION=2.1.241
 ARG CODEX_VERSION=0.147.0
 # Client only — `mill --dind` points it at the sidecar daemon; no daemon here.
 ARG DOCKER_CLI_VERSION=27.5.1
+# The container user must be able to write the bind-mounted repo and logs.
+# Docker Desktop maps ownership; on a Linux host the ids must match the
+# caller's — `mill build` passes them. (node:22-slim's `node` user holds
+# uid 1000, so it is removed rather than left to collide.)
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
 
 # Only what the loop itself needs. Repo toolchains are the agent's job:
 # it runs `sudo apt-get install` (scoped below) or a language installer.
@@ -13,7 +19,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
                       "@openai/codex@${CODEX_VERSION}" \
-    && useradd -m -s /bin/bash agent \
+    && userdel -r node \
+    && (getent group "${AGENT_GID}" >/dev/null || groupadd -g "${AGENT_GID}" agent) \
+    && useradd -m -u "${AGENT_UID}" -g "${AGENT_GID}" -s /bin/bash agent \
     && echo 'agent ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt' \
         > /etc/sudoers.d/agent
 

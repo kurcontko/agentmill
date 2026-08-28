@@ -11,7 +11,8 @@ git history) is the only memory.
 ./mill run ~/myrepo --agent codex --model gpt-5.2-codex --iterations 5
 ./mill shell ~/myrepo                      # interactive shell in the container
 ./mill logs                                # follow the running loop
-./mill build / stop / ps / init
+./mill stop [~/myrepo]                     # one checkout, or everything
+./mill build / ps / init
 
 # Test / lint
 bash tests/test_loop.sh && bash tests/test_mill.sh
@@ -40,18 +41,30 @@ logs/<container>/  # per-checkout logs: results.jsonl + iter-N-<sha>.log
   `git clean`), including after an agent error or timeout. The loop therefore
   refuses to start on a dirty worktree.
 - **Stop conditions**: `DONE_PROMISE` in the final message, `MAX_ITERATIONS`,
-  `MAX_NOOPS`, `MAX_ERRORS` (exponential backoff), `ITER_TIMEOUT` per session.
+  `MAX_NOOPS`, `MAX_ERRORS` (exponential backoff capped by `MAX_BACKOFF`),
+  `ITER_TIMEOUT` per session. TERM/INT is forwarded to the agent's process
+  group (`timeout --foreground` keeps it in one), the loop keeps waiting for
+  it to exit (SIGKILL after `SHUTDOWN_GRACE`), and inter-iteration sleeps are
+  interruptible, so no new session starts after a signal.
 - **Parallelism**: no framework code — one git worktree per agent, run mill
   twice. `mill` mounts a linked worktree's git dir at its host path so the
-  `gitdir:` pointer resolves inside the container.
+  `gitdir:` pointer resolves inside the container, plus every sibling
+  worktree's `.git` file (read-only) so `git worktree prune` inside cannot
+  delete their metadata on the host. `mill stop <repo>` stops one checkout.
 - **Agent installs its own deps**: scoped passwordless sudo for apt; optional
   `SETUP_CMD` for determinism; `--dind` sidecar when the work needs docker.
 
 ## Conventions
 
 - Shell only, `set -euo pipefail`, shellcheck-clean; no third-party deps.
-- All config via env vars; `.env` is `KEY=value` (no inline comments) and the
-  caller's environment wins. `mill` forwards resolved values with `-e`.
+- All config via env vars; `.env` is `KEY=value` (quoted values and inline
+  ` # comments` allowed) and the caller's environment wins. `mill` parses it
+  without exporting and forwards resolved values with `-e`.
+- Git identity goes through `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env, never
+  `git config` — the repo is a bind mount and a repo-local setting would
+  persist on the host.
+- Container user `agent` has `AGENT_UID`/`AGENT_GID` build args (Linux hosts
+  need them to match the caller; `mill build` passes them).
 - Git operations bounded — never retry infinitely.
 - Container runs as non-root `agent`; permission bypass inside the container
   is intentional (the container is the boundary).

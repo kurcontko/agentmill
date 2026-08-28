@@ -161,4 +161,71 @@ grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "l
 rm -rf "$TMP"
 echo "PASS: the loop works in a linked worktree"
 
+# --- 10: git identity comes from the environment, not the repo's .git/config ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+echo change >> stub.txt
+git add -A && git commit -qm "agent: stub work"
+printf '{"type":"result","is_error":false,"result":"done TASK_COMPLETE"}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ITERATIONS=1 GIT_USER=looper GIT_EMAIL=looper@x
+[[ "$(git -C "$TMP/repo" log -1 --format=%an)" == looper ]] || fail "agent commit not authored by GIT_USER"
+git -C "$TMP/repo" config --local user.name >/dev/null && fail "identity was written to the repo's config"
+rm -rf "$TMP"
+echo "PASS: git identity is not persisted in the host repo"
+
+# --- 11: TERM mid-session reaches the agent, the loop waits for it, no new session ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+trap 'echo signalled > got-term; git add -A; git commit -qm "agent: on term"; exit 0' TERM
+echo started > started
+sleep 30 & wait $!
+STUB
+chmod +x "$TMP/bin/claude"
+HOME="$TMP/home" PATH="$TMP/bin:$PATH" ANTHROPIC_API_KEY=test \
+    REPO_DIR="$TMP/repo" LOG_DIR="$TMP/logs" PROMPT_FILE="$TMP/prompt.md" \
+    LOOP_DELAY=0 SHUTDOWN_GRACE=10 bash "$ROOT/loop.sh" >"$TMP/out.log" 2>&1 &
+loop_pid=$!
+for _ in $(seq 1 50); do [[ -f "$TMP/repo/started" ]] && break; sleep 0.1; done
+[[ -f "$TMP/repo/started" ]] || { cat "$TMP/out.log"; fail "agent never started"; }
+kill -TERM "$loop_pid"
+wait "$loop_pid" || { cat "$TMP/out.log"; fail "loop.sh exited nonzero after TERM"; }
+[[ -f "$TMP/repo/got-term" ]] || { cat "$TMP/out.log"; fail "agent CLI did not receive TERM"; }
+grep -q "shutdown signal" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected shutdown stop"; }
+[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 1 ]] || fail "a new session started after the signal"
+grep -q '"status":"kept"' "$TMP/logs/results.jsonl" || fail "the agent's own commit on TERM was not kept"
+rm -rf "$TMP"
+echo "PASS: TERM stops the agent gracefully and the loop waits for it"
+
+# --- 12: a signal during the inter-iteration sleep does not start another session ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+printf '{"type":"result","is_error":false,"result":"nothing to do"}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+HOME="$TMP/home" PATH="$TMP/bin:$PATH" ANTHROPIC_API_KEY=test \
+    REPO_DIR="$TMP/repo" LOG_DIR="$TMP/logs" PROMPT_FILE="$TMP/prompt.md" \
+    LOOP_DELAY=30 MAX_NOOPS=0 bash "$ROOT/loop.sh" >"$TMP/out.log" 2>&1 &
+loop_pid=$!
+for _ in $(seq 1 50); do [[ -f "$TMP/logs/results.jsonl" ]] && break; sleep 0.1; done
+sleep 0.5
+kill -TERM "$loop_pid"
+wait "$loop_pid" || { cat "$TMP/out.log"; fail "loop.sh exited nonzero after TERM in sleep"; }
+[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 1 ]] || fail "signal during sleep started another session"
+rm -rf "$TMP"
+echo "PASS: a signal during the sleep stops the loop immediately"
+
+# --- 13: the error backoff is capped and never overflows with MAX_ERRORS=0 ---
+make_env
+printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/claude"
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ERRORS=0 MAX_ITERATIONS=70 ERROR_BACKOFF=1 MAX_BACKOFF=0
+[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 70 ]] || { cat "$TMP/out.log"; fail "backoff arithmetic broke the loop"; }
+rm -rf "$TMP"
+echo "PASS: error backoff is capped by MAX_BACKOFF"
+
 echo "OK: all loop.sh smoke tests passed"
