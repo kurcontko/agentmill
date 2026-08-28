@@ -115,6 +115,25 @@ PROMPT_FILE_1=/prompts/features.md PROMPT_FILE_2=/prompts/tests.md \
 AGENT_BRANCH=main REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agent-3
 ```
 
+---
+
+### 5. `harness` — Manage-Execute-Audit (LongHorizon-Harness)
+
+AgentMill is not the agent here. [LongHorizon-Harness](https://github.com/AMAP-ML/LongHorizon-Harness) drives `claude`/`codex` itself in a manager → executor → auditor loop; AgentMill supplies the sandbox, the mounted repo, and a dashboard port. Requires a checkout of the harness source at `LH_HARNESS_PATH` (default `../LongHorizon-Harness`).
+
+```bash
+# One-shot run against the repo
+./mill mea ~/repo --task "port the CLI to argparse and cover it with tests"
+
+# Long task from a file, bounded rounds, no end-of-round dashboard gate
+./mill mea ~/repo --task-file TASK.md --rounds 8 --unattended
+
+# Or drop into a shell with lhrun/lhdash helpers wired up
+./mill mea ~/repo --shell
+```
+
+The run pauses at each end-of-round human gate on the dashboard (`http://localhost:8080/`) unless `--unattended` is passed. See [`docs/longhorizon-mea.md`](docs/longhorizon-mea.md) for the integration assessment.
+
 ## Configuration
 
 **All modes:**
@@ -152,6 +171,15 @@ AGENT_BRANCH=main REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agen
 | `AUTO_RALPH` | `false` | Auto-start Ralph loop for bounded autonomous iteration |
 | `AUTO_RALPH_MAX_ITERATIONS` | `10` | Max Ralph loop iterations |
 | `AUTO_RALPH_COMPLETION_PROMISE` | `TASK_COMPLETE` | Token that signals task completion to Ralph |
+
+**Harness (`mill mea`) only:**
+
+| Env Var | Default | Description |
+|---------|---------|-------------|
+| `LH_HARNESS_PATH` | `../LongHorizon-Harness` | Path to the LongHorizon-Harness source (mounted read-only, editable-installed) |
+| `DASHBOARD_PORT` | `8080` | Published harness dashboard port |
+| `OPENAI_API_KEY` | — | Only needed for `--agent codex` / mixed-backend runs |
+| `ANTHROPIC_BASE_URL` | — | Point the Claude CLI at a different Anthropic-compatible endpoint (all modes) |
 
 ## Auto-Setup
 

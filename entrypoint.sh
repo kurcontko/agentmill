@@ -145,6 +145,7 @@ $PROMPT_CONTENT"
 
     set +e
     claude --dangerously-skip-permissions \
+        --model "$MODEL" \
         -p "$PROMPT_CONTENT" \
         > >(tee "$SESSION_LOG") 2>&1 &
     CLAUDE_PID=$!
