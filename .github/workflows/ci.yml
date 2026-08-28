@@ -41,6 +41,9 @@ jobs:
       - name: Run loop smoke tests
         run: bash tests/test_loop.sh
 
+      - name: Run mill smoke tests
+        run: bash tests/test_mill.sh
+
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest

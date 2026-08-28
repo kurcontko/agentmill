@@ -28,10 +28,12 @@ What the loop adds around the bare `while true; do claude -p ...` idea:
   an iteration cap, N no-progress iterations, or N consecutive failures
   (with exponential backoff). A hung CLI is killed by a per-iteration timeout.
 - **The ratchet** — set `CHECK_CMD` (e.g. your test suite) and any iteration
-  that breaks it is reverted. Kept history is always green; a bad iteration
-  costs only tokens.
+  that breaks it is reverted, including one the CLI crashed or timed out
+  halfway through. Kept history is always green; a bad iteration costs only
+  tokens. Because a revert discards the worktree, the loop refuses to start on
+  a repo with uncommitted changes.
 - **A paper trail** — commit-keyed session logs plus one JSON line per
-  iteration in `logs/results.jsonl`.
+  iteration in `logs/<container>/results.jsonl`, one directory per checkout.
 
 ## Quick start
 
@@ -39,7 +41,7 @@ What the loop adds around the bare `while true; do claude -p ...` idea:
 ./mill init                      # create .env — set auth + REPO_PATH
 ./mill build                     # build the container image
 nano prompts/PROMPT.md           # describe the task (or drop a TASK.md in the repo)
-./mill run ~/path/to/repo        # go. Ctrl-C finishes the iteration and exits.
+./mill run ~/path/to/repo        # go. Ctrl-C stops the agent, commits, exits.
 ```
 
 Auth in `.env`: `ANTHROPIC_API_KEY` (or `CLAUDE_CODE_OAUTH_TOKEN` from
@@ -69,9 +71,9 @@ Everything lives in `.env` (see `.env.example`); flags override it.
 | Var | Default | Meaning |
 |-----|---------|---------|
 | `AGENT` | `claude` | `claude` or `codex` |
-| `MODEL` | `sonnet` | passed through to the CLI |
+| `MODEL` | `sonnet` (claude) | passed through to the CLI; empty = the CLI's own default |
 | `MAX_ITERATIONS` | `0` | 0 = unbounded |
-| `MAX_ERRORS` / `MAX_NOOPS` | `3` / `3` | consecutive failures / no-progress iterations before stopping |
+| `MAX_ERRORS` / `MAX_NOOPS` | `3` / `3` | consecutive failures / no-progress iterations before stopping (0 = unbounded) |
 | `ITER_TIMEOUT` | `3600` | seconds per iteration |
 | `DONE_PROMISE` | `TASK_COMPLETE` | substring of the final message that stops the loop |
 | `SETUP_CMD` | — | runs once before the loop (`uv sync`, `npm ci`, …) |
@@ -79,12 +81,14 @@ Everything lives in `.env` (see `.env.example`); flags override it.
 
 ## How the agent installs things
 
-The image is deliberately generic — node (for the CLIs), git, jq, python3.
+The image is deliberately generic — node (for the CLIs), git, jq, python3, and
+a docker client for `--dind`.
 Repo toolchains are the agent's job: it has passwordless `sudo apt-get`
 (scoped to apt only) and installs what the work needs, or you make it
 deterministic with `SETUP_CMD`. For repos whose work itself needs Docker
 (testcontainers, image builds), `--dind` starts a docker:dind sidecar and
-points the agent at it — the host docker socket is never mounted.
+points the image's docker client at it — the host docker socket is never
+mounted.
 
 ## Security
 

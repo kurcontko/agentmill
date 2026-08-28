@@ -34,14 +34,49 @@ require_repo() {
     [[ "$repo" == /* ]] || repo="$PWD/$repo"
     [[ -e "$repo/.git" ]] || { echo "Error: $repo is not a git repo" >&2; exit 1; }
     REPO_PATH="$repo"
+    # Distinct containers/log dirs per checkout: two repos can share a basename,
+    # and force-removing the other one's container would kill a live run.
+    CONTAINER_NAME="agentmill-$(basename "$REPO_PATH" | tr -c 'a-zA-Z0-9_.-' '-' | sed 's/-$//')-$(path_hash "$REPO_PATH")"
 }
 
-# .env is docker --env-file format: KEY=value, full-line comments only.
+path_hash() { printf '%s' "$1" | (shasum 2>/dev/null || cksum) | tr -cd 'a-f0-9' | cut -c1-6; }
+
+# A linked worktree's .git is a file pointing at <main repo>/.git/worktrees/<name>;
+# that exact path must exist inside the container too, or git fails on the first
+# command. Use the recorded path verbatim — it is what git will dereference.
+worktree_mount() {
+    [[ -f "$REPO_PATH/.git" ]] || return 0
+    local gitdir common
+    gitdir="$(sed -n 's/^gitdir: *//p' "$REPO_PATH/.git" | head -1)"
+    [[ -n "$gitdir" ]] || { echo "Error: $REPO_PATH/.git has no gitdir: pointer" >&2; exit 1; }
+    [[ "$gitdir" == /* ]] || {
+        echo "Error: $REPO_PATH records a relative gitdir ($gitdir), which cannot be" >&2
+        echo "       mapped into the container. Recreate the worktree with absolute paths." >&2
+        exit 1
+    }
+    common="${gitdir%/worktrees/*}"          # the main repo's git dir
+    [[ -d "$common" ]] || { echo "Error: git dir $common not found for worktree $REPO_PATH" >&2; exit 1; }
+    RUN_ARGS+=(-v "$common:$common")
+}
+
+# Config the container understands. .env keys are appended by load_env, so a
+# custom var set there reaches the agent too.
+ENV_KEYS=(ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY
+          AGENT MODEL FALLBACK_MODEL MAX_ITERATIONS MAX_ERRORS MAX_NOOPS
+          ITER_TIMEOUT LOOP_DELAY ERROR_BACKOFF DONE_PROMISE
+          SETUP_CMD CHECK_CMD GIT_USER GIT_EMAIL)
+
+# .env is KEY=value, full-line comments only. The caller's environment wins,
+# so `ANTHROPIC_API_KEY=... ./mill run repo` overrides the file.
 load_env() {
     [[ -f "$MILL_DIR/.env" ]] || return 0
-    while IFS='=' read -r key val; do
+    local key val k seen
+    while IFS='=' read -r key val || [[ -n "$key" ]]; do   # || : last line may lack a newline
         [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-        [[ -z "${!key:-}" ]] && export "$key=$val"
+        [[ -n "${!key:-}" ]] || export "$key=$val"
+        seen=false
+        for k in "${ENV_KEYS[@]}"; do [[ "$k" == "$key" ]] && { seen=true; break; }; done
+        [[ "$seen" == true ]] || ENV_KEYS+=("$key")
     done < "$MILL_DIR/.env"
 }
 
@@ -60,12 +95,20 @@ ensure_dind() {
 
 common_args() {  # fills RUN_ARGS with env + mounts shared by run/shell
     RUN_ARGS=(--label agentmill --init --memory 4g --pids-limit 512)
-    [[ -f "$MILL_DIR/.env" ]] && RUN_ARGS+=(--env-file "$MILL_DIR/.env")
+    # Forwarded explicitly (not --env-file) so values resolved from the caller's
+    # environment reach the container too; docker inherits nothing by itself.
+    local key
+    for key in "${ENV_KEYS[@]}"; do
+        [[ -n "${!key:-}" ]] && RUN_ARGS+=(-e "$key=${!key}")
+    done
+    LOG_DIR_HOST="$MILL_DIR/logs/$CONTAINER_NAME"   # per checkout: parallel runs must not interleave
+    mkdir -p "$LOG_DIR_HOST" "$MILL_DIR/prompts"
     RUN_ARGS+=(
         -v "$REPO_PATH:/workspace/repo"
-        -v "$MILL_DIR/logs:/workspace/logs"
+        -v "$LOG_DIR_HOST:/workspace/logs"
         -v "$MILL_DIR/prompts:/prompts:ro"
     )
+    worktree_mount
 }
 
 cmd_run() {
@@ -80,11 +123,12 @@ cmd_run() {
             --prompt)      prompt="$2"; shift 2 ;;
             --dind)        dind=true; shift ;;
             -d|--detach)   detach=true; shift ;;
-            *) repo="${repo:-$1}"; shift ;;
+            -*) echo "Error: unknown option: $1" >&2; usage 1 ;;
+            *) [[ -z "$repo" ]] || { echo "Error: unexpected argument: $1" >&2; usage 1; }
+               repo="$1"; shift ;;
         esac
     done
     require_repo "$repo"
-    mkdir -p "$MILL_DIR/logs" "$MILL_DIR/prompts"
 
     common_args
     [[ -n "$agent" ]]      && RUN_ARGS+=(-e "AGENT=$agent")
@@ -98,10 +142,12 @@ cmd_run() {
     [[ "$dind" == true ]] && { ensure_dind; RUN_ARGS+=("${DIND_ARGS[@]}"); }
     [[ "$detach" == true ]] && RUN_ARGS+=(-d)
 
-    local name
-    name="agentmill-$(basename "$REPO_PATH" | tr -c 'a-zA-Z0-9_.-' '-' | sed 's/-$//')"
-    docker rm -f "$name" >/dev/null 2>&1 || true
-    docker run --rm --name "$name" "${RUN_ARGS[@]}" "$IMAGE"
+    if docker ps -q --filter "name=^/${CONTAINER_NAME}$" | grep -q .; then
+        echo "Error: $CONTAINER_NAME is already running for $REPO_PATH (mill stop, or wait)" >&2
+        exit 1
+    fi
+    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    docker run --rm --name "$CONTAINER_NAME" "${RUN_ARGS[@]}" "$IMAGE"
 }
 
 cmd_shell() {
@@ -109,12 +155,14 @@ cmd_shell() {
     [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            -h|--help) usage 0 ;;
             --dind) dind=true; shift ;;
-            *) repo="${repo:-$1}"; shift ;;
+            -*) echo "Error: unknown option: $1" >&2; usage 1 ;;
+            *) [[ -z "$repo" ]] || { echo "Error: unexpected argument: $1" >&2; usage 1; }
+               repo="$1"; shift ;;
         esac
     done
     require_repo "$repo"
-    mkdir -p "$MILL_DIR/logs" "$MILL_DIR/prompts"
     common_args
     [[ "$dind" == true ]] && { ensure_dind; RUN_ARGS+=("${DIND_ARGS[@]}"); }
     docker run --rm -it --entrypoint bash "${RUN_ARGS[@]}" -w /workspace/repo "$IMAGE"
@@ -126,10 +174,13 @@ cmd_logs() {
     if [[ -n "$c" ]]; then
         docker logs -f "$c"
     else
-        local latest
-        latest="$(find "$MILL_DIR/logs" -maxdepth 1 -name 'iter-*.log' -print0 2>/dev/null \
-            | xargs -0 ls -t 2>/dev/null | head -1)"
-        [[ -n "$latest" ]] || { echo "No running container and no logs." >&2; exit 1; }
+        # Collect first: with no matches, `xargs ls -t` would list the cwd.
+        local latest files=() f
+        while IFS= read -r f; do files+=("$f"); done < <(
+            find "$MILL_DIR/logs" -maxdepth 2 -name 'iter-*.log' 2>/dev/null)
+        [[ ${#files[@]} -gt 0 ]] || { echo "No running container and no logs." >&2; exit 1; }
+        # shellcheck disable=SC2012  # names are generated by loop.sh, no spaces
+        latest="$(ls -t "${files[@]}" | head -1)"
         echo "=== $(basename "$latest") ==="
         tail -f "$latest"
     fi

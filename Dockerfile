@@ -3,6 +3,8 @@ FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95ea
 # Bump to upgrade the CLIs (cache-busts the npm layer cleanly).
 ARG CLAUDE_CODE_VERSION=2.1.241
 ARG CODEX_VERSION=0.147.0
+# Client only — `mill --dind` points it at the sidecar daemon; no daemon here.
+ARG DOCKER_CLI_VERSION=27.5.1
 
 # Only what the loop itself needs. Repo toolchains are the agent's job:
 # it runs `sudo apt-get install` (scoped below) or a language installer.
@@ -14,6 +16,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd -m -s /bin/bash agent \
     && echo 'agent ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt' \
         > /etc/sudoers.d/agent
+
+# The docker CLI, so --dind's DOCKER_HOST is actually usable by the agent.
+RUN curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-${DOCKER_CLI_VERSION}.tgz" \
+        | tar -xzC /usr/local/bin --strip-components=1 docker/docker \
+    && docker --version
 
 WORKDIR /workspace
 RUN chown agent:agent /workspace
