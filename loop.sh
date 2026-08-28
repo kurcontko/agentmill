@@ -7,8 +7,9 @@ set -euo pipefail
 AGENT="${AGENT:-claude}"                 # claude | codex
 MODEL="${MODEL:-}"                       # blank = the CLI's own default
 FALLBACK_MODEL="${FALLBACK_MODEL:-}"     # claude only: --fallback-model when MODEL is overloaded
-PROMPT_FILE="${PROMPT_FILE:-/prompts/PROMPT.md}"
+PROMPT_FILE="${PROMPT_FILE:-/prompts/PROMPT.md}"   # framework prompt (how to work)
 REPO_DIR="${REPO_DIR:-/workspace/repo}"
+MISSION_FILE="${MISSION_FILE:-$REPO_DIR/MILL.md}"  # the repo's mission (what to do)
 LOG_DIR="${LOG_DIR:-/workspace/logs}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-0}"    # 0 = unbounded
 MAX_ERRORS="${MAX_ERRORS:-3}"            # consecutive agent failures before giving up (0 = unbounded)
@@ -24,13 +25,22 @@ CHECK_CMD="${CHECK_CMD:-}"               # ratchet: iteration is reverted if thi
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
 
+[[ "$ITER_TIMEOUT" =~ ^[1-9][0-9]*$ ]] \
+    || { echo "FATAL: ITER_TIMEOUT must be a positive integer" >&2; exit 1; }
+[[ "$SHUTDOWN_GRACE" =~ ^[0-9]+$ ]] \
+    || { echo "FATAL: SHUTDOWN_GRACE must be a non-negative integer" >&2; exit 1; }
+# GNU timeout treats a zero --kill-after duration as disabled. Preserve zero's
+# external-shutdown meaning (kill immediately), but keep timeout escalation on.
+TIMEOUT_KILL_AFTER="$SHUTDOWN_GRACE"
+[[ "$TIMEOUT_KILL_AFTER" -gt 0 ]] || TIMEOUT_KILL_AFTER=1
+
 # GNU timeout is always present in the container; degrade without it (host tests).
-# --foreground keeps timeout in the pipeline's process group (by default it
-# calls setpgid(0,0)), so on_signal's group-wide TERM reaches it and the CLI.
-if timeout --foreground 1 true >/dev/null 2>&1; then
-    TIMEOUT_CMD=(timeout --foreground "$ITER_TIMEOUT")
-elif command -v timeout >/dev/null 2>&1; then
-    TIMEOUT_CMD=(timeout "$ITER_TIMEOUT")
+# Its normal (non-foreground) mode owns a process group, so TERM and the hard
+# kill deadline cover the CLI and every descendant, not only the direct child.
+if timeout --kill-after=1 1 true >/dev/null 2>&1; then
+    TIMEOUT_CMD=(timeout "--kill-after=$TIMEOUT_KILL_AFTER" "$ITER_TIMEOUT")
+elif timeout -k 1 1 true >/dev/null 2>&1; then
+    TIMEOUT_CMD=(timeout -k "$TIMEOUT_KILL_AFTER" "$ITER_TIMEOUT")
 else
     TIMEOUT_CMD=(env)
 fi
@@ -38,8 +48,8 @@ fi
 log() { printf '[%s] %s\n' "$(date -u '+%H:%M:%S')" "$*"; }
 die() { log "FATAL: $*"; exit 1; }
 
-# Job control so a backgrounded agent gets its own process group and the whole
-# CLI pipeline can be signalled at once.
+# Job control gives the loop wrapper and its timed CLI session distinct process
+# groups, allowing each layer to enforce a bounded descendant-group shutdown.
 set -m
 SHUTDOWN=false
 AGENT_PID=""
@@ -51,7 +61,9 @@ on_signal() {
     kill -TERM -- "-$AGENT_PID" 2>/dev/null || kill -TERM "$AGENT_PID" 2>/dev/null || true
     # An agent that ignores TERM is killed after the grace period; the loop
     # keeps waiting for it either way (see wait_agent).
-    { sleep "$SHUTDOWN_GRACE"; kill -KILL -- "-$AGENT_PID" 2>/dev/null; } &
+    # run_agent has its own descendant-group watchdog. This outer deadline is
+    # slightly later, giving that wrapper time to reap the group and return.
+    { sleep "$((SHUTDOWN_GRACE + 2))"; kill -KILL -- "-$AGENT_PID" 2>/dev/null; } &
     WATCHDOG_PID=$!
 }
 trap on_signal TERM INT
@@ -88,6 +100,7 @@ pause() {
 
 [[ -e "$REPO_DIR/.git" ]] || die "no git repo at $REPO_DIR (mount one)"
 [[ -f "$PROMPT_FILE" ]] || die "no prompt file at $PROMPT_FILE"
+[[ -f "$MISSION_FILE" ]] || die "no mission file at $MISSION_FILE (mill init)"
 case "$AGENT" in
     claude) [[ -n "${ANTHROPIC_API_KEY:-}${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] \
                 || die "set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN" ;;
@@ -114,13 +127,19 @@ fi
 export GIT_AUTHOR_NAME="$GIT_USER" GIT_COMMITTER_NAME="$GIT_USER"
 export GIT_AUTHOR_EMAIL="$GIT_EMAIL" GIT_COMMITTER_EMAIL="$GIT_EMAIL"
 
-worktree_status() {
-    git status --porcelain --untracked-files=all 2>/dev/null
+WORKTREE_STATUS=""
+refresh_worktree_status() {
+    # Capture the exit status explicitly. A failing command substitution inside
+    # `[[ -z ... ]]` otherwise looks exactly like an empty (clean) checkout.
+    if ! WORKTREE_STATUS="$(git status --porcelain --untracked-files=all)"; then
+        die "could not read repository status at $REPO_DIR"
+    fi
 }
 
 require_clean_worktree() {
     local reason="$1"
-    [[ -z "$(worktree_status)" ]] \
+    refresh_worktree_status
+    [[ -z "$WORKTREE_STATUS" ]] \
         || die "$reason — commit or stash tracked, staged, and untracked changes first"
 }
 
@@ -147,14 +166,71 @@ preamble() {
     echo "</loop-context>"
 }
 
+# The mission is re-read from the checkout every iteration, so editing
+# MILL.md steers a running loop. Its frontmatter (settings) is mill's
+# business and was applied at start; only the body is handed to the agent.
+mission_body() {
+    awk 'NR == 1 && $0 == "---" { fm = 1; next }
+         fm && $0 == "---"     { fm = 0; next }
+         !fm' "$MISSION_FILE"
+}
+
+MISSION_SUM=""
+note_mission_changes() {
+    local sum
+    sum="$(cksum < "$MISSION_FILE" 2>/dev/null || true)"
+    [[ -z "$MISSION_SUM" || "$sum" == "$MISSION_SUM" ]] \
+        || log "$(basename "$MISSION_FILE") changed since the last iteration"
+    MISSION_SUM="$sum"
+}
+
+build_prompt() {
+    printf '%s\n\n%s\n\n<mission>\n%s\n</mission>\n' \
+        "$(preamble)" "$(cat "$PROMPT_FILE")" "$(mission_body)"
+}
+
+# State used inside run_agent's background subshell. The timed command is
+# itself backgrounded so this subshell handles TERM immediately while waiting.
+SESSION_PID=""
+SESSION_WATCHDOG_PID=""
+SESSION_RC=0
+SESSION_STOP_REQUESTED=false
+on_session_signal() {
+    SESSION_STOP_REQUESTED=true
+    [[ -n "$SESSION_PID" && -z "$SESSION_WATCHDOG_PID" ]] || return 0
+    kill -TERM -- "-$SESSION_PID" 2>/dev/null || kill -TERM "$SESSION_PID" 2>/dev/null || true
+    { sleep "$SHUTDOWN_GRACE"; kill -KILL -- "-$SESSION_PID" 2>/dev/null; } &
+    SESSION_WATCHDOG_PID=$!
+}
+
+wait_session() {
+    SESSION_RC=0
+    until wait "$SESSION_PID"; do
+        SESSION_RC=$?
+        kill -0 "$SESSION_PID" 2>/dev/null || break
+        SESSION_RC=0
+    done
+    if [[ -n "$SESSION_WATCHDOG_PID" ]]; then
+        if kill -0 -- "-$SESSION_PID" 2>/dev/null; then
+            # timeout may have exited before one of its descendants. Do not let
+            # the wrapper return until the bounded group kill has completed.
+            wait "$SESSION_WATCHDOG_PID" 2>/dev/null || true
+        else
+            kill -- "-$SESSION_WATCHDOG_PID" 2>/dev/null \
+                || kill "$SESSION_WATCHDOG_PID" 2>/dev/null || true
+            wait "$SESSION_WATCHDOG_PID" 2>/dev/null || true
+        fi
+        SESSION_WATCHDOG_PID=""
+    fi
+    SESSION_PID=""
+}
+
 # Runs one agent session. Prints the agent's final message; exit code is the
 # agent's. Full event stream goes to the iteration log.
 run_agent() {
     local rc=0 model_args=()
-    # Runs backgrounded, so on_signal's TERM hits this subshell too. Defer it
-    # (bash runs the trap after the foreground pipeline) so the subshell
-    # outlives the CLI and wait_agent really waits for the CLI to exit.
-    trap ':' TERM INT
+    SESSION_PID="" SESSION_WATCHDOG_PID="" SESSION_RC=0 SESSION_STOP_REQUESTED=false
+    trap on_session_signal TERM INT
     case "$AGENT" in
         claude)
             [[ -n "$MODEL" ]] && model_args=(--model "$MODEL")
@@ -162,10 +238,13 @@ run_agent() {
             "${TIMEOUT_CMD[@]}" claude -p "$1" \
                 --dangerously-skip-permissions \
                 ${model_args[@]+"${model_args[@]}"} \
-                --output-format stream-json --verbose \
-                | (trap '' TERM INT; exec tee -a "$iter_log") \
-                | (trap '' TERM INT; exec jq -r 'select(.type == "result") | .result // empty') \
-                || rc=$?   # tee/jq ignore the signal and drain until the CLI exits
+                --output-format stream-json --verbose >>"$iter_log" 2>&1 &
+            SESSION_PID=$!
+            [[ "$SESSION_STOP_REQUESTED" == false ]] || on_session_signal
+            wait_session
+            rc="$SESSION_RC"
+            jq -Rr 'fromjson? | select(.type == "result") | .result // empty' \
+                "$iter_log" 2>/dev/null || true
             ;;
         codex)
             [[ -n "$MODEL" ]] && model_args=(-m "$MODEL")
@@ -175,8 +254,11 @@ run_agent() {
             "${TIMEOUT_CMD[@]}" codex exec "$1" \
                 --dangerously-bypass-approvals-and-sandbox \
                 ${model_args[@]+"${model_args[@]}"} -C "$REPO_DIR" --json \
-                -o "$codex_msg" >>"$iter_log" 2>&1 \
-                || rc=$?
+                -o "$codex_msg" >>"$iter_log" 2>&1 &
+            SESSION_PID=$!
+            [[ "$SESSION_STOP_REQUESTED" == false ]] || on_session_signal
+            wait_session
+            rc="$SESSION_RC"
             cat "$codex_msg" 2>/dev/null || true
             ;;
     esac
@@ -189,7 +271,8 @@ head_oid() {
 }
 
 repo_mutated() {
-    [[ "$(head_oid)" != "$start_ref" || -n "$(worktree_status)" ]]
+    refresh_worktree_status
+    [[ "$(head_oid)" != "$start_ref" || -n "$WORKTREE_STATUS" ]]
 }
 
 count_iteration_commits() {
@@ -202,6 +285,19 @@ count_iteration_commits() {
     printf '%s' "${count:-0}"
 }
 
+# Restore every initialized submodule to the commit recorded by the current
+# superproject, then discard tracked and untracked changes at every depth.
+restore_submodules() {
+    # Clean first so an untracked path cannot block checkout of the recorded
+    # commit, then clean again after the recursive update at the restored tree.
+    git submodule foreach -q --recursive \
+        'git reset -q --hard && git clean -q -ffd'
+    git submodule sync -q --recursive
+    git submodule update -q --recursive --force
+    git submodule foreach -q --recursive \
+        'git reset -q --hard && git clean -q -ffd'
+}
+
 # Undo everything the iteration did, including untracked files it left behind.
 restore_iteration() {
     if [[ -n "$start_ref" ]]; then
@@ -211,6 +307,7 @@ restore_iteration() {
             git update-ref --no-deref HEAD "$start_ref"
         fi
         git reset -q --hard "$start_ref"
+        restore_submodules
     else
         # Clear the index/worktree before deleting the first commit and
         # restoring the original unborn branch name.
@@ -242,7 +339,8 @@ while true; do
     status=kept rc=0
     : > "$msg_file"
     # Backgrounded so TERM/INT is handled while the agent runs, not after it.
-    run_agent "$(printf '%s\n\n%s' "$(preamble)" "$(cat "$PROMPT_FILE")")" >"$msg_file" &
+    note_mission_changes
+    run_agent "$(build_prompt)" >"$msg_file" &
     AGENT_PID=$!
     wait_agent
     last_msg="$(cat "$msg_file" 2>/dev/null || true)"
@@ -257,7 +355,8 @@ while true; do
     # The prompt asks the agent to commit its own work with real messages;
     # this is only a safety net for leftovers.
     snapshot_failed=false
-    if [[ -n "$(worktree_status)" ]]; then
+    refresh_worktree_status
+    if [[ -n "$WORKTREE_STATUS" ]]; then
         if ! git add -A \
             || ! git -c commit.gpgSign=false commit --no-verify -qm \
                 "[wip] agent leftovers from iteration $iter"; then
@@ -286,11 +385,15 @@ while true; do
             restore_iteration
             new_commits=0
             status=reverted
-        elif [[ -n "$(worktree_status)" ]]; then
-            # CHECK_CMD validates the checkpoint; its own test artifacts must
-            # not become the next iteration's dirty baseline.
-            git reset -q --hard HEAD
-            git clean -q -ffd
+        else
+            refresh_worktree_status
+            if [[ -n "$WORKTREE_STATUS" ]]; then
+                # CHECK_CMD validates the checkpoint; its own test artifacts
+                # must not become the next iteration's dirty baseline.
+                git reset -q --hard HEAD
+                restore_submodules
+                git clean -q -ffd
+            fi
         fi
     fi
 

@@ -3,41 +3,67 @@ set -euo pipefail
 
 # mill — run an AI agent (claude or codex) in a respawning loop, inside Docker.
 
-MILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Resolve symlinks so `ln -s .../mill ~/.local/bin/mill` still finds the
+# Dockerfile and prompts next to the real script.
+self="${BASH_SOURCE[0]}"
+while [[ -L "$self" ]]; do
+    link="$(readlink "$self")"
+    [[ "$link" == /* ]] || link="$(dirname "$self")/$link"
+    self="$link"
+done
+MILL_DIR="$(cd "$(dirname "$self")" && pwd)"
+unset self link
+CONFIG_FILE="${AGENTMILL_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/agentmill/env}"
 NET="agentmill"
 DIND="agentmill-dind"
 
 usage() {
-    cat <<'EOF'
+    cat <<EOF
 mill — AgentMill CLI
 
 Usage:
-  mill run   [repo] [--agent claude|codex] [--model M] [--iterations N]
-             [--prompt FILE] [--dind] [-d|--detach]
-  mill shell [repo] [--dind]     Interactive shell inside the container
-  mill logs                      Follow the running loop's output
-  mill ps                        List running agentmill containers
-  mill build                     Build the container image
-  mill stop  [repo]              Stop one checkout's container, or all of them
-                                 (the dind sidecar goes when the last one does)
-  mill init                      Create .env from .env.example
+  mill [-C DIR] run   [--agent claude|codex] [--model M] [--iterations N]
+                      [--prompt FILE] [--dind] [-d|--detach]
+  mill [-C DIR] shell [--dind]   Interactive shell inside the container
+  mill [-C DIR] logs             Follow this checkout's loop (or its last log)
+  mill [-C DIR] stop             Stop this checkout's container
+  mill stop --all                Stop every agentmill container (and dind)
+  mill [-C DIR] init             Write a MILL.md template into the checkout
+  mill ps | build
 
-Config comes from .env (see .env.example); flags override it.
-Parallel agents: make a worktree per agent and run mill once per worktree —
-  git -C ~/repo worktree add ../repo-b agent-b && mill run ../repo-b -d
+The checkout is the git repository containing the current directory (or DIR).
+Its MILL.md holds the mission and per-repo settings; credentials and defaults
+live in $CONFIG_FILE (see .env.example).
+Precedence: flags > environment > MILL.md > config file.
+Parallel agents: one worktree per agent, run mill once per worktree —
+  git worktree add ../repo-b agent-b && mill -C ../repo-b run -d
 EOF
     exit "${1:-0}"
 }
 
-require_repo() {
-    local repo="${1:-${REPO_PATH:-}}"
-    [[ -n "$repo" ]] || { echo "Error: repo path required (pass repo or set REPO_PATH in .env)" >&2; exit 1; }
-    [[ "$repo" == /* ]] || repo="$PWD/$repo"
-    [[ -e "$repo/.git" ]] || { echo "Error: $repo is not a git repo" >&2; exit 1; }
+# The checkout is whichever git repository contains $REPO_START (cwd or -C):
+# the same rule git, make, and cargo use, so `cd repo && mill run` just works.
+resolve_repo() {
+    local repo
+    [[ -d "$REPO_START" ]] || { echo "Error: directory not found: $REPO_START" >&2; exit 1; }
+    repo="$(git -C "$REPO_START" rev-parse --show-toplevel 2>/dev/null)" \
+        || { echo "Error: $REPO_START is not inside a git repository (cd into one, or mill -C DIR)" >&2; exit 1; }
+    # One physical checkout gets one identity even when the caller uses a
+    # trailing slash, .. component, or symlink. Besides keeping the live-run
+    # guard sound, preserving this path inside the container makes relative
+    # submodule gitdir pointers resolve exactly as they do on the host.
+    repo="$(cd -P -- "$repo" && pwd)"
     REPO_PATH="$repo"
     # Distinct containers/log dirs per checkout: two repos can share a basename,
     # and force-removing the other one's container would kill a live run.
     CONTAINER_NAME="agentmill-$(basename "$REPO_PATH" | tr -c 'a-zA-Z0-9_.-' '-' | sed 's/-$//')-$(path_hash "$REPO_PATH")"
+    MISSION_FILE="$REPO_PATH/MILL.md"
+}
+
+require_mission() {
+    [[ -f "$MISSION_FILE" ]] \
+        || { echo "Error: no MILL.md in $REPO_PATH — run \`mill init\` and describe the mission" >&2; exit 1; }
+    load_mission
 }
 
 path_hash() { printf '%s' "$1" | (shasum 2>/dev/null || cksum) | tr -cd 'a-f0-9' | cut -c1-6; }
@@ -71,32 +97,79 @@ worktree_mount() {
     done
 }
 
-# Config the container understands. .env keys are appended by load_env, so a
-# custom var set there reaches the agent too.
+# Config the container understands. Keys found in the config file or MILL.md
+# frontmatter are appended, so a custom var set there reaches the agent too.
 ENV_KEYS=(ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY
           AGENT MODEL FALLBACK_MODEL MAX_ITERATIONS MAX_ERRORS MAX_NOOPS
           ITER_TIMEOUT LOOP_DELAY ERROR_BACKOFF MAX_BACKOFF SHUTDOWN_GRACE
           DONE_PROMISE SETUP_CMD CHECK_CMD GIT_USER GIT_EMAIL)
 ENV_FILE_KEYS=() ENV_FILE_VALS=()   # parallel arrays: bash 3 has no assoc arrays
+MISSION_KEYS=() MISSION_VALS=()     # MILL.md frontmatter, uppercased
 
-# Resolved config value: the caller's environment wins over .env, so
-# `ANTHROPIC_API_KEY=... ./mill run repo` overrides the file.
+# Resolved config value: environment > MILL.md frontmatter > config file, so
+# `ANTHROPIC_API_KEY=... mill run` overrides both files and a repo's own
+# check_cmd overrides a global default.
 cfg() {
     local i
     if [[ -n "${!1:-}" ]]; then printf '%s' "${!1}"; return; fi
+    for i in ${MISSION_KEYS[@]+"${!MISSION_KEYS[@]}"}; do
+        [[ "${MISSION_KEYS[$i]}" == "$1" && -n "${MISSION_VALS[$i]}" ]] \
+            && { printf '%s' "${MISSION_VALS[$i]}"; return 0; }
+    done
     for i in ${ENV_FILE_KEYS[@]+"${!ENV_FILE_KEYS[@]}"}; do
         [[ "${ENV_FILE_KEYS[$i]}" == "$1" ]] && { printf '%s' "${ENV_FILE_VALS[$i]}"; return 0; }
     done
     return 0
 }
 
-# .env is KEY=value. Values may be "double" or 'single' quoted; unquoted
-# values end at an inline ` # comment` and lose surrounding whitespace.
-# Parsed into ENV_FILE_*, never exported: a PATH= or DOCKER_HOST= line must
-# not redirect mill's own commands.
+remember_key() {  # make a file-provided key reach the container
+    local k
+    case "$1" in
+        PATH|HOME|REPO_DIR|AGENTMILL_IMAGE|AGENTMILL_CONFIG|DIND_READY_TIMEOUT)
+            return 0 ;; # mill-only / host-managed
+    esac
+    for k in "${ENV_KEYS[@]}"; do [[ "$k" == "$1" ]] && return 0; done
+    ENV_KEYS+=("$1")
+}
+
+# MILL.md may open with a YAML-ish frontmatter block of `key: value` lines
+# (lowercase env var names; quotes optional). The body is the mission and is
+# read by loop.sh inside the container; only the settings are parsed here.
+load_mission() {
+    local line key val
+    [[ "$(head -1 "$MISSION_FILE")" == "---" ]] || return 0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" == "---" ]] && break
+        [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*:(.*)$ ]] || continue
+        key="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')" val="${BASH_REMATCH[2]}"
+        val="${val#"${val%%[![:space:]]*}"}"
+        if [[ "$val" =~ ^\"(([^\"\\]|\\.)*)\"[[:space:]]*(#.*)?$ ]]; then
+            val="${BASH_REMATCH[1]}"; val="${val//\\\"/\"}"; val="${val//\\\\/\\}"
+        elif [[ "$val" =~ ^\'([^\']*)\'[[:space:]]*(#.*)?$ ]]; then
+            val="${BASH_REMATCH[1]}"
+        else
+            [[ "$val" == \#* ]] && val=""
+            val="${val%%[[:space:]]#*}"
+            val="${val%"${val##*[![:space:]]}"}"
+        fi
+        MISSION_KEYS+=("$key") MISSION_VALS+=("$val")
+        remember_key "$key"
+    done < <(tail -n +2 "$MISSION_FILE")
+}
+
+# The config file is KEY=value. Values may be "double" or 'single' quoted;
+# unquoted values end at an inline ` # comment` and lose surrounding
+# whitespace. Parsed into ENV_FILE_* rather than sourced: a PATH= or
+# DOCKER_HOST= line must not redirect mill's own commands. Selected
+# credentials are exported later, immediately before they are forwarded with
+# Docker's bare -e form.
 load_env() {
-    [[ -f "$MILL_DIR/.env" ]] || return 0
-    local line key val k seen
+    local file="$CONFIG_FILE" line key val
+    if [[ ! -f "$file" && -f "$MILL_DIR/.env" ]]; then
+        file="$MILL_DIR/.env"
+        echo "mill: reading $file — move it to $CONFIG_FILE" >&2
+    fi
+    [[ -f "$file" ]] || return 0
     while IFS= read -r line || [[ -n "$line" ]]; do   # || : last line may lack a newline
         [[ "$line" =~ ^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=(.*)$ ]] || continue
         key="${BASH_REMATCH[2]}" val="${BASH_REMATCH[3]}"
@@ -111,39 +184,67 @@ load_env() {
             val="${val%"${val##*[![:space:]]}"}"                   # rtrim
         fi
         ENV_FILE_KEYS+=("$key") ENV_FILE_VALS+=("$val")
-        case "$key" in PATH|HOME|REPO_PATH|AGENTMILL_IMAGE) continue ;; esac   # mill-only / host-only
-        seen=false
-        for k in "${ENV_KEYS[@]}"; do [[ "$k" == "$key" ]] && { seen=true; break; }; done
-        [[ "$seen" == true ]] || ENV_KEYS+=("$key")
-    done < "$MILL_DIR/.env"
+        remember_key "$key"
+    done < "$file"
 }
 
 # DinD sidecar for repos whose work needs docker (testcontainers, image
 # builds). Privileged, but the blast radius is the sidecar — never the host
 # docker socket.
 ensure_dind() {
+    local ready_timeout elapsed=0
     docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
-    docker container inspect "$DIND" >/dev/null 2>&1 || {
+    if docker container inspect "$DIND" >/dev/null 2>&1; then
+        # Normally redundant because the sidecar uses --rm, but it also
+        # recovers an old stopped container created by an earlier version.
+        docker start "$DIND" >/dev/null 2>&1 || true
+    else
         echo "Starting dind sidecar..."
         docker run -d --rm --name "$DIND" --label agentmill --label agentmill.dind --privileged \
             --network "$NET" -e DOCKER_TLS_CERTDIR= docker:27-dind >/dev/null
-    }
+    fi
+
+    ready_timeout="$(cfg DIND_READY_TIMEOUT)"
+    ready_timeout="${ready_timeout:-30}"
+    [[ "$ready_timeout" != *[!0-9]* ]] \
+        || { echo "Error: DIND_READY_TIMEOUT must be a non-negative integer" >&2; exit 1; }
+    # Probe the same plaintext TCP listener used by the agent containers, not
+    # only dockerd's local Unix socket inside the sidecar.
+    until docker exec "$DIND" docker -H tcp://127.0.0.1:2375 info >/dev/null 2>&1; do
+        if [[ "$elapsed" -ge "$ready_timeout" ]]; then
+            echo "Error: dind did not become ready within ${ready_timeout}s" >&2
+            exit 1
+        fi
+        [[ "$elapsed" -gt 0 ]] || echo "Waiting for dind to accept connections..."
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
     DIND_ARGS=(--network "$NET" -e "DOCKER_HOST=tcp://$DIND:2375")
 }
 
 common_args() {  # fills RUN_ARGS with env + mounts shared by run/shell
     RUN_ARGS=(--label agentmill --init --memory 4g --pids-limit 512)
-    # Forwarded explicitly (not --env-file) so values resolved from the caller's
-    # environment reach the container too; docker inherits nothing by itself.
+    # API credentials use Docker's bare -e KEY form. Values loaded from .env
+    # are exported only in this mill process, keeping them out of the long-lived
+    # `docker run` argv while leaving the caller's environment untouched.
     local key val
     for key in "${ENV_KEYS[@]}"; do
         val="$(cfg "$key")"
-        [[ -n "$val" ]] && RUN_ARGS+=(-e "$key=$val")
+        [[ -n "$val" ]] || continue
+        case "$key" in
+            ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY)
+                printf -v "$key" '%s' "$val"
+                export "${key?}"
+                RUN_ARGS+=(-e "$key")
+                ;;
+            *) RUN_ARGS+=(-e "$key=$val") ;;
+        esac
     done
     LOG_DIR_HOST="$MILL_DIR/logs/$CONTAINER_NAME"   # per checkout: parallel runs must not interleave
     mkdir -p "$LOG_DIR_HOST" "$MILL_DIR/prompts"
     RUN_ARGS+=(
-        -v "$REPO_PATH:/workspace/repo"
+        -e "REPO_DIR=$REPO_PATH"
+        -v "$REPO_PATH:$REPO_PATH"
         -v "$LOG_DIR_HOST:/workspace/logs"
         -v "$MILL_DIR/prompts:/prompts:ro"
     )
@@ -151,8 +252,7 @@ common_args() {  # fills RUN_ARGS with env + mounts shared by run/shell
 }
 
 cmd_run() {
-    local repo="" agent="" model="" iterations="" prompt="" detach=false dind=false
-    [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
+    local agent="" model="" iterations="" prompt="" detach=false dind=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help)     usage 0 ;;
@@ -162,12 +262,11 @@ cmd_run() {
             --prompt)      prompt="$2"; shift 2 ;;
             --dind)        dind=true; shift ;;
             -d|--detach)   detach=true; shift ;;
-            -*) echo "Error: unknown option: $1" >&2; usage 1 ;;
-            *) [[ -z "$repo" ]] || { echo "Error: unexpected argument: $1" >&2; usage 1; }
-               repo="$1"; shift ;;
+            *) echo "Error: unknown option: $1 (the checkout is the cwd; use mill -C DIR)" >&2; usage 1 ;;
         esac
     done
-    require_repo "$repo"
+    resolve_repo
+    require_mission
 
     common_args
     [[ -n "$agent" ]]      && RUN_ARGS+=(-e "AGENT=$agent")
@@ -185,39 +284,36 @@ cmd_run() {
         echo "Error: $CONTAINER_NAME is already running for $REPO_PATH (mill stop, or wait)" >&2
         exit 1
     fi
-    docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    docker rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
     docker run --rm --name "$CONTAINER_NAME" "${RUN_ARGS[@]}" "$IMAGE"
 }
 
 cmd_shell() {
-    local repo="" dind=false
-    [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
+    local dind=false
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help) usage 0 ;;
             --dind) dind=true; shift ;;
-            -*) echo "Error: unknown option: $1" >&2; usage 1 ;;
-            *) [[ -z "$repo" ]] || { echo "Error: unexpected argument: $1" >&2; usage 1; }
-               repo="$1"; shift ;;
+            *) echo "Error: unknown option: $1 (the checkout is the cwd; use mill -C DIR)" >&2; usage 1 ;;
         esac
     done
-    require_repo "$repo"
+    resolve_repo
+    [[ -f "$MISSION_FILE" ]] && load_mission   # shell works without a mission
     common_args
     [[ "$dind" == true ]] && { ensure_dind; RUN_ARGS+=("${DIND_ARGS[@]}"); }
-    docker run --rm -it --entrypoint bash "${RUN_ARGS[@]}" -w /workspace/repo "$IMAGE"
+    docker run --rm -it --entrypoint bash "${RUN_ARGS[@]}" -w "$REPO_PATH" "$IMAGE"
 }
 
 cmd_logs() {
-    local c
-    c="$(docker ps -q --filter label=agentmill --filter ancestor="$IMAGE" | head -1)"
-    if [[ -n "$c" ]]; then
-        docker logs -f "$c"
+    resolve_repo
+    if docker ps -q --filter "name=^/${CONTAINER_NAME}$" | grep -q .; then
+        docker logs -f "$CONTAINER_NAME"
     else
         # Collect first: with no matches, `xargs ls -t` would list the cwd.
         local latest files=() f
         while IFS= read -r f; do files+=("$f"); done < <(
-            find "$MILL_DIR/logs" -maxdepth 2 -name 'iter-*.log' 2>/dev/null)
-        [[ ${#files[@]} -gt 0 ]] || { echo "No running container and no logs." >&2; exit 1; }
+            find "$MILL_DIR/logs/$CONTAINER_NAME" -maxdepth 1 -name 'iter-*.log' 2>/dev/null)
+        [[ ${#files[@]} -gt 0 ]] || { echo "No running container and no logs for $REPO_PATH." >&2; exit 1; }
         # shellcheck disable=SC2012  # names are generated by loop.sh, no spaces
         latest="$(ls -t "${files[@]}" | head -1)"
         echo "=== $(basename "$latest") ==="
@@ -235,32 +331,119 @@ cmd_build() {
     docker build ${args[@]+"${args[@]}"} -t "$IMAGE" "$MILL_DIR"
 }
 
-# With a repo: stop that checkout only, so parallel worktree runs survive
-# each other's stops. The shared dind sidecar and network go when the last
-# agent container is gone. Without a repo: everything.
+# Give loop.sh enough time to enforce its own agent SIGKILL deadline and then
+# checkpoint/check/revert the bind-mounted checkout before Docker escalates.
+container_stop_timeout() {
+    local grace
+    grace="$(cfg SHUTDOWN_GRACE)"
+    grace="${grace:-30}"
+    [[ "$grace" != *[!0-9]* ]] \
+        || { echo "Error: SHUTDOWN_GRACE must be a non-negative integer" >&2; return 1; }
+    printf '%d' "$((10#$grace + 30))"
+}
+
+stop_container() {
+    local target="$1" stop_timeout="$2"
+    # `docker stop` is synchronous and bounded: TERM first, KILL only after
+    # the loop's cleanup window. With --rm the following remove is normally a
+    # no-op; it only clears an already-stopped container left by an older run.
+    docker stop --time "$stop_timeout" "$target" >/dev/null 2>&1 || true
+    docker rm "$target" >/dev/null 2>&1 || true
+}
+
+running_agent_exists() {
+    local id dind_id
+    dind_id="$(docker ps -q --filter "name=^/${DIND}$" | head -1)"
+    while IFS= read -r id; do
+        [[ -n "$id" && "$id" != "$dind_id" ]] && return 0
+    done < <(docker ps -q --filter label=agentmill)
+    return 1
+}
+
+# Default: stop this checkout only, so parallel worktree runs survive each
+# other's stops. The shared dind sidecar and network go when the last agent
+# container is gone. --all: stop agents first, then dind.
 cmd_stop() {
-    local ids
-    if [[ $# -gt 0 ]]; then
-        require_repo "$1"
-        docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-        ids="$(docker ps -aq --filter label=agentmill | grep -v -x -F "$(docker ps -aq --filter label=agentmill.dind)" || true)"
-        [[ -z "$ids" ]] || { echo "Stopped $CONTAINER_NAME."; return 0; }
+    local id dind_id stop_timeout all=false
+    case "${1:-}" in
+        "") ;;
+        -a|--all) all=true ;;
+        *) echo "Error: unknown option: $1 (mill stop stops the cwd's checkout; --all stops everything)" >&2; usage 1 ;;
+    esac
+    stop_timeout="$(container_stop_timeout)" || exit 1
+    if [[ "$all" == false ]]; then
+        resolve_repo
+        stop_container "$CONTAINER_NAME" "$stop_timeout"
+        if running_agent_exists; then
+            echo "Stopped $CONTAINER_NAME."
+            return 0
+        fi
+        stop_container "$DIND" "$stop_timeout"
+        docker network rm "$NET" >/dev/null 2>&1 || true
+        echo "Stopped."
+        return 0
     fi
-    ids="$(docker ps -aq --filter label=agentmill)"
-    [[ -n "$ids" ]] && echo "$ids" | xargs docker rm -f >/dev/null
+
+    dind_id="$(docker ps -aq --filter "name=^/${DIND}$" | head -1)"
+    while IFS= read -r id; do
+        [[ -n "$id" && "$id" != "$dind_id" ]] || continue
+        stop_container "$id" "$stop_timeout"
+    done < <(docker ps -aq --filter label=agentmill)
+    stop_container "$DIND" "$stop_timeout"
     docker network rm "$NET" >/dev/null 2>&1 || true
     echo "Stopped."
 }
 
 cmd_init() {
-    if [[ -f "$MILL_DIR/.env" ]]; then
-        echo ".env already exists."
-    else
-        cp "$MILL_DIR/.env.example" "$MILL_DIR/.env"
-        echo "Created .env — set your auth key and REPO_PATH."
+    resolve_repo
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        mkdir -p "$(dirname "$CONFIG_FILE")"
+        cp "$MILL_DIR/.env.example" "$CONFIG_FILE"
+        chmod 600 "$CONFIG_FILE"
+        echo "Created $CONFIG_FILE — set your auth key."
     fi
+    if [[ -f "$MISSION_FILE" ]]; then
+        echo "$MISSION_FILE already exists."
+        return 0
+    fi
+    cat > "$MISSION_FILE" <<'EOF'
+---
+# Per-repo settings, lowercase env var names (see .env.example for the list).
+# Secrets do not belong here — this file is meant to be committed.
+agent: claude
+model:
+check_cmd:
+setup_cmd:
+---
+# Mission
+
+Describe what the agent should build or fix, in the level of detail you
+would give a new teammate. Link the relevant files.
+
+## Definition of done
+
+- The checks below pass.
+- ...
+
+## Verifier
+
+```bash
+# the command the agent runs to know it is done
+```
+EOF
+    echo "Created $MISSION_FILE — describe the mission, then \`mill run\`."
 }
 
+REPO_START="$PWD"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -C) [[ $# -ge 2 ]] || { echo "Error: -C needs a directory" >&2; usage 1; }
+            REPO_START="$2"; shift 2 ;;
+        -C*) REPO_START="${1#-C}"; shift ;;
+        *) break ;;
+    esac
+done
+[[ "$REPO_START" == /* ]] || REPO_START="$PWD/$REPO_START"
 load_env
 IMAGE="$(cfg AGENTMILL_IMAGE)"; IMAGE="${IMAGE:-agentmill}"
 case "${1:-}" in

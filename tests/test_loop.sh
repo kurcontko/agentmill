@@ -10,7 +10,9 @@ make_env() {  # fresh sandbox: stub bin, repo with one commit, prompt
     TMP="$(mktemp -d)"
     mkdir -p "$TMP/bin" "$TMP/repo" "$TMP/logs" "$TMP/home"
     git -C "$TMP/repo" init -q
-    git -C "$TMP/repo" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init
+    printf -- '---\ncheck_cmd: true\n---\nbuild the widget\n' > "$TMP/repo/MILL.md"
+    git -C "$TMP/repo" add MILL.md
+    git -C "$TMP/repo" -c user.email=t@t -c user.name=t commit -qm init
     echo "do the thing" > "$TMP/prompt.md"
 }
 
@@ -191,8 +193,12 @@ HOME="$TMP/home" PATH="$TMP/bin:$PATH" ANTHROPIC_API_KEY=test \
 loop_pid=$!
 for _ in $(seq 1 50); do [[ -f "$TMP/repo/started" ]] && break; sleep 0.1; done
 [[ -f "$TMP/repo/started" ]] || { cat "$TMP/out.log"; fail "agent never started"; }
+term_started="$(date +%s)"
 kill -TERM "$loop_pid"
 wait "$loop_pid" || { cat "$TMP/out.log"; fail "loop.sh exited nonzero after TERM"; }
+term_elapsed=$(( $(date +%s) - term_started ))
+[[ "$term_elapsed" -lt 5 ]] \
+    || { cat "$TMP/out.log"; fail "agent process group took ${term_elapsed}s to stop after TERM"; }
 [[ -f "$TMP/repo/got-term" ]] || { cat "$TMP/out.log"; fail "agent CLI did not receive TERM"; }
 grep -q "shutdown signal" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected shutdown stop"; }
 [[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 1 ]] || fail "a new session started after the signal"
@@ -227,5 +233,155 @@ run_loop env MAX_ERRORS=0 MAX_ITERATIONS=70 ERROR_BACKOFF=1 MAX_BACKOFF=0
 [[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 70 ]] || { cat "$TMP/out.log"; fail "backoff arithmetic broke the loop"; }
 rm -rf "$TMP"
 echo "PASS: error backoff is capped by MAX_BACKOFF"
+
+# --- 14: every per-iteration timeout has a hard-kill escalation deadline ---
+make_env
+cat > "$TMP/bin/timeout" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$TIMEOUT_LOG"
+case "${1:-}" in
+    --kill-after=*) shift ;;
+    -k) shift 2 ;;
+esac
+shift # duration
+exec "$@"
+STUB
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+printf '{"type":"result","is_error":false,"result":"done TASK_COMPLETE"}\n'
+STUB
+chmod +x "$TMP/bin/timeout" "$TMP/bin/claude"
+export TIMEOUT_LOG="$TMP/timeout.log"
+run_loop env MAX_ITERATIONS=1 ITER_TIMEOUT=99 SHUTDOWN_GRACE=7
+grep -q '^--kill-after=7 99 claude ' "$TIMEOUT_LOG" \
+    || { cat "$TIMEOUT_LOG"; fail "agent timeout has no hard-kill deadline"; }
+rm -rf "$TMP"
+echo "PASS: iteration timeout escalates to SIGKILL after a deadline"
+
+# Behavioral check when GNU timeout is available on the host: both an
+# uncooperative CLI and its descendant must be gone before the loop continues.
+if timeout --kill-after=1 1 true >/dev/null 2>&1; then
+    make_env
+    cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+trap '' TERM
+(trap '' TERM; sleep 8) &
+wait
+STUB
+    chmod +x "$TMP/bin/claude"
+    timeout_started="$(date +%s)"
+    run_loop env ITER_TIMEOUT=1 SHUTDOWN_GRACE=1 MAX_ITERATIONS=1 MAX_ERRORS=5
+    timeout_elapsed=$(( $(date +%s) - timeout_started ))
+    [[ "$timeout_elapsed" -lt 5 ]] \
+        || { cat "$TMP/out.log"; fail "timeout left a TERM-ignoring descendant alive for ${timeout_elapsed}s"; }
+    rm -rf "$TMP"
+    echo "PASS: iteration timeout kills TERM-ignoring descendants"
+fi
+
+# --- 15: an unreadable repository status fails closed ---
+make_env
+real_git_bin="$(command -v git)"
+cat > "$TMP/bin/git" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" == status ]]; then
+    echo "stub: repository status unreadable" >&2
+    exit 42
+fi
+exec "$REAL_GIT_BIN" "$@"
+STUB
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/claude"
+chmod +x "$TMP/bin/git" "$TMP/bin/claude"
+if run_loop_raw env REAL_GIT_BIN="$real_git_bin" MAX_ITERATIONS=1; then
+    fail "loop treated a failed git status as a clean checkout"
+fi
+grep -q 'stub: repository status unreadable' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "git status error was hidden"; }
+grep -q 'could not read repository status' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "loop did not fail closed on status error"; }
+rm -rf "$TMP"
+echo "PASS: repository status errors are fatal"
+
+# --- 16: rollback restores and cleans initialized submodules recursively ---
+make_env
+mkdir -p "$TMP/nested-origin" "$TMP/sub-origin"
+git -C "$TMP/nested-origin" init -q
+echo nested-baseline > "$TMP/nested-origin/nested.txt"
+git -C "$TMP/nested-origin" add nested.txt
+git -C "$TMP/nested-origin" -c user.email=t@t -c user.name=t commit -qm init
+
+git -C "$TMP/sub-origin" init -q
+echo sub-baseline > "$TMP/sub-origin/sub.txt"
+git -C "$TMP/sub-origin" add sub.txt
+git -C "$TMP/sub-origin" -c user.email=t@t -c user.name=t commit -qm init
+git -c protocol.file.allow=always -C "$TMP/sub-origin" submodule add -q \
+    "$TMP/nested-origin" nested
+git -C "$TMP/sub-origin" -c user.email=t@t -c user.name=t commit -qam nested
+
+git -c protocol.file.allow=always -C "$TMP/repo" submodule add -q \
+    "$TMP/sub-origin" deps/sub
+git -C "$TMP/repo" -c user.email=t@t -c user.name=t commit -qam submodule
+git -c protocol.file.allow=always -C "$TMP/repo" submodule update -q --init --recursive
+head_before="$(git -C "$TMP/repo" rev-parse HEAD)"
+sub_before="$(git -C "$TMP/repo/deps/sub" rev-parse HEAD)"
+nested_before="$(git -C "$TMP/repo/deps/sub/nested" rev-parse HEAD)"
+
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+echo nested-broken > deps/sub/nested/nested.txt
+git -C deps/sub/nested add nested.txt
+git -C deps/sub/nested commit -qm "agent: bad nested change"
+git -C deps/sub add nested
+git -C deps/sub commit -qm "agent: bad submodule change"
+git add deps/sub
+git commit -qm "agent: bad superproject change"
+printf '{"type":"result","is_error":false,"result":"made changes"}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ITERATIONS=1 \
+    CHECK_CMD='echo check-junk > deps/sub/nested/untracked.txt; false'
+[[ "$(git -C "$TMP/repo" rev-parse HEAD)" == "$head_before" ]] \
+    || fail "rollback left the superproject at the iteration commit"
+[[ "$(git -C "$TMP/repo/deps/sub" rev-parse HEAD)" == "$sub_before" ]] \
+    || fail "rollback did not restore the first-level submodule"
+[[ "$(git -C "$TMP/repo/deps/sub/nested" rev-parse HEAD)" == "$nested_before" ]] \
+    || fail "rollback did not restore the nested submodule"
+grep -q '^nested-baseline$' "$TMP/repo/deps/sub/nested/nested.txt" \
+    || fail "rollback left tracked nested-submodule changes"
+[[ ! -e "$TMP/repo/deps/sub/nested/untracked.txt" ]] \
+    || fail "rollback left untracked nested-submodule files"
+[[ -z "$(git -C "$TMP/repo" status --porcelain --untracked-files=all)" ]] \
+    || fail "rollback left the recursive checkout dirty"
+rm -rf "$TMP"
+echo "PASS: rollback restores and cleans submodules recursively"
+
+# --- MILL.md: body (not frontmatter) reaches the agent; edits are re-read and logged ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+printf '%s' "$2" > "$PROMPT_DUMP"
+grep -q 'check_cmd' "$PROMPT_DUMP" && { echo "frontmatter leaked into prompt" >&2; exit 3; }
+grep -q '^build the widget$' "$PROMPT_DUMP" || { echo "mission body missing" >&2; exit 3; }
+if ! grep -q 'second mission' "$PROMPT_DUMP"; then
+    echo "second mission" >> MILL.md
+    git add -A && git commit -qm "agent: edit mission"
+fi
+printf '{"type":"result","is_error":false,"result":"ok"}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env PROMPT_DUMP="$TMP/prompt-dump" MAX_ITERATIONS=2
+grep -q 'MILL.md changed since the last iteration' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "mission edit was not noticed"; }
+grep -q '<mission>' "$TMP/prompt-dump" || fail "mission block missing from prompt"
+rm -rf "$TMP"
+echo "PASS: MILL.md body is spliced into the prompt and re-read each iteration"
+
+# --- missing MILL.md is fatal ---
+make_env
+git -C "$TMP/repo" rm -q MILL.md && git -C "$TMP/repo" -c user.email=t@t -c user.name=t commit -qm "drop mission"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/claude"; chmod +x "$TMP/bin/claude"
+run_loop_raw env MAX_ITERATIONS=1 && fail "loop started without MILL.md"
+grep -q 'no mission file' "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected missing-mission error"; }
+rm -rf "$TMP"
+echo "PASS: missing MILL.md is refused"
 
 echo "OK: all loop.sh smoke tests passed"
