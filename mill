@@ -30,7 +30,10 @@ Usage:
                       summaries; --raw tails the last event log, --results
                       prints results.jsonl as a table
   mill [-C DIR] stop             Stop this checkout's container
+  mill [-C DIR] stop --soft      Ask the loop to finish the current iteration
   mill stop --all                Stop every agentmill container (and dind)
+  mill [-C DIR] steer [TEXT|-]   One-shot instruction for the next session;
+                                 no argument prints the pending one
   mill [-C DIR] init             Write a MILL.md template into the checkout
   mill ps | build
 
@@ -106,7 +109,8 @@ ENV_KEYS=(ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY
           AGENT MODEL FALLBACK_MODEL MAX_ITERATIONS MAX_ERRORS MAX_NOOPS
           ITER_TIMEOUT LOOP_DELAY ERROR_BACKOFF MAX_BACKOFF SHUTDOWN_GRACE
           MAX_TURNS MIN_TURNS MAX_BUDGET_USD MAX_TOTAL_BUDGET_USD
-          DONE_PROMISE SETUP_CMD CHECK_CMD DONE_CMD EVALUATOR CLAUDE_BARE
+          DONE_PROMISE SETUP_CMD CHECK_CMD METRIC_CMD METRIC_DIRECTION
+          DONE_CMD EVALUATOR CLAUDE_BARE
           GIT_USER GIT_EMAIL)
 ENV_FILE_KEYS=() ENV_FILE_VALS=()   # parallel arrays: bash 3 has no assoc arrays
 MISSION_KEYS=() MISSION_VALS=()     # MILL.md frontmatter, uppercased
@@ -247,6 +251,9 @@ common_args() {  # fills RUN_ARGS with env + mounts shared by run/shell
     done
     LOG_DIR_HOST="$MILL_DIR/logs/$CONTAINER_NAME"   # per checkout: parallel runs must not interleave
     mkdir -p "$LOG_DIR_HOST" "$MILL_DIR/prompts"
+    # The operator drop-box (STOP / STEER.md) rides in the bind-mounted
+    # checkout; loop.sh adds it to the repo's exclude file on startup.
+    mkdir -p "$REPO_PATH/.mill"
     RUN_ARGS+=(
         -e "REPO_DIR=$REPO_PATH"
         -v "$REPO_PATH:$REPO_PATH"
@@ -410,11 +417,21 @@ running_agent_exists() {
 # Default: stop this checkout only, so parallel worktree runs survive each
 # other's stops. The shared dind sidecar and network go when the last agent
 # container is gone. --all: stop agents first, then dind.
+# The soft brake: a file the running loop notices between iterations, so the
+# agent's session is never cut off mid-work. No docker involved.
+cmd_stop_soft() {
+    resolve_repo
+    mkdir -p "$REPO_PATH/.mill"
+    : > "$REPO_PATH/.mill/STOP"
+    echo "Will stop after the current iteration."
+}
+
 cmd_stop() {
     local id dind_id stop_timeout all=false
     case "${1:-}" in
         "") ;;
         -a|--all) all=true ;;
+        -s|--soft) cmd_stop_soft; return 0 ;;
         *) echo "Error: unknown option: $1 (mill stop stops the cwd's checkout; --all stops everything)" >&2; usage 1 ;;
     esac
     stop_timeout="$(container_stop_timeout)" || exit 1
@@ -439,6 +456,26 @@ cmd_stop() {
     stop_container "$DIND" "$stop_timeout"
     docker network rm "$NET" >/dev/null 2>&1 || true
     echo "Stopped."
+}
+
+# One-shot steering: the next session gets this text in its preamble, and the
+# loop deletes the file as it reads it. `-` takes the note from stdin.
+cmd_steer() {
+    [[ "${1:-}" != -h && "${1:-}" != --help ]] || usage 0
+    resolve_repo
+    local steer="$REPO_PATH/.mill/STEER.md"
+    if [[ $# -eq 0 ]]; then
+        [[ -s "$steer" ]] || { echo "No pending steer."; return 0; }
+        cat "$steer"
+        return 0
+    fi
+    mkdir -p "$REPO_PATH/.mill"
+    if [[ "$1" == - ]]; then
+        cat > "$steer"
+    else
+        printf '%s\n' "$*" > "$steer"
+    fi
+    echo "Steer queued for the next session of $REPO_PATH."
 }
 
 cmd_init() {
@@ -500,6 +537,7 @@ case "${1:-}" in
     ps)     shift; cmd_ps "$@" ;;
     build)  shift; cmd_build "$@" ;;
     stop)   shift; cmd_stop "$@" ;;
+    steer)  shift; cmd_steer "$@" ;;
     init)   shift; cmd_init "$@" ;;
     -h|--help|help|"") usage 0 ;;
     *) echo "Unknown command: $1" >&2; usage 1 ;;

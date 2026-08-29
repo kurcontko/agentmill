@@ -746,4 +746,212 @@ grep -q 'codex finished the widget' "$(echo "$TMP"/logs/iter-1-*.summary)" \
 rm -rf "$TMP"
 echo "PASS: codex gets a strict output schema and an ephemeral session"
 
+# --- 29: .mill/STOP present at start → not a single session runs ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+touch "$RAN_MARKER"
+printf '{"type":"result","is_error":false,"result":"ran"}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+mkdir -p "$TMP/repo/.mill"
+: > "$TMP/repo/.mill/STOP"
+run_loop env MAX_ITERATIONS=3 RAN_MARKER="$TMP/ran"
+grep -q 'stop file present — finishing after this iteration' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "stop file was not noticed"; }
+grep -q 'loop finished after 0 iterations: stop file' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "expected a stop-file stop with no iterations"; }
+[[ ! -e "$TMP/ran" ]] || fail "a session started despite the stop file"
+[[ ! -s "$TMP/logs/results.jsonl" ]] || { cat "$TMP/logs/results.jsonl"; fail "an iteration was recorded"; }
+[[ ! -e "$TMP/repo/.mill/STOP" ]] || fail "the stop file was not consumed on exit"
+[[ -z "$(git -C "$TMP/repo" status --porcelain --untracked-files=all)" ]] \
+    || { git -C "$TMP/repo" status --short; fail ".mill/ is visible to git"; }
+grep -qxF '.mill/' "$TMP/repo/.git/info/exclude" || fail ".mill/ was not excluded"
+# The exclude append is idempotent: a second run must not add a second line.
+run_loop env MAX_ITERATIONS=1
+[[ "$(grep -cxF '.mill/' "$TMP/repo/.git/info/exclude")" -eq 1 ]] \
+    || { cat "$TMP/repo/.git/info/exclude"; fail "exclude entry appended twice"; }
+rm -rf "$TMP"
+echo "PASS: .mill/STOP prevents any session and is git-excluded"
+
+# --- 30: a stop file dropped mid-session finishes that iteration, then stops ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+mkdir -p .mill && : > .mill/STOP
+echo change >> stub.txt
+git add -A && git commit -qm "agent: work then brake"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"more later","num_turns":4}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ITERATIONS=5
+[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 1 ]] \
+    || { cat "$TMP/out.log"; fail "a second session started after the stop file"; }
+grep -q '"status":"kept"' "$TMP/logs/results.jsonl" || fail "the braked iteration was not kept"
+grep -q 'loop finished after 1 iterations: stop file' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "expected a stop-file stop reason"; }
+[[ ! -e "$TMP/repo/.mill/STOP" ]] || fail "the stop file was not consumed on exit"
+rm -rf "$TMP"
+echo "PASS: a mid-session stop file finishes the iteration and stops"
+
+# --- 31: .mill/STEER.md is a one-shot instruction, and survives a revert ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+n=1
+[[ -f "$COUNT" ]] && n=$(( $(cat "$COUNT") + 1 ))
+printf '%s' "$n" > "$COUNT"
+printf '%s' "$2" > "$PROMPT_DUMP.$n"
+echo change >> "stub-$n.txt"
+git add -A && git commit -qm "agent: work $n"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"ok","num_turns":4}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+mkdir -p "$TMP/repo/.mill"
+printf 'drop everything and fix the flaky test\nsecond line\n' > "$TMP/repo/.mill/STEER.md"
+run_loop env MAX_ITERATIONS=2 COUNT="$TMP/count" PROMPT_DUMP="$TMP/dump"
+grep -q 'steer: drop everything and fix the flaky test' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "steer was not logged"; }
+grep -q '^<operator-steer>$' "$TMP/dump.1" || { cat "$TMP/dump.1"; fail "steer not injected into the prompt"; }
+grep -q 'drop everything and fix the flaky test' "$TMP/dump.1" || fail "steer body missing"
+grep -q 'second line' "$TMP/dump.1" || fail "steer truncated to its first line"
+grep -q 'overrides the mission' "$TMP/dump.1" || { cat "$TMP/dump.1"; fail "steer not framed as an override"; }
+grep -q 'operator-steer' "$TMP/dump.2" && { cat "$TMP/dump.2"; fail "steer was not one-shot"; }
+[[ ! -e "$TMP/repo/.mill/STEER.md" ]] || fail "the steer file was not consumed"
+head -1 "$TMP/logs/results.jsonl" | grep -q '"steered":true' \
+    || { cat "$TMP/logs/results.jsonl"; fail "steered flag not recorded"; }
+tail -1 "$TMP/logs/results.jsonl" | grep -q '"steered":true' \
+    && fail "the second iteration was still marked steered"
+rm -rf "$TMP"
+
+# A reverting iteration must not take the operator's drop-box with it.
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+echo change >> stub.txt
+git add -A && git commit -qm "agent: bad work"
+printf '{"type":"result","is_error":false,"result":"made changes","num_turns":4}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+mkdir -p "$TMP/repo/.mill"
+printf 'still pending\n' > "$TMP/repo/.mill/STEER.md.next"
+run_loop env MAX_ITERATIONS=1 MAX_NOOPS=0 CHECK_CMD=false
+grep -q '"status":"reverted"' "$TMP/logs/results.jsonl" || fail "iteration was not reverted"
+[[ -f "$TMP/repo/.mill/STEER.md.next" ]] || fail "the revert deleted the .mill drop-box"
+rm -rf "$TMP"
+echo "PASS: STEER.md is one-shot and .mill/ survives a revert"
+
+# --- 32: METRIC_CMD ratchets on the number, not just the check ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+n=1
+[[ -f "$COUNT" ]] && n=$(( $(cat "$COUNT") + 1 ))
+printf '%s' "$n" > "$COUNT"
+printf '%s' "$2" > "$PROMPT_DUMP.$n"
+case "$n" in
+    1) printf '0.9\n'  > "$SCORE" ;;
+    2) printf '0.95\n' > "$SCORE" ;;
+    *) printf '0.8\n'  > "$SCORE" ;;
+esac
+echo change >> "stub-$n.txt"
+git add -A && git commit -qm "agent: attempt $n"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"raw",'
+printf '"structured_output":{"done":false,"summary":"attempt %s\\tof three","blocked":false},' "$n"
+printf '"num_turns":4}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+printf '1.0\n' > "$TMP/score"
+head_before="$(git -C "$TMP/repo" rev-parse HEAD)"
+run_loop env MAX_ITERATIONS=3 MAX_NOOPS=0 COUNT="$TMP/count" PROMPT_DUMP="$TMP/dump" \
+    SCORE="$TMP/score" METRIC_CMD="cat $TMP/score"
+grep -q 'baseline metric: 1.0' "$TMP/out.log" || { cat "$TMP/out.log"; fail "no baseline metric"; }
+grep -q 'iteration 1: kept (metric 0.9 → best 1.0)' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "an improvement was not kept"; }
+grep -q 'metric 0.95 not better than 0.9 — reverting' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "a regression was not reverted"; }
+grep -q 'iteration 3: kept (metric 0.8 → best 0.9)' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "the third improvement was not kept"; }
+[[ "$(git -C "$TMP/repo" rev-list --count "$head_before..HEAD" 2>/dev/null)" -eq 2 ]] \
+    || { git -C "$TMP/repo" log --oneline; fail "expected exactly two surviving iterations"; }
+sed -n 1p "$TMP/logs/results.jsonl" | grep -q '"metric":0.9,"best":0.9' \
+    || { cat "$TMP/logs/results.jsonl"; fail "iteration 1 metric/best not recorded"; }
+sed -n 2p "$TMP/logs/results.jsonl" | grep -q '"status":"reverted".*"metric":0.95,"best":0.9' \
+    || { cat "$TMP/logs/results.jsonl"; fail "the reverted iteration kept the old best"; }
+sed -n 3p "$TMP/logs/results.jsonl" | grep -q '"metric":0.8,"best":0.8' \
+    || { cat "$TMP/logs/results.jsonl"; fail "iteration 3 metric/best not recorded"; }
+[[ "$(head -1 "$TMP/logs/metrics.tsv")" == "$(printf 'iter\tsha\tmetric\tbest\tstatus\tsummary')" ]] \
+    || { head -1 "$TMP/logs/metrics.tsv"; fail "metrics.tsv header malformed"; }
+[[ "$(wc -l < "$TMP/logs/metrics.tsv")" -eq 4 ]] || { cat "$TMP/logs/metrics.tsv"; fail "expected 3 metric rows"; }
+awk -F'\t' 'NR == 3 && ($3 != "0.95" || $4 != "0.9" || $5 != "reverted") { exit 1 }' "$TMP/logs/metrics.tsv" \
+    || { cat "$TMP/logs/metrics.tsv"; fail "reverted row wrong"; }
+awk -F'\t' 'NR == 4 && $6 != "attempt 3of three" { exit 1 }' "$TMP/logs/metrics.tsv" \
+    || { cat "$TMP/logs/metrics.tsv"; fail "summary column not tab-stripped"; }
+grep -q 'Current best METRIC: 1.0 (min)' "$TMP/dump.1" || { cat "$TMP/dump.1"; fail "baseline missing from the preamble"; }
+grep -q 'Current best METRIC: 0.9 (min)' "$TMP/dump.2" || { cat "$TMP/dump.2"; fail "best missing from the preamble"; }
+grep -q 'Current best METRIC: 0.9 (min)' "$TMP/dump.3" || { cat "$TMP/dump.3"; fail "a reverted iteration moved the best"; }
+rm -rf "$TMP"
+echo "PASS: METRIC_CMD keeps only strict improvements and logs the ledger"
+
+# --- 33: METRIC_DIRECTION=max flips the keep rule ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+printf '0.9\n' > "$SCORE"
+echo change >> "stub-$RANDOM.txt"
+git add -A && git commit -qm "agent: lower score"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"ok","num_turns":4}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+printf '1.0\n' > "$TMP/score"
+head_before="$(git -C "$TMP/repo" rev-parse HEAD)"
+run_loop env MAX_ITERATIONS=1 MAX_NOOPS=0 SCORE="$TMP/score" \
+    METRIC_CMD="cat $TMP/score" METRIC_DIRECTION=max
+grep -q 'metric 0.9 not better than 1.0 — reverting' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "max direction kept a lower score"; }
+[[ "$(git -C "$TMP/repo" rev-parse HEAD)" == "$head_before" ]] || fail "the regression was not reverted"
+# ...and the same number is an improvement under min.
+: > "$TMP/logs/results.jsonl"
+printf '1.0\n' > "$TMP/score"
+run_loop env MAX_ITERATIONS=1 MAX_NOOPS=0 SCORE="$TMP/score" METRIC_CMD="cat $TMP/score"
+grep -q 'iteration 1: kept (metric 0.9 → best 1.0)' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "min direction rejected a lower score"; }
+rm -rf "$TMP"
+echo "PASS: METRIC_DIRECTION picks which way is better"
+
+# --- 34: an unreadable metric reverts, and a failing baseline is fatal ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+printf 'benchmark crashed\n' > "$SCORE"
+echo change >> "stub-$RANDOM.txt"
+git add -A && git commit -qm "agent: broke the benchmark"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"ok","num_turns":4}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+printf '1.0\n' > "$TMP/score"
+head_before="$(git -C "$TMP/repo" rev-parse HEAD)"
+run_loop env MAX_ITERATIONS=1 MAX_NOOPS=0 SCORE="$TMP/score" METRIC_CMD="cat $TMP/score"
+grep -q 'metric unparseable — reverting' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "a non-numeric metric was accepted"; }
+[[ "$(git -C "$TMP/repo" rev-parse HEAD)" == "$head_before" ]] || fail "unparseable metric was not reverted"
+grep -q '"metric":null,"best":1.0' "$TMP/logs/results.jsonl" \
+    || { cat "$TMP/logs/results.jsonl"; fail "unparseable metric not recorded as null"; }
+# No baseline, no ratchet: refuse to start rather than keep everything.
+if run_loop_raw env MAX_ITERATIONS=1 METRIC_CMD=false; then fail "loop ran without a metric baseline"; fi
+grep -q 'no baseline number' "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected a fatal baseline error"; }
+if run_loop_raw env MAX_ITERATIONS=1 METRIC_CMD=true METRIC_DIRECTION=sideways; then
+    fail "an invalid METRIC_DIRECTION was accepted"
+fi
+grep -q 'METRIC_DIRECTION must be min or max' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "expected a direction validation error"; }
+rm -rf "$TMP"
+echo "PASS: unparseable metrics revert and a missing baseline is fatal"
+
 echo "OK: all loop.sh smoke tests passed"

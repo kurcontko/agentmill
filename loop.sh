@@ -26,6 +26,8 @@ MIN_TURNS="${MIN_TURNS:-2}"              # fewer turns than this with no repo ch
 DONE_PROMISE="${DONE_PROMISE:-TASK_COMPLETE}"
 SETUP_CMD="${SETUP_CMD:-}"               # runs once before the loop
 CHECK_CMD="${CHECK_CMD:-}"               # ratchet: iteration is reverted if this fails
+METRIC_CMD="${METRIC_CMD:-}"             # metric ratchet: last stdout line is the score (empty = off)
+METRIC_DIRECTION="${METRIC_DIRECTION:-min}"   # min | max — which way is an improvement
 DONE_CMD="${DONE_CMD:-}"                 # completion verifier: a done claim is rejected if this fails
 EVALUATOR="${EVALUATOR:-false}"          # read-only review session before a done claim is honored
 EVALUATOR_FILE="${EVALUATOR_FILE:-/prompts/EVALUATOR.md}"  # the reviewer's prompt
@@ -123,6 +125,10 @@ case "$AGENT" in
 esac
 [[ "$EVALUATOR" != true || -f "$EVALUATOR_FILE" ]] \
     || die "EVALUATOR=true but no evaluator prompt at $EVALUATOR_FILE"
+case "$METRIC_DIRECTION" in
+    min|max) ;;
+    *) die "METRIC_DIRECTION must be min or max, got: $METRIC_DIRECTION" ;;
+esac
 
 cd "$REPO_DIR"
 mkdir -p "$LOG_DIR"
@@ -157,6 +163,30 @@ fi
 # global identity (for a worktree, in every checkout of that repo).
 export GIT_AUTHOR_NAME="$GIT_USER" GIT_COMMITTER_NAME="$GIT_USER"
 export GIT_AUTHOR_EMAIL="$GIT_EMAIL" GIT_COMMITTER_EMAIL="$GIT_EMAIL"
+
+# Operator drop-box: `.mill/STOP` brakes the loop, `.mill/STEER.md` injects a
+# one-shot instruction into the next session (mill stop --soft / mill steer).
+MILL_CTL_DIR="$REPO_DIR/.mill"
+STOP_FILE="$MILL_CTL_DIR/STOP"
+STEER_FILE="$MILL_CTL_DIR/STEER.md"
+
+# The drop-box must be invisible to git: `git status` gates the loop's start
+# and the ratchet reverts with `git clean -ffd`, which (having no -x) leaves
+# excluded paths alone. --git-path so a linked worktree writes the exclude of
+# the git dir it actually shares. Bounded and idempotent: one appended line.
+exclude_mill_dir() {
+    local exclude
+    mkdir -p "$MILL_CTL_DIR" 2>/dev/null || true
+    exclude="$(git rev-parse --git-path info/exclude 2>/dev/null || true)"
+    [[ -n "$exclude" ]] || return 0
+    mkdir -p "$(dirname "$exclude")" 2>/dev/null || return 0
+    ! [[ -f "$exclude" ]] || ! grep -qxF -- '.mill/' "$exclude" || return 0
+    # A file whose last line has no newline would otherwise swallow the entry.
+    [[ ! -s "$exclude" || -z "$(tail -c1 "$exclude")" ]] || printf '\n' >> "$exclude"
+    printf '.mill/\n' >> "$exclude" 2>/dev/null \
+        || log "could not add .mill/ to $exclude — the drop-box will show up in git status"
+}
+exclude_mill_dir
 
 WORKTREE_STATUS=""
 refresh_worktree_status() {
@@ -194,7 +224,15 @@ preamble() {
         printf '\nPROGRESS.md:\n'
         head -40 PROGRESS.md
     fi
+    # The metric ratchet is invisible from inside the repo; name the target so
+    # the session optimizes against the same number the loop judges it by.
+    [[ -z "$METRIC_CMD" ]] || printf '\nCurrent best METRIC: %s (%s). Only strictly better results are kept.\n' \
+        "$METRIC_BEST" "$METRIC_DIRECTION"
     echo "</loop-context>"
+    # The operator's one-shot note, consumed by read_steer before this ran.
+    [[ "$STEERED" != true ]] || printf '\n<operator-steer>\n%s\n\n%s\n</operator-steer>\n' \
+        "A one-shot instruction from the operator, for THIS session only. It overrides the mission wherever the two conflict; the next session will not see it." \
+        "$STEER_TEXT"
     # No PROGRESS.md means no session has run yet. Spend this one turning the
     # mission into the checklist every later session steers by, nothing else.
     [[ -f PROGRESS.md ]] && return 0
@@ -236,6 +274,27 @@ note_mission_changes() {
     [[ -z "$MISSION_SUM" || "$sum" == "$MISSION_SUM" ]] \
         || log "$(basename "$MISSION_FILE") changed since the last iteration"
     MISSION_SUM="$sum"
+}
+
+# The steer file is one-shot: read it, delete it, and let this session's
+# preamble carry it. Deleted even when empty, so a stray file cannot linger.
+STEERED=false
+STEER_TEXT=""
+read_steer() {
+    STEERED=false STEER_TEXT=""
+    [[ -f "$STEER_FILE" ]] || return 0
+    STEER_TEXT="$(cat "$STEER_FILE" 2>/dev/null || true)"
+    rm -f "$STEER_FILE"
+    [[ -n "$STEER_TEXT" ]] || return 0
+    STEERED=true
+    log "steer: $(printf '%s' "$STEER_TEXT" | head -1)"
+}
+
+# The operator's brake (mill stop --soft). Checked before a session starts and
+# again once one ends, so a file dropped mid-session takes effect at once.
+stop_file_requested() {
+    [[ -f "$STOP_FILE" ]] || return 1
+    log "stop file present — finishing after this iteration"
 }
 
 # For claude the framework prompt rides in the system prompt (see run_agent),
@@ -556,6 +615,52 @@ clean_check_artifacts() {
     git clean -q -ffd
 }
 
+# --- metric ratchet ------------------------------------------------------
+# METRIC_CMD prints a score; the loop keeps an iteration only when that score
+# is strictly better than the best seen so far. The shell has no floats, so
+# awk parses and compares.
+METRIC_BEST=""
+
+# The last line of a metric run, as a number. Ints, floats, and negatives are
+# accepted; anything else yields nothing, which the caller reads as "revert".
+metric_number() {
+    local last
+    last="$(tail -1 "$1" 2>/dev/null | tr -d '\r' || true)"
+    last="${last#"${last%%[![:space:]]*}"}"
+    last="${last%"${last##*[![:space:]]}"}"
+    [[ "$last" =~ ^[-+]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][-+]?[0-9]+)?$ ]] || return 0
+    printf '%s' "$last"
+}
+
+# Runs METRIC_CMD with its output appended to $1 (the iteration log) and
+# prints the parsed score. Nothing is printed when the command failed or its
+# last line is not a number.
+# Its stdout is the score, so nothing else may be printed here — the log line
+# belongs to the caller.
+run_metric() {
+    local out="$LOG_DIR/.metric-out" rc=0
+    bash -c "$METRIC_CMD" >"$out" 2>>"$1" || rc=$?
+    cat "$out" >>"$1" 2>/dev/null || true
+    [[ "$rc" -eq 0 ]] || return 0
+    metric_number "$out"
+}
+
+metric_better() {   # $1 strictly better than $2 in METRIC_DIRECTION?
+    awk -v a="$1" -v b="$2" -v d="$METRIC_DIRECTION" \
+        'BEGIN { exit !(d == "max" ? a + 0 > b + 0 : a + 0 < b + 0) }'
+}
+
+# The run's ledger in the Karpathy results.tsv shape: one row per iteration,
+# next to results.jsonl. The summary column is the agent's own one-liner.
+write_metric_row() {
+    local tsv="$LOG_DIR/metrics.tsv" summary
+    [[ -f "$tsv" ]] || printf 'iter\tsha\tmetric\tbest\tstatus\tsummary\n' > "$tsv"
+    summary="$(printf '%s' "$last_msg" | head -1 | tr -d '\t')"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$iter" \
+        "$(git rev-parse --short=7 --verify HEAD 2>/dev/null || echo none)" \
+        "$metric_value" "$METRIC_BEST" "$status" "$summary" >> "$tsv"
+}
+
 # Append a line (or block) under a heading in PROGRESS.md, creating the file
 # and the heading when they are missing. An existing heading gets the entry
 # right beneath it, so the note cannot land under some later section.
@@ -649,8 +754,20 @@ parse_file="$LOG_DIR/.last-parse"
 iter=0 errors=0 noops=0 stop_reason="" total_cost=0
 RUN_BASE="$(head_oid)"                   # what the evaluator diffs the run against
 
+# The baseline is what iteration 1 has to beat. Measured on the clean tree,
+# before any session runs; without it there is nothing to ratchet against, so
+# a metric that cannot be read here is fatal rather than silently disabled.
+if [[ -n "$METRIC_CMD" ]]; then
+    log "metric: $METRIC_CMD"
+    METRIC_BEST="$(run_metric "$LOG_DIR/metric-baseline.log")"
+    [[ -n "$METRIC_BEST" ]] || die "METRIC_CMD produced no baseline number — cannot ratchet"
+    log "baseline metric: $METRIC_BEST"
+    clean_check_artifacts
+fi
+
 while true; do
     if [[ "$SHUTDOWN" == true ]]; then stop_reason="shutdown signal"; break; fi
+    if stop_file_requested; then stop_reason="stop file"; break; fi
     iter=$((iter + 1))
     # --verify so an unborn HEAD leaves start_ref empty instead of the literal "HEAD".
     start_ref="$(head_oid)"
@@ -658,8 +775,9 @@ while true; do
     iter_log="$LOG_DIR/iter-${iter}-$(git rev-parse --short=7 --verify HEAD 2>/dev/null || echo init).log"
     log "==== iteration $iter ===="
 
-    status=kept rc=0 check_passed=false
+    status=kept rc=0 check_passed=false metric_ran=false metric_value=""
     : > "$msg_file"
+    read_steer
     [[ -f PROGRESS.md ]] || log "initializer session (no PROGRESS.md)"
     # Backgrounded so TERM/INT is handled while the agent runs, not after it.
     note_mission_changes
@@ -742,6 +860,30 @@ while true; do
         fi
     fi
 
+    # Metric ratchet: a green check only says the tree is not broken. When
+    # METRIC_CMD is set the iteration must also move the number the right way
+    # — anything else, including a score that cannot be read, is reverted.
+    if [[ -n "$METRIC_CMD" && "$mutated" == true && "$status" != reverted ]]; then
+        metric_ran=true
+        log "metric: $METRIC_CMD"
+        metric_value="$(run_metric "$iter_log")"
+        clean_check_artifacts
+        if [[ -z "$metric_value" ]]; then
+            log "metric unparseable — reverting"
+            restore_iteration
+            new_commits=0
+            status=reverted
+        elif metric_better "$metric_value" "$METRIC_BEST"; then
+            log "iteration $iter: kept (metric $metric_value → best $METRIC_BEST)"
+            METRIC_BEST="$metric_value"
+        else
+            log "metric $metric_value not better than $METRIC_BEST — reverting"
+            restore_iteration
+            new_commits=0
+            status=reverted
+        fi
+    fi
+
     # Health check: a session that "succeeded" in a couple of turns without
     # touching the repo is almost always a broken key or model, not a genuine
     # no-op — count it as an error so MAX_ERRORS trips fast instead of burning
@@ -775,6 +917,9 @@ while true; do
 
     # Fields the agent CLI did not report are simply left out, never guessed.
     extra=""
+    [[ "$STEERED" != true ]] || extra+=",\"steered\":true"
+    [[ "$metric_ran" != true ]] \
+        || extra+=",\"metric\":${metric_value:-null},\"best\":$METRIC_BEST"
     [[ -z "$m_turns" ]]      || extra+=",\"turns\":$m_turns"
     [[ -z "$m_tokens_in" ]]  || extra+=",\"tokens_in\":$m_tokens_in"
     [[ -z "$m_tokens_out" ]] || extra+=",\"tokens_out\":$m_tokens_out"
@@ -787,6 +932,7 @@ while true; do
         "$agent_done" "$agent_blocked" "$extra" >>"$results_log"
     log "iteration $iter: $status ($new_commits commits, \$$(fmt_cost "$cost"), ${m_turns:-?} turns, ${duration_s}s; total \$$(fmt_cost "$total_cost"))"
     write_summary
+    [[ -z "$METRIC_CMD" ]] || write_metric_row
 
     if [[ "$completion_ok" == true ]]; then
         if [[ "$EVALUATOR" == true ]]; then
@@ -796,6 +942,7 @@ while true; do
         fi
         break
     fi
+    if stop_file_requested; then stop_reason="stop file"; break; fi
     if [[ -n "$MAX_TOTAL_BUDGET_USD" ]] && cost_reached "$total_cost" "$MAX_TOTAL_BUDGET_USD"; then
         stop_reason="budget exhausted (\$$(fmt_cost "$total_cost") of \$$(fmt_cost "$MAX_TOTAL_BUDGET_USD"))"
         break
@@ -815,6 +962,9 @@ while true; do
         pause "$LOOP_DELAY"
     fi
 done
+
+# The brake is spent once honored; leaving it would stop the next run at once.
+rm -f "$STOP_FILE"
 
 log "loop finished after $iter iterations: $stop_reason"
 log "total cost: \$$(fmt_cost "$total_cost") across $iter iterations"

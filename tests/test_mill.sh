@@ -347,4 +347,41 @@ grep -q 'unknown option' "$TMP/err" || { cat "$TMP/err"; fail "expected an unkno
 rm -rf "$TMP"
 echo "PASS: mill logs summaries, --raw, and --results"
 
+# --- 14: operator steering — mill stop --soft and mill steer ---
+make_env
+mill -C "$TMP/a/api" stop --soft > "$TMP/out" || { cat "$TMP/out"; fail "mill stop --soft failed"; }
+grep -q 'Will stop after the current iteration.' "$TMP/out" || { cat "$TMP/out"; fail "no soft-stop message"; }
+[[ -f "$TMP/a/api/.mill/STOP" ]] || fail "mill stop --soft did not write .mill/STOP"
+[[ ! -s "$DOCKER_LOG" ]] || { cat "$DOCKER_LOG"; fail "mill stop --soft talked to docker"; }
+mill -C "$TMP/a/api" steer "focus on the parser" >/dev/null || fail "mill steer failed"
+grep -qx 'focus on the parser' "$TMP/a/api/.mill/STEER.md" \
+    || { cat "$TMP/a/api/.mill/STEER.md"; fail "steer text not written"; }
+mill -C "$TMP/a/api" steer > "$TMP/out" || fail "mill steer (read) failed"
+grep -qx 'focus on the parser' "$TMP/out" || { cat "$TMP/out"; fail "pending steer not printed"; }
+printf 'from stdin\n' | mill -C "$TMP/a/api" steer - >/dev/null || fail "mill steer - failed"
+grep -qx 'from stdin' "$TMP/a/api/.mill/STEER.md" || fail "stdin steer not written"
+rm "$TMP/a/api/.mill/STEER.md"
+mill -C "$TMP/a/api" steer > "$TMP/out" || fail "mill steer with no pending file failed"
+grep -q 'No pending steer.' "$TMP/out" || { cat "$TMP/out"; fail "expected a no-pending-steer message"; }
+[[ ! -s "$DOCKER_LOG" ]] || { cat "$DOCKER_LOG"; fail "steering commands talked to docker"; }
+# `mill run` creates the drop-box in the checkout so steering works before a run.
+rm -rf "$TMP/a/api/.mill"
+mill -C "$TMP/a/api" run >/dev/null || fail "mill run exited nonzero"
+[[ -d "$TMP/a/api/.mill" ]] || fail "mill run did not create the drop-box"
+rm -rf "$TMP"
+echo "PASS: mill stop --soft and mill steer drive .mill/ without docker"
+
+# --- 15: metric ratchet keys reach the container ---
+make_env
+cat > "$TMP/config" <<'ENV'
+METRIC_CMD=python3 bench.py
+METRIC_DIRECTION=max
+ENV
+mill -C "$TMP/a/api" run >/dev/null || fail "mill run exited nonzero"
+for kv in 'METRIC_CMD=python3 bench.py' 'METRIC_DIRECTION=max'; do
+    run_line | grep -q -- "-e $kv " || { run_line; fail "$kv not forwarded to the container"; }
+done
+rm -rf "$TMP"
+echo "PASS: METRIC_CMD and METRIC_DIRECTION reach the container"
+
 echo "OK: all mill smoke tests passed"
