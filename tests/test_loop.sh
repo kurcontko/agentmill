@@ -113,23 +113,43 @@ run_loop env MAX_ITERATIONS=1
 rm -rf "$TMP"
 echo "PASS: dirty worktree refused, clean one runs"
 
-# --- 7: the prompt file keeps its own line structure after the preamble ---
+# --- 7: the framework prompt rides in claude's system prompt, the mission in the turn ---
 make_env
 printf '# Task
 do the thing
 ' > "$TMP/prompt.md"
 cat > "$TMP/bin/claude" <<'STUB'
 #!/usr/bin/env bash
-grep -q '^# Task$' <<<"$2" || { echo "prompt heading not at line start" >&2; exit 3; }
+[[ "$1" == --help ]] && exit 0
+sys="" prev=""
+for a in "$@"; do
+    [[ "$prev" == --append-system-prompt ]] && sys="$a"
+    prev="$a"
+done
+grep -q '^# Task$' <<<"$sys" || { echo "framework prompt not in the system prompt" >&2; exit 3; }
 grep -q '^</loop-context>$' <<<"$2" || { echo "preamble not terminated" >&2; exit 3; }
+grep -q '# Task' <<<"$2" && { echo "framework prompt duplicated in the user turn" >&2; exit 3; }
+grep -q -- '--no-session-persistence' <<<"$*" || { echo "session persistence not disabled" >&2; exit 3; }
+grep -q -- '--bare' <<<"$*" && { echo "--bare passed without CLAUDE_BARE" >&2; exit 3; }
+grep -q -- '--json-schema' <<<"$*" || { echo "no output schema requested" >&2; exit 3; }
 printf '{"type":"result","is_error":false,"result":"ok TASK_COMPLETE"}
 '
 STUB
 chmod +x "$TMP/bin/claude"
 run_loop env MAX_ITERATIONS=1
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "prompt was malformed"; }
+# CLAUDE_BARE is opt-in because --bare also skips CLAUDE.md and hook discovery.
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+grep -q -- '--bare' <<<"$*" || { echo "CLAUDE_BARE did not reach the CLI" >&2; exit 3; }
+printf '{"type":"result","is_error":false,"result":"ok TASK_COMPLETE"}
+'
+STUB
+run_loop env MAX_ITERATIONS=1 CLAUDE_BARE=true
+grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "CLAUDE_BARE not forwarded"; }
 rm -rf "$TMP"
-echo "PASS: preamble and prompt are joined with a blank line"
+echo "PASS: framework prompt is a system prompt; hygiene flags reach the CLI"
 
 # --- 8: codex's last-message file is truncated, so it cannot replay a stale one ---
 make_env
@@ -182,6 +202,7 @@ echo "PASS: git identity is not persisted in the host repo"
 make_env
 cat > "$TMP/bin/claude" <<'STUB'
 #!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
 trap 'echo signalled > got-term; git add -A; git commit -qm "agent: on term"; exit 0' TERM
 echo started > started
 sleep 30 & wait $!
@@ -264,6 +285,7 @@ if timeout --kill-after=1 1 true >/dev/null 2>&1; then
     make_env
     cat > "$TMP/bin/claude" <<'STUB'
 #!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
 trap '' TERM
 (trap '' TERM; sleep 8) &
 wait
@@ -524,5 +546,204 @@ run_loop env AGENT=codex OPENAI_API_KEY=test MAX_ERRORS=1 TMP_FAIL="$TMP/fail"
 grep -q "1 consecutive errors" "$TMP/out.log" || { cat "$TMP/out.log"; fail "codex error event ignored"; }
 rm -rf "$TMP"
 echo "PASS: codex event stream yields turns, tokens, and errors"
+
+# --- 24: the structured final message drives completion, not a substring ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+echo change >> stub.txt
+git add -A && git commit -qm "agent: structured work"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"raw json",'
+printf '"structured_output":{"done":true,"summary":"shipped the widget","blocked":false},'
+printf '"num_turns":4}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ITERATIONS=5
+grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "done:true did not stop the loop"; }
+grep -q '"done":true,"blocked":false' "$TMP/logs/results.jsonl" \
+    || { cat "$TMP/logs/results.jsonl"; fail "done/blocked not recorded"; }
+grep -q 'shipped the widget' "$(echo "$TMP"/logs/iter-1-*.summary)" \
+    || fail "summary field did not become the final message"
+rm -rf "$TMP"
+
+# done:false wins over a DONE_PROMISE that happens to sit in the summary.
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+echo change >> "stub-$RANDOM.txt"
+git add -A && git commit -qm "agent: partial work"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"raw",'
+printf '"structured_output":{"done":false,"summary":"still going. TASK_COMPLETE","blocked":false},'
+printf '"num_turns":4}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ITERATIONS=2
+grep -q "signaled" "$TMP/out.log" && { cat "$TMP/out.log"; fail "done:false was overridden by the fallback substring"; }
+grep -q "max iterations" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected max-iterations stop"; }
+grep -q '"done":false' "$TMP/logs/results.jsonl" || fail "done:false not recorded"
+rm -rf "$TMP"
+
+# blocked:true makes no progress, whatever it committed: it counts as a noop.
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+echo change >> "stub-$RANDOM.txt"
+git add -A && git commit -qm "agent: stuck"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"raw",'
+printf '"structured_output":{"done":false,"summary":"need credentials","blocked":true},'
+printf '"num_turns":4}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ITERATIONS=10 MAX_NOOPS=2
+grep -q "agent reports blocked" "$TMP/out.log" || { cat "$TMP/out.log"; fail "blocked was not logged"; }
+grep -q "2 consecutive no-progress" "$TMP/out.log" || { cat "$TMP/out.log"; fail "blocked did not count toward MAX_NOOPS"; }
+[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 2 ]] || fail "blocked stop came at the wrong iteration"
+grep -q '"blocked":true' "$TMP/logs/results.jsonl" || fail "blocked not recorded"
+rm -rf "$TMP"
+echo "PASS: structured done/summary/blocked drive the loop, plain text still works"
+
+# --- 25: DONE_CMD is the completion verifier, and it fails closed ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+echo change >> "stub-$RANDOM.txt"
+git add -A && git commit -qm "agent: claims done"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"raw",'
+printf '"structured_output":{"done":true,"summary":"finished","blocked":false},"num_turns":4}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ITERATIONS=2 DONE_CMD='echo two tests still red; false'
+grep -q "agent claimed done but DONE_CMD failed — continuing" "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "DONE_CMD failure did not reject the claim"; }
+grep -q "max iterations" "$TMP/out.log" || { cat "$TMP/out.log"; fail "rejected claim still stopped the loop"; }
+grep -q '^## Verifier failures$' "$TMP/repo/PROGRESS.md" \
+    || { cat "$TMP/repo/PROGRESS.md" 2>/dev/null; fail "no verifier-failure section in PROGRESS.md"; }
+grep -q '^- iteration 1: DONE_CMD failed: two tests still red' "$TMP/repo/PROGRESS.md" \
+    || { cat "$TMP/repo/PROGRESS.md"; fail "verifier output not recorded in PROGRESS.md"; }
+grep -q 'verifier rejected completion claim' < <(git -C "$TMP/repo" log --oneline) \
+    || fail "the rejection note was not committed"
+# ...and a green DONE_CMD lets the very same claim through.
+run_loop env MAX_ITERATIONS=2 DONE_CMD=true
+grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "green DONE_CMD did not honor the claim"; }
+rm -rf "$TMP"
+
+# With no DONE_CMD, a done claim still needs CHECK_CMD green on that iteration.
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+printf '{"type":"result","subtype":"success","is_error":false,"result":"raw",'
+printf '"structured_output":{"done":true,"summary":"nothing left to do","blocked":false},"num_turns":4}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ITERATIONS=2 MAX_NOOPS=0 CHECK_CMD=false
+grep -q "agent claimed done but CHECK_CMD failed — continuing" "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "an unverified done claim was honored"; }
+grep -q "max iterations" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected max-iterations stop"; }
+rm -rf "$TMP"
+echo "PASS: DONE_CMD gates completion and a rejection is written back to the repo"
+
+# --- 26: EVALUATOR reviews the run in a fresh read-only session ---
+make_env
+printf 'review the work\n' > "$TMP/eval.md"
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+if [[ "$*" == *--disallowedTools* ]]; then          # the reviewer session
+    grep -q -- '--permission-mode dontAsk' <<<"$*" || { echo "reviewer may still write" >&2; exit 3; }
+    grep -q '^review the work$' <<<"$2" || { echo "evaluator prompt missing" >&2; exit 3; }
+    n=0
+    [[ -f "$EVAL_COUNT" ]] && n="$(cat "$EVAL_COUNT")"
+    n=$((n + 1))
+    printf '%s' "$n" > "$EVAL_COUNT"
+    printf '{"type":"result","subtype":"success","is_error":false,"result":"raw",'
+    if [[ "$n" -ge 2 ]]; then
+        printf '"structured_output":{"verdict":"PASS","findings":"green"},'
+    else
+        printf '"structured_output":{"verdict":"NEEDS_WORK","findings":"- [ ] widget.py is a stub"},'
+    fi
+    printf '"total_cost_usd":0.05,"num_turns":3}\n'
+    exit 0
+fi
+echo change >> "stub-$RANDOM.txt"
+git add -A && git commit -qm "agent: claims done"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"raw",'
+printf '"structured_output":{"done":true,"summary":"finished","blocked":false},'
+printf '"total_cost_usd":0.10,"num_turns":4}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ITERATIONS=5 EVALUATOR=true EVALUATOR_FILE="$TMP/eval.md" EVAL_COUNT="$TMP/eval-count"
+grep -q 'evaluator: NEEDS_WORK' "$TMP/out.log" || { cat "$TMP/out.log"; fail "evaluator verdict not logged"; }
+grep -q 'agent signaled done, evaluator PASS' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "a PASS verdict did not stop the loop"; }
+[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 2 ]] || { cat "$TMP/out.log"; fail "expected exactly two iterations"; }
+grep -q '^## Evaluator findings (iteration 1)$' "$TMP/repo/PROGRESS.md" \
+    || { cat "$TMP/repo/PROGRESS.md"; fail "findings not written to PROGRESS.md"; }
+grep -q 'widget.py is a stub' "$TMP/repo/PROGRESS.md" || fail "findings body missing"
+grep -q 'evaluator: needs work' < <(git -C "$TMP/repo" log --oneline) \
+    || fail "findings were not committed"
+[[ -f "$(echo "$TMP"/logs/iter-1-*.eval.log)" ]] || { ls "$TMP/logs"; fail "no evaluator session log"; }
+grep -q 'total cost: [$]0.30 across 2 iterations' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "evaluator cost missing from the total"; }
+rm -rf "$TMP"
+echo "PASS: the evaluator gates completion and its findings come back as a commit"
+
+# --- 27: the initializer block appears only while PROGRESS.md is missing ---
+make_env
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+if [[ -f PROGRESS.md ]]; then printf '%s' "$2" > "$PROMPT_DUMP.after"
+else printf '%s' "$2" > "$PROMPT_DUMP.first"; printf 'notes\n' > PROGRESS.md; fi
+echo change >> "stub-$RANDOM.txt"
+git add -A && git commit -qm "agent: work"
+printf '{"type":"result","subtype":"success","is_error":false,"result":"ok","num_turns":4}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ITERATIONS=2 PROMPT_DUMP="$TMP/dump"
+grep -q 'initializer session (no PROGRESS.md)' "$TMP/out.log" \
+    || { cat "$TMP/out.log"; fail "initializer session not logged"; }
+grep -q '^<initializer>$' "$TMP/dump.first" || { cat "$TMP/dump.first"; fail "no initializer block on the first session"; }
+grep -q 'EXIT' "$TMP/dump.first" || fail "initializer does not tell the agent to exit"
+grep -q '<initializer>' "$TMP/dump.after" && { cat "$TMP/dump.after"; fail "initializer block survived PROGRESS.md"; }
+rm -rf "$TMP"
+echo "PASS: the first session is an initializer, later ones are not"
+
+# --- 28: codex gets a strict schema file, --ephemeral, and returns JSON ---
+make_env
+cat > "$TMP/bin/codex" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$ARGV_LOG"
+out="" schema="" prev=""
+for a in "$@"; do
+    [[ "$prev" == -o ]] && out="$a"
+    [[ "$prev" == --output-schema ]] && schema="$a"
+    prev="$a"
+done
+[[ -f "$schema" ]] || { echo "no schema file at '$schema'" >&2; exit 3; }
+grep -q '"additionalProperties":false' "$schema" || { echo "schema not strict" >&2; exit 3; }
+grep -q '"required":\["done","summary","blocked"\]' "$schema" || { echo "blocked not required" >&2; exit 3; }
+grep -q '^</loop-context>$' <<<"$2" || { echo "preamble missing" >&2; exit 3; }
+grep -q '^do the thing$' <<<"$2" || { echo "framework prompt missing from codex turn" >&2; exit 3; }
+echo change >> stub.txt
+git add -A && git commit -qm "agent: codex structured work"
+printf '{"type":"item.completed","item":{"type":"agent_message"}}\n'
+printf '{"type":"item.completed","item":{"type":"command_execution"}}\n'
+printf '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}\n'
+printf '{"done":true,"summary":"codex finished the widget","blocked":false}\n' > "$out"
+STUB
+chmod +x "$TMP/bin/codex"
+run_loop env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=2 ARGV_LOG="$TMP/argv.log"
+grep -q -- '--ephemeral' "$TMP/argv.log" || { cat "$TMP/argv.log"; fail "--ephemeral not passed to codex"; }
+grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "codex structured done ignored"; }
+grep -q '"done":true,"blocked":false' "$TMP/logs/results.jsonl" || fail "codex done/blocked not recorded"
+grep -q 'codex finished the widget' "$(echo "$TMP"/logs/iter-1-*.summary)" \
+    || fail "codex summary did not become the final message"
+rm -rf "$TMP"
+echo "PASS: codex gets a strict output schema and an ephemeral session"
 
 echo "OK: all loop.sh smoke tests passed"

@@ -81,11 +81,26 @@ This is the agent's portable memory. The commit log records *what you did*; the 
 
 Exiting after your one task needs no signal — the loop respawns you automatically.
 
-When (and only when) **every** item of the mission is done — the mission's definition of done met, nothing actionable left in `PROGRESS.md`, full verifier green — end your final message with the literal string:
+Your final message is a JSON object matching the schema you were given:
 
-TASK_COMPLETE
+- `done` — `true` only when **every** item of the mission is finished: the
+  mission's definition of done met, nothing actionable left in `PROGRESS.md`,
+  full verifier green. Otherwise `false`. **Never `true` for partial progress,
+  blocked tasks, or `STUCK:` exits** — those exit with `done: false` and the
+  loop respawns you.
+- `summary` — what you did this session, in a few lines. This is what the
+  operator reads in the loop's logs, so make it concrete.
+- `blocked` — `true` when you could not make progress and need the operator
+  (missing credentials, an ambiguous mission, an external dependency). Usually
+  `false`; a run of blocked sessions stops the loop.
 
-That stops the loop. **Never emit it for partial progress, blocked tasks, or `STUCK:` exits** — those exit without it, and the loop respawns you.
+`done: true` is a claim, not a stop: the loop re-runs the verifier — and may
+run a fresh-context reviewer over the whole diff — before honoring it. A
+rejected claim is written back into `PROGRESS.md` and you are respawned to fix
+what it names. So do not claim completion you cannot back with verifier output.
+
+If the run is plain-text (no schema in force), end the final message with the
+literal string `TASK_COMPLETE` instead; it is the fallback completion signal.
 
 ---
 

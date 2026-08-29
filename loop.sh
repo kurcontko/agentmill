@@ -26,6 +26,10 @@ MIN_TURNS="${MIN_TURNS:-2}"              # fewer turns than this with no repo ch
 DONE_PROMISE="${DONE_PROMISE:-TASK_COMPLETE}"
 SETUP_CMD="${SETUP_CMD:-}"               # runs once before the loop
 CHECK_CMD="${CHECK_CMD:-}"               # ratchet: iteration is reverted if this fails
+DONE_CMD="${DONE_CMD:-}"                 # completion verifier: a done claim is rejected if this fails
+EVALUATOR="${EVALUATOR:-false}"          # read-only review session before a done claim is honored
+EVALUATOR_FILE="${EVALUATOR_FILE:-/prompts/EVALUATOR.md}"  # the reviewer's prompt
+CLAUDE_BARE="${CLAUDE_BARE:-false}"      # claude only: --bare (skips CLAUDE.md/hook discovery)
 GIT_USER="${GIT_USER:-agentmill}"
 GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
 
@@ -41,12 +45,17 @@ TIMEOUT_KILL_AFTER="$SHUTDOWN_GRACE"
 # GNU timeout is always present in the container; degrade without it (host tests).
 # Its normal (non-foreground) mode owns a process group, so TERM and the hard
 # kill deadline cover the CLI and every descendant, not only the direct child.
+# PROBE_CMD bounds the one-off capability probes below: a CLI that hangs on
+# --help must not hang the loop before it has run anything.
 if timeout --kill-after=1 1 true >/dev/null 2>&1; then
     TIMEOUT_CMD=(timeout "--kill-after=$TIMEOUT_KILL_AFTER" "$ITER_TIMEOUT")
+    PROBE_CMD=(timeout --kill-after=1 10)
 elif timeout -k 1 1 true >/dev/null 2>&1; then
     TIMEOUT_CMD=(timeout -k "$TIMEOUT_KILL_AFTER" "$ITER_TIMEOUT")
+    PROBE_CMD=(timeout -k 1 10)
 else
     TIMEOUT_CMD=(env)
+    PROBE_CMD=(env)
 fi
 
 log() { printf '[%s] %s\n' "$(date -u '+%H:%M:%S')" "$*"; }
@@ -112,9 +121,27 @@ case "$AGENT" in
                 || die "set OPENAI_API_KEY or mount ~/.codex" ;;
     *) die "AGENT must be claude or codex, got: $AGENT" ;;
 esac
+[[ "$EVALUATOR" != true || -f "$EVALUATOR_FILE" ]] \
+    || die "EVALUATOR=true but no evaluator prompt at $EVALUATOR_FILE"
 
 cd "$REPO_DIR"
 mkdir -p "$LOG_DIR"
+
+# The framework prompt belongs in claude's system prompt, not the user turn.
+# Older CLIs only take it inline; probe the help text once — in a scratch
+# directory, never the checkout, since a --help that is not a --help must not
+# touch the repo — and fall back to the inline form whenever the probe fails.
+CLAUDE_SYS_PROMPT_FILE=false
+if [[ "$AGENT" == claude ]]; then
+    probe_dir="$LOG_DIR/.probe"
+    rm -rf "$probe_dir"
+    mkdir -p "$probe_dir"
+    if (cd "$probe_dir" && "${PROBE_CMD[@]}" claude --help </dev/null 2>/dev/null) \
+        | grep -q -- '--append-system-prompt-file'; then
+        CLAUDE_SYS_PROMPT_FILE=true
+    fi
+    rm -rf "$probe_dir"
+fi
 git config --global --add safe.directory "$REPO_DIR" 2>/dev/null || true
 # A linked worktree's objects live in the main repo's git dir, mounted at the
 # same host path; mark that trusted too or every git command fails. Parsed from
@@ -168,6 +195,29 @@ preamble() {
         head -40 PROGRESS.md
     fi
     echo "</loop-context>"
+    # No PROGRESS.md means no session has run yet. Spend this one turning the
+    # mission into the checklist every later session steers by, nothing else.
+    [[ -f PROGRESS.md ]] && return 0
+    cat <<'INIT'
+
+<initializer>
+This is the FIRST session of the loop: there is no PROGRESS.md yet. Do not
+start feature work this session. Instead:
+
+1. Read the mission below and the repo, then write PROGRESS.md with these
+   sections, each holding markdown checkboxes (`- [ ]` / `- [x]`):
+   Completed, In Progress, Blocked, Next Up, Failed approaches,
+   Definition of done.
+2. Break the mission into concrete, individually checkable items under
+   Next Up and Definition of done. Be specific; a later session with no
+   memory of this one must be able to pick the next item from it alone.
+3. Make sure a verifier command exists (tests, build, lint). If none does,
+   create a minimal one. Record the exact command in PROGRESS.md.
+4. Commit PROGRESS.md (and the verifier, if you added one).
+5. EXIT. Do not implement anything from the checklist yet — the loop
+   respawns you with fresh context for that.
+</initializer>
+INIT
 }
 
 # The mission is re-read from the checkout every iteration, so editing
@@ -188,9 +238,28 @@ note_mission_changes() {
     MISSION_SUM="$sum"
 }
 
+# For claude the framework prompt rides in the system prompt (see run_agent),
+# leaving the user turn as just carry-forward plus the mission. codex exec has
+# no system-prompt flag, so there it stays concatenated.
 build_prompt() {
-    printf '%s\n\n%s\n\n<mission>\n%s\n</mission>\n' \
-        "$(preamble)" "$(cat "$PROMPT_FILE")" "$(mission_body)"
+    if [[ "$AGENT" == claude ]]; then
+        printf '%s\n\n<mission>\n%s\n</mission>\n' "$(preamble)" "$(mission_body)"
+    else
+        printf '%s\n\n%s\n\n<mission>\n%s\n</mission>\n' \
+            "$(preamble)" "$(cat "$PROMPT_FILE")" "$(mission_body)"
+    fi
+}
+
+# The reviewer gets its own prompt, the whole run's diff, the verifier it is
+# expected to run, and the mission it is judging against — no carry-forward.
+build_eval_prompt() {
+    local range="${RUN_BASE:+$RUN_BASE..}HEAD"
+    printf '%s\n\n<changes>\n' "$(cat "$EVALUATOR_FILE")"
+    git log --oneline "$range" 2>/dev/null || true
+    printf '\n'
+    git diff --stat "$range" 2>/dev/null || true
+    printf '</changes>\n\n<verifier>\n%s\n</verifier>\n\n<mission>\n%s\n</mission>\n' \
+        "${DONE_CMD:-${CHECK_CMD:-none}}" "$(mission_body)"
 }
 
 # State used inside run_agent's background subshell. The timed command is
@@ -244,6 +313,17 @@ CLAUDE_RESULT_JQ='
       ($r.result // "")
     end'
 
+# The validated structured reply of the same result event, compacted onto one
+# line. Older CLIs put it in .result as a JSON string instead of
+# .structured_output; a plain-text answer yields nothing, i.e. "no schema".
+# shellcheck disable=SC2016  # jq program, not shell expansion
+CLAUDE_STRUCT_JQ='
+  ([inputs | fromjson? | select(.type == "result")] | last) as $r
+  | if $r == null then empty
+    elif ($r.structured_output // null) != null then ($r.structured_output | tojson)
+    else (($r.result // "") | fromjson? | select(type == "object") | tojson)
+    end'
+
 # The same for codex --json (JSONL, no cost reported): usage comes from the
 # final turn.completed, turns are the completed items, and an error event or a
 # turn that never completed marks the session failed.
@@ -263,48 +343,94 @@ CODEX_RESULT_JQ='
           (($done.usage.output_tokens // "") | tostring) ] | @tsv
     end'
 
+# Where one session's artifacts live. Set by the caller before run_agent,
+# because run_agent itself runs in a background subshell: "work" is the loop's
+# own agent, "review" the evaluator, and neither may clobber the other's files.
+session_files() {
+    case "$1" in
+        work)   agent_log="$iter_log"
+                agent_metrics="$LOG_DIR/.last-metrics"
+                agent_struct="$LOG_DIR/.last-struct"
+                agent_schema="$LOG_DIR/.schema.json"
+                agent_msg="$msg_file"
+                codex_msg="$LOG_DIR/.codex-last-msg" ;;
+        review) agent_log="${iter_log%.log}.eval.log"
+                agent_metrics="$LOG_DIR/.eval-metrics"
+                agent_struct="$LOG_DIR/.eval-struct"
+                agent_schema="$LOG_DIR/.schema-eval.json"
+                agent_msg="$LOG_DIR/.eval-msg"
+                codex_msg="$LOG_DIR/.codex-eval-msg" ;;
+    esac
+}
+
 # Runs one agent session. Prints the agent's final message; exit code is the
-# agent's. Full event stream goes to the iteration log, session metrics (one
-# tab-separated line, empty when unparseable) to $metrics_file.
+# agent's. Full event stream goes to $agent_log, session metrics (one
+# tab-separated line, empty when unparseable) to $agent_metrics, and the
+# validated structured reply (empty when the CLI produced none) to
+# $agent_struct. $1 = prompt, $2 = mode: work | review (read-only reviewer).
 run_agent() {
-    local rc=0 model_args=()
+    local mode="$2" rc=0 args=() claude_schema="$CLAUDE_SCHEMA_WORK"
+    [[ "$mode" != review ]] || claude_schema="$SCHEMA_EVAL"
     SESSION_PID="" SESSION_WATCHDOG_PID="" SESSION_RC=0 SESSION_STOP_REQUESTED=false
-    : > "$metrics_file"
+    : > "$agent_metrics"
+    : > "$agent_struct"
     trap on_session_signal TERM INT
     case "$AGENT" in
         claude)
-            [[ -n "$MODEL" ]] && model_args=(--model "$MODEL")
-            [[ -n "$FALLBACK_MODEL" ]] && model_args+=(--fallback-model "$FALLBACK_MODEL")
-            [[ "$MAX_TURNS" -gt 0 ]] && model_args+=(--max-turns "$MAX_TURNS")
-            [[ -n "$MAX_BUDGET_USD" ]] && model_args+=(--max-budget-usd "$MAX_BUDGET_USD")
+            [[ -n "$MODEL" ]] && args=(--model "$MODEL")
+            [[ -n "$FALLBACK_MODEL" ]] && args+=(--fallback-model "$FALLBACK_MODEL")
+            [[ "$MAX_TURNS" -gt 0 ]] && args+=(--max-turns "$MAX_TURNS")
+            [[ -n "$MAX_BUDGET_USD" ]] && args+=(--max-budget-usd "$MAX_BUDGET_USD")
+            # No session state on disk; --bare additionally skips CLAUDE.md and
+            # hook discovery, which plenty of repos deliberately rely on.
+            args+=(--no-session-persistence --json-schema "$claude_schema")
+            [[ "$CLAUDE_BARE" == true ]] && args+=(--bare)
+            if [[ "$mode" == review ]]; then
+                # Bash stays allowed: the reviewer has to run the verifier.
+                args+=(--disallowedTools "Write,Edit,MultiEdit,NotebookEdit"
+                       --permission-mode dontAsk
+                       --append-system-prompt "You are a reviewer; you may not modify files.")
+            elif [[ "$CLAUDE_SYS_PROMPT_FILE" == true ]]; then
+                args+=(--dangerously-skip-permissions --append-system-prompt-file "$PROMPT_FILE")
+            else
+                args+=(--dangerously-skip-permissions --append-system-prompt "$(cat "$PROMPT_FILE")")
+            fi
             "${TIMEOUT_CMD[@]}" claude -p "$1" \
-                --dangerously-skip-permissions \
-                ${model_args[@]+"${model_args[@]}"} \
-                --output-format stream-json --verbose >>"$iter_log" 2>&1 &
+                ${args[@]+"${args[@]}"} \
+                --output-format stream-json --verbose >>"$agent_log" 2>&1 &
             SESSION_PID=$!
             [[ "$SESSION_STOP_REQUESTED" == false ]] || on_session_signal
             wait_session
             rc="$SESSION_RC"
-            jq -Rnr "$CLAUDE_RESULT_JQ" "$iter_log" >"$parse_file" 2>/dev/null || : > "$parse_file"
-            head -1 "$parse_file" > "$metrics_file"
+            jq -Rnr "$CLAUDE_RESULT_JQ" "$agent_log" >"$parse_file" 2>/dev/null || : > "$parse_file"
+            jq -Rnr "$CLAUDE_STRUCT_JQ" "$agent_log" >"$agent_struct" 2>/dev/null || : > "$agent_struct"
+            head -1 "$parse_file" > "$agent_metrics"
             tail -n +2 "$parse_file"
             ;;
         codex)
-            [[ -n "$MODEL" ]] && model_args=(-m "$MODEL")
+            [[ -n "$MODEL" ]] && args=(-m "$MODEL")
             # MAX_TURNS/MAX_BUDGET_USD have no codex equivalent; ignored, not an error.
+            args+=(--ephemeral --output-schema "$agent_schema")
+            if [[ "$mode" == review ]]; then
+                args+=(--sandbox read-only)
+            else
+                args+=(--dangerously-bypass-approvals-and-sandbox)
+            fi
             # Truncate first: a run that exits without a final message would
             # otherwise replay the previous iteration's (maybe DONE_PROMISE).
             : > "$codex_msg"
             "${TIMEOUT_CMD[@]}" codex exec "$1" \
-                --dangerously-bypass-approvals-and-sandbox \
-                ${model_args[@]+"${model_args[@]}"} -C "$REPO_DIR" --json \
-                -o "$codex_msg" >>"$iter_log" 2>&1 &
+                ${args[@]+"${args[@]}"} -C "$REPO_DIR" --json \
+                -o "$codex_msg" >>"$agent_log" 2>&1 &
             SESSION_PID=$!
             [[ "$SESSION_STOP_REQUESTED" == false ]] || on_session_signal
             wait_session
             rc="$SESSION_RC"
-            jq -Rnr "$CODEX_RESULT_JQ" "$iter_log" >"$metrics_file" 2>/dev/null \
-                || : > "$metrics_file"
+            jq -Rnr "$CODEX_RESULT_JQ" "$agent_log" >"$agent_metrics" 2>/dev/null \
+                || : > "$agent_metrics"
+            # With --output-schema the last message IS the JSON object.
+            jq -c 'select(type == "object")' "$codex_msg" >"$agent_struct" 2>/dev/null \
+                || : > "$agent_struct"
             cat "$codex_msg" 2>/dev/null || true
             ;;
     esac
@@ -335,9 +461,9 @@ count_iteration_commits() {
 # empty ("unknown"); nothing here is allowed to abort the loop.
 read_metrics() {
     m_subtype="" m_is_error="" m_cost="" m_turns="" m_duration_ms="" m_tokens_in="" m_tokens_out=""
-    [[ -s "$metrics_file" ]] || return 0
+    [[ -s "$1" ]] || return 0
     IFS=$'\t' read -r m_subtype m_is_error m_cost m_turns m_duration_ms m_tokens_in m_tokens_out \
-        < "$metrics_file" || true
+        < "$1" || true
     [[ "$m_turns" =~ ^[0-9]+$ ]] || m_turns=""
     [[ "$m_tokens_in" =~ ^[0-9]+$ ]] || m_tokens_in=""
     [[ "$m_tokens_out" =~ ^[0-9]+$ ]] || m_tokens_out=""
@@ -349,6 +475,23 @@ read_metrics() {
 add_cost() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6f", a + b }'; }
 fmt_cost() { awk -v a="$1" 'BEGIN { printf "%.2f", a }'; }
 cost_reached() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 >= b + 0) }'; }
+
+# Just the cost column of a metrics line, for a session whose other numbers the
+# loop does not track (the evaluator). Unknown reads as free, never as an error.
+metrics_cost() {
+    local c=""
+    [[ ! -s "$1" ]] || c="$(cut -f3 "$1" 2>/dev/null || true)"
+    [[ "$c" =~ ^[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]] || c=0
+    printf '%s' "$c"
+}
+
+# One field of a structured reply, empty when the file, the object, or the key
+# is missing. Nothing a model returned is ever allowed to abort the loop.
+json_field() {
+    [[ -s "$1" ]] || return 0
+    jq -r --arg k "$2" 'select(type == "object") | select(has($k)) | .[$k] | tostring' \
+        "$1" 2>/dev/null || true
+}
 
 # A human-readable digest of one iteration, next to its raw log: what the
 # session cost, what it committed, and what it said at the end.
@@ -403,13 +546,108 @@ restore_iteration() {
     git clean -q -ffd
 }
 
+# A verifier validates the checkpoint; its own test artifacts must not become
+# the next iteration's dirty baseline.
+clean_check_artifacts() {
+    refresh_worktree_status
+    [[ -n "$WORKTREE_STATUS" ]] || return 0
+    git reset -q --hard HEAD
+    restore_submodules
+    git clean -q -ffd
+}
+
+# Append a line (or block) under a heading in PROGRESS.md, creating the file
+# and the heading when they are missing. An existing heading gets the entry
+# right beneath it, so the note cannot land under some later section.
+progress_append() {
+    local heading="$1" body="$2" tmp="$LOG_DIR/.progress.tmp"
+    [[ -f PROGRESS.md ]] || printf '# Progress\n' > PROGRESS.md
+    if grep -qxF -- "$heading" PROGRESS.md; then
+        awk -v h="$heading" -v b="$body" '{ print } $0 == h { print b }' PROGRESS.md > "$tmp" \
+            && mv "$tmp" PROGRESS.md
+    else
+        printf '\n%s\n\n%s\n' "$heading" "$body" >> PROGRESS.md
+    fi
+}
+
+# The loop's own commits touch nothing but PROGRESS.md.
+commit_loop_note() {
+    if ! git add -- PROGRESS.md >/dev/null 2>&1 \
+        || ! git -c commit.gpgSign=false commit --no-verify -qm "$1" -- PROGRESS.md \
+                >/dev/null 2>&1; then
+        log "could not commit: $1"
+    fi
+}
+
+# One extra read-only session that reviews the whole run with fresh context.
+# Its cost joins the total. PASS lets the claim through; anything else (a
+# NEEDS_WORK verdict, an unparseable reply) is a rejection — default-fail.
+run_evaluator() {
+    local rc=0 verdict findings eval_cost      # local rc: wait_agent writes to it
+    session_files review
+    : > "$agent_log"
+    log "evaluator: reviewing the run in a fresh read-only session"
+    run_agent "$(build_eval_prompt)" review >"$agent_msg" &
+    AGENT_PID=$!
+    wait_agent
+    eval_cost="$(metrics_cost "$agent_metrics")"
+    total_cost="$(add_cost "$total_cost" "$eval_cost")"
+    verdict="$(json_field "$agent_struct" verdict)"
+    findings="$(json_field "$agent_struct" findings)"
+    [[ -n "$findings" ]] || findings="$(cat "$agent_msg" 2>/dev/null || true)"
+    log "evaluator: ${verdict:-unparseable} (\$$(fmt_cost "$eval_cost"); total \$$(fmt_cost "$total_cost"))"
+    session_files work
+    [[ "$verdict" == PASS ]] && return 0
+    log "evaluator: needs work — continuing"
+    progress_append "## Evaluator findings (iteration $iter)" "$findings"
+    commit_loop_note '[loop] evaluator: needs work'
+    return 1
+}
+
+# Everything that must hold before a done claim may stop the loop: the
+# completion verifier (DONE_CMD, else a CHECK_CMD green on this iteration) and,
+# when enabled, the evaluator. A rejection is recorded in PROGRESS.md so the
+# next session knows why its predecessor's claim did not stick.
+verify_done_claim() {
+    local out="$LOG_DIR/.done-check" label="" cmd=""
+    if [[ -n "$DONE_CMD" ]]; then
+        label=DONE_CMD cmd="$DONE_CMD"
+    elif [[ -n "$CHECK_CMD" && "$check_passed" != true ]]; then
+        label=CHECK_CMD cmd="$CHECK_CMD"
+    fi
+    if [[ -n "$cmd" ]]; then
+        log "$label: $cmd"
+        if ! bash -c "$cmd" >"$out" 2>&1; then
+            cat "$out" >>"$iter_log" 2>/dev/null || true
+            log "agent claimed done but $label failed — continuing"
+            progress_append '## Verifier failures' \
+                "- iteration $iter: $label failed: $(head -3 "$out" | tr '\n' ' ')"
+            commit_loop_note '[loop] verifier rejected completion claim'
+            return 1
+        fi
+        cat "$out" >>"$iter_log" 2>/dev/null || true
+        clean_check_artifacts
+    fi
+    [[ "$EVALUATOR" == true ]] || return 0
+    run_evaluator
+}
+
+# Structured final messages. claude takes the schema inline and returns the
+# validated object in the result event; codex takes a file and insists on
+# additionalProperties:false with every property required — hence the second,
+# stricter copy of the same shape (the prompt says `blocked` may be false).
+CLAUDE_SCHEMA_WORK='{"type":"object","properties":{"done":{"type":"boolean"},"summary":{"type":"string"},"blocked":{"type":"boolean"}},"required":["done","summary"],"additionalProperties":false}'
+CODEX_SCHEMA_WORK='{"type":"object","properties":{"done":{"type":"boolean"},"summary":{"type":"string"},"blocked":{"type":"boolean"}},"required":["done","summary","blocked"],"additionalProperties":false}'
+SCHEMA_EVAL='{"type":"object","properties":{"verdict":{"type":"string","enum":["PASS","NEEDS_WORK"]},"findings":{"type":"string"}},"required":["verdict","findings"],"additionalProperties":false}'
+printf '%s\n' "$CODEX_SCHEMA_WORK" > "$LOG_DIR/.schema.json"
+printf '%s\n' "$SCHEMA_EVAL" > "$LOG_DIR/.schema-eval.json"
+
 log "starting loop: agent=$AGENT model=${MODEL:-<cli default>} max_iterations=$MAX_ITERATIONS"
 results_log="$LOG_DIR/results.jsonl"
-codex_msg="$LOG_DIR/.codex-last-msg"
 msg_file="$LOG_DIR/.last-msg"
-metrics_file="$LOG_DIR/.last-metrics"
 parse_file="$LOG_DIR/.last-parse"
 iter=0 errors=0 noops=0 stop_reason="" total_cost=0
+RUN_BASE="$(head_oid)"                   # what the evaluator diffs the run against
 
 while true; do
     if [[ "$SHUTDOWN" == true ]]; then stop_reason="shutdown signal"; break; fi
@@ -420,17 +658,33 @@ while true; do
     iter_log="$LOG_DIR/iter-${iter}-$(git rev-parse --short=7 --verify HEAD 2>/dev/null || echo init).log"
     log "==== iteration $iter ===="
 
-    status=kept rc=0
+    status=kept rc=0 check_passed=false
     : > "$msg_file"
+    [[ -f PROGRESS.md ]] || log "initializer session (no PROGRESS.md)"
     # Backgrounded so TERM/INT is handled while the agent runs, not after it.
     note_mission_changes
+    session_files work
     started_at="$(date +%s)"
-    run_agent "$(build_prompt)" >"$msg_file" &
+    run_agent "$(build_prompt)" work >"$msg_file" &
     AGENT_PID=$!
     wait_agent
     duration_s=$(( $(date +%s) - started_at ))
     last_msg="$(cat "$msg_file" 2>/dev/null || true)"
-    read_metrics
+    read_metrics "$agent_metrics"
+
+    # The agent answers against a schema: `done` is the completion claim and
+    # `summary` replaces the raw final message everywhere. DONE_PROMISE stays
+    # the fallback for CLIs (or runs) that produced no structured reply.
+    agent_done=false agent_blocked=false
+    struct_done="$(json_field "$agent_struct" 'done')"
+    if [[ -n "$struct_done" ]]; then
+        struct_summary="$(json_field "$agent_struct" summary)"
+        [[ -z "$struct_summary" ]] || last_msg="$struct_summary"
+        [[ "$struct_done" != true ]] || agent_done=true
+        [[ "$(json_field "$agent_struct" blocked)" != true ]] || agent_blocked=true
+    elif [[ -n "$DONE_PROMISE" && "$last_msg" == *"$DONE_PROMISE"* ]]; then
+        agent_done=true
+    fi
     cost="${m_cost:-0}"
     total_cost="$(add_cost "$total_cost" "$cost")"
     # The CLI can report failure with exit 0 (max turns, an execution error);
@@ -483,14 +737,8 @@ while true; do
             new_commits=0
             status=reverted
         else
-            refresh_worktree_status
-            if [[ -n "$WORKTREE_STATUS" ]]; then
-                # CHECK_CMD validates the checkpoint; its own test artifacts
-                # must not become the next iteration's dirty baseline.
-                git reset -q --hard HEAD
-                restore_submodules
-                git clean -q -ffd
-            fi
+            check_passed=true
+            clean_check_artifacts
         fi
     fi
 
@@ -509,9 +757,20 @@ while true; do
     if [[ "$status" == kept && "$mutated" == false ]]; then
         status=noop
     fi
+
+    # A completion claim only stops the loop once the verifier — and, when
+    # enabled, the fresh-context evaluator — has confirmed it.
+    completion_ok=false
+    if [[ "$agent_done" == true && "$status" != error && "$status" != reverted ]]; then
+        if verify_done_claim; then completion_ok=true; fi
+        new_commits="$(count_iteration_commits)"   # a rejection commits a note
+    fi
+
+    # A blocked agent made no headway either, whatever it committed.
+    [[ "$agent_blocked" != true ]] || log "agent reports blocked"
     case "$status" in
         noop|reverted) noops=$((noops + 1)) ;;
-        kept)          noops=0 ;;
+        kept) if [[ "$agent_blocked" == true ]]; then noops=$((noops + 1)); else noops=0; fi ;;
     esac
 
     # Fields the agent CLI did not report are simply left out, never guessed.
@@ -523,13 +782,19 @@ while true; do
         "$iter" "$AGENT" "$status" "$new_commits" \
         "$(git rev-parse --short=7 --verify HEAD 2>/dev/null || echo none)" \
         "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >>"$results_log"
-    printf ',"subtype":"%s","cost_usd":%s,"duration_s":%d%s}\n' \
-        "$m_subtype" "$(add_cost "$cost" 0)" "$duration_s" "$extra" >>"$results_log"
+    printf ',"subtype":"%s","cost_usd":%s,"duration_s":%d,"done":%s,"blocked":%s%s}\n' \
+        "$m_subtype" "$(add_cost "$cost" 0)" "$duration_s" \
+        "$agent_done" "$agent_blocked" "$extra" >>"$results_log"
     log "iteration $iter: $status ($new_commits commits, \$$(fmt_cost "$cost"), ${m_turns:-?} turns, ${duration_s}s; total \$$(fmt_cost "$total_cost"))"
     write_summary
 
-    if [[ "$status" != error && "$status" != reverted && "$last_msg" == *"$DONE_PROMISE"* ]]; then
-        stop_reason="agent signaled $DONE_PROMISE"; break
+    if [[ "$completion_ok" == true ]]; then
+        if [[ "$EVALUATOR" == true ]]; then
+            stop_reason="agent signaled done, evaluator PASS"
+        else
+            stop_reason="agent signaled $DONE_PROMISE"
+        fi
+        break
     fi
     if [[ -n "$MAX_TOTAL_BUDGET_USD" ]] && cost_reached "$total_cost" "$MAX_TOTAL_BUDGET_USD"; then
         stop_reason="budget exhausted (\$$(fmt_cost "$total_cost") of \$$(fmt_cost "$MAX_TOTAL_BUDGET_USD"))"

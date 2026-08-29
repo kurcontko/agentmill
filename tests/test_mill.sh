@@ -295,6 +295,20 @@ done
 rm -rf "$TMP"
 echo "PASS: budget and turn caps reach the container"
 
+# --- 12b: completion-gate and hygiene keys reach the container ---
+make_env
+cat > "$TMP/config" <<'ENV'
+DONE_CMD=pytest -q
+EVALUATOR=true
+CLAUDE_BARE=true
+ENV
+mill -C "$TMP/a/api" run >/dev/null || fail "mill run exited nonzero"
+for kv in 'DONE_CMD=pytest -q' 'EVALUATOR=true' 'CLAUDE_BARE=true'; do
+    run_line | grep -q -- "-e $kv " || { run_line; fail "$kv not forwarded to the container"; }
+done
+rm -rf "$TMP"
+echo "PASS: DONE_CMD, EVALUATOR, and CLAUDE_BARE reach the container"
+
 # --- 13: mill logs shows summaries, --raw the event stream, --results a table ---
 make_env
 mill -C "$TMP/a/api" run >/dev/null
