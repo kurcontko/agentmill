@@ -496,8 +496,13 @@ cmd_init() {
 # Secrets do not belong here — this file is meant to be committed.
 agent: claude
 model:
-check_cmd:
-setup_cmd:
+check_cmd:            # ratchet: an iteration that fails this is reverted
+setup_cmd:            # runs once before the loop (uv sync, npm ci, ...)
+# done_cmd:           # must pass before a "done" claim stops the loop
+# max_total_budget_usd:   # stop once the run has spent this much
+# evaluator: true     # one read-only reviewer session must PASS a done claim
+# metric_cmd:         # prints a score; only a strict improvement is kept
+# metric_direction: min   # min | max — which way is better
 ---
 # Mission
 
@@ -506,8 +511,8 @@ would give a new teammate. Link the relevant files.
 
 ## Definition of done
 
-- The checks below pass.
-- ...
+- [ ] The verifier below is green.
+- [ ] ...
 
 ## Verifier
 
