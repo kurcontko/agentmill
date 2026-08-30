@@ -170,6 +170,8 @@ worse score — or output that is not a number — is reverted.
 
 `MAX_BUDGET_USD` / `MAX_TURNS` bound one session (claude only);
 `MAX_TOTAL_BUDGET_USD` stops the loop once the run's summed spend reaches it.
+All three are claude only — codex reports no cost, so cap a codex run with
+`MAX_ITERATIONS` instead.
 
 ```bash
 MAX_BUDGET_USD=2 MAX_TOTAL_BUDGET_USD=50 MAX_TURNS=80 mill run -d
@@ -198,7 +200,7 @@ at an inline ` # comment`. Every key below works in either file.
 | `DIND_READY_TIMEOUT` | `30` | seconds to wait for the `--dind` TCP endpoint |
 | `MIN_TURNS` | `2` | a session ending in fewer turns without touching the repo counts as an error, not a no-op (0 = off) |
 | `MAX_TURNS` / `MAX_BUDGET_USD` | `0` / — | claude only: per-session turn and spend caps (0 / empty = none) |
-| `MAX_TOTAL_BUDGET_USD` | — | loop-wide spend cap; the loop stops when the summed cost reaches it |
+| `MAX_TOTAL_BUDGET_USD` | — | claude only: loop-wide spend cap; the loop stops when the summed cost reaches it |
 | `DONE_PROMISE` | `TASK_COMPLETE` | fallback stop signal when the CLI returned no structured reply |
 | `SETUP_CMD` | — | runs once before the loop (`uv sync`, `npm ci`, …) |
 | `CHECK_CMD` | — | the ratchet: failure reverts the iteration |

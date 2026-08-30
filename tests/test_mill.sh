@@ -39,6 +39,7 @@ printf 'ANTHROPIC_API_KEY=fromfile\nGIT_EMAIL=fromfile' > "$TMP/config"   # deli
 mill -C "$TMP/a/api" run >/dev/null || fail "mill run exited nonzero"
 run_line | grep -q -- '-e GIT_EMAIL=fromfile' || fail "unterminated last the config file line was dropped"
 run_line | grep -q -- '-e ANTHROPIC_API_KEY' || fail "API key name was not forwarded"
+run_line | grep -q -- '--label agentmill.stop-timeout=60' || { run_line; fail "resolved stop timeout not recorded as a label"; }
 run_line | grep -q -- '-e ANTHROPIC_API_KEY=' && fail "API key value leaked into docker argv"
 grep -q '^ANTHROPIC_API_KEY=fromfile$' "$DOCKER_ENV_LOG" || fail "the config file API key was not exported to docker"
 : > "$DOCKER_LOG"
@@ -143,12 +144,13 @@ cat > "$TMP/bin/docker" <<'STUB'
 printf '%s\n' "$*" >> "$DOCKER_LOG"
 [[ "$*" == "ps -aq --filter label=agentmill" ]] && printf 'aaa\nbbb\n'
 [[ "$*" == "ps -q --filter label=agentmill" ]] && printf 'aaa\nbbb\n'
+[[ "$*" == inspect*agentmill-api-* ]] && printf '330\n'
 exit 0
 STUB
 mill -C "$TMP/a/api" stop >/dev/null || fail "mill stop exited nonzero"
-grep -q '^stop --time 60 agentmill-api-' "$DOCKER_LOG" || { cat "$DOCKER_LOG"; fail "checkout container not stopped gracefully"; }
+grep -q '^stop --time 330 agentmill-api-' "$DOCKER_LOG" || { cat "$DOCKER_LOG"; fail "stop-timeout label not honored"; }
 grep -q '^rm agentmill-api-' "$DOCKER_LOG" || { cat "$DOCKER_LOG"; fail "checkout container not removed after stop"; }
-stop_line="$(grep -n '^stop --time 60 agentmill-api-' "$DOCKER_LOG" | cut -d: -f1)"
+stop_line="$(grep -n '^stop --time 330 agentmill-api-' "$DOCKER_LOG" | cut -d: -f1)"
 rm_line="$(grep -n '^rm agentmill-api-' "$DOCKER_LOG" | cut -d: -f1)"
 [[ "$stop_line" -lt "$rm_line" ]] || fail "checkout was removed before graceful stop completed"
 grep -q '^stop --time 60 aaa' "$DOCKER_LOG" && fail "other containers were stopped"

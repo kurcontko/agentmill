@@ -574,12 +574,16 @@ write_summary() {
 restore_submodules() {
     # Clean first so an untracked path cannot block checkout of the recorded
     # commit, then clean again after the recursive update at the restored tree.
+    # Every step is best-effort: this runs mid-revert under set -e, and a
+    # fetch or .gitmodules failure here must not abort the loop with the
+    # checkout half-restored — leftover dirt is caught by the next iteration.
     git submodule foreach -q --recursive \
-        'git reset -q --hard && git clean -q -ffd'
-    git submodule sync -q --recursive
-    git submodule update -q --recursive --force
+        'git reset -q --hard && git clean -q -ffd' || true
+    git submodule sync -q --recursive || true
+    git submodule update -q --recursive --force \
+        || log "warning: submodule restore incomplete (network or .gitmodules problem?)"
     git submodule foreach -q --recursive \
-        'git reset -q --hard && git clean -q -ffd'
+        'git reset -q --hard && git clean -q -ffd' || true
 }
 
 # Undo everything the iteration did, including untracked files it left behind.
@@ -668,7 +672,8 @@ progress_append() {
     local heading="$1" body="$2" tmp="$LOG_DIR/.progress.tmp"
     [[ -f PROGRESS.md ]] || printf '# Progress\n' > PROGRESS.md
     if grep -qxF -- "$heading" PROGRESS.md; then
-        awk -v h="$heading" -v b="$body" '{ print } $0 == h { print b }' PROGRESS.md > "$tmp" \
+        h="$heading" b="$body" \
+            awk '{ print } $0 == ENVIRON["h"] { print ENVIRON["b"] }' PROGRESS.md > "$tmp" \
             && mv "$tmp" PROGRESS.md
     else
         printf '\n%s\n\n%s\n' "$heading" "$body" >> PROGRESS.md
@@ -703,9 +708,15 @@ run_evaluator() {
     log "evaluator: ${verdict:-unparseable} (\$$(fmt_cost "$eval_cost"); total \$$(fmt_cost "$total_cost"))"
     session_files work
     [[ "$verdict" == PASS ]] && return 0
-    log "evaluator: needs work — continuing"
-    progress_append "## Evaluator findings (iteration $iter)" "$findings"
-    commit_loop_note '[loop] evaluator: needs work'
+    # Still default-fail on an empty verdict, but that means the review
+    # session itself broke — there are no findings worth committing.
+    if [[ -n "$verdict" ]]; then
+        log "evaluator: needs work — continuing"
+        progress_append "## Evaluator findings (iteration $iter)" "$findings"
+        commit_loop_note '[loop] evaluator: needs work'
+    else
+        log "evaluator: no verdict — rejecting the claim, nothing to record"
+    fi
     return 1
 }
 
@@ -714,7 +725,7 @@ run_evaluator() {
 # when enabled, the evaluator. A rejection is recorded in PROGRESS.md so the
 # next session knows why its predecessor's claim did not stick.
 verify_done_claim() {
-    local out="$LOG_DIR/.done-check" label="" cmd=""
+    local out="$LOG_DIR/.done-check" label="" cmd="" ok=true
     if [[ -n "$DONE_CMD" ]]; then
         label=DONE_CMD cmd="$DONE_CMD"
     elif [[ -n "$CHECK_CMD" && "$check_passed" != true ]]; then
@@ -722,16 +733,20 @@ verify_done_claim() {
     fi
     if [[ -n "$cmd" ]]; then
         log "$label: $cmd"
-        if ! bash -c "$cmd" >"$out" 2>&1; then
-            cat "$out" >>"$iter_log" 2>/dev/null || true
+        bash -c "$cmd" >"$out" 2>&1 || ok=false
+        cat "$out" >>"$iter_log" 2>/dev/null || true
+        # Clean on both paths, and before the rejection note: the verifier's
+        # leftovers must not become the next iteration's dirty baseline, and
+        # clean_check_artifacts hard-resets the tree, which would eat an
+        # uncommitted PROGRESS.md edit ($out lives in $LOG_DIR, it survives).
+        clean_check_artifacts
+        if [[ "$ok" != true ]]; then
             log "agent claimed done but $label failed — continuing"
             progress_append '## Verifier failures' \
                 "- iteration $iter: $label failed: $(head -3 "$out" | tr '\n' ' ')"
             commit_loop_note '[loop] verifier rejected completion claim'
             return 1
         fi
-        cat "$out" >>"$iter_log" 2>/dev/null || true
-        clean_check_artifacts
     fi
     [[ "$EVALUATOR" == true ]] || return 0
     run_evaluator
