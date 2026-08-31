@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, "split/**"]
+    branches: [main]
   pull_request:
-    branches: [main, "split/**"]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -14,15 +14,11 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-defaults:
-  run:
-    shell: bash
-
 jobs:
   shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -30,73 +26,35 @@ jobs:
           persist-credentials: false
 
       - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
-        with:
-          scandir: "."
-          format: gcc
-          severity: warning
-          additional_files: ""
-          check_together: "yes"
-
-  hadolint:
-    name: Hadolint (Dockerfile)
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Run Hadolint
-        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5 # v3.3.0
-        with:
-          dockerfile: Dockerfile
-
-  python-tests:
-    name: Python Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-
-      - name: Compile Python sources
-        run: python3 -m compileall -q tests
-
-      - name: Run Python unit tests
-        run: python3 -m unittest discover -s tests -p 'test_*.py'
+        run: shellcheck loop.sh mill tests/*.sh
 
   shell-tests:
     name: Shell Tests
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
-      - name: Run shell test suite
-        run: |
-          set -euo pipefail
-          mapfile -t test_scripts < <(find tests -maxdepth 1 -type f -name 'test_*.sh' | sort)
-          for test_script in "${test_scripts[@]}"; do
-            if [[ "$test_script" == "tests/test_smoke_integration.sh" ]]; then
-              continue
-            fi
-            echo "::group::$test_script"
-            bash "$test_script"
-            echo "::endgroup::"
-          done
+      - name: Run loop smoke tests
+        run: bash tests/test_loop.sh
+
+      - name: Run mill smoke tests
+        run: bash tests/test_mill.sh
+
+      - name: Run Landlock confinement tests
+        run: python3 tests/test_landlock.py
+
+      - name: Compile Python helpers
+        run: python3 -m compileall -q landlock_exec.py reviewer_control.py tests/test_landlock.py
 
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-    needs: [shellcheck, hadolint, python-tests, shell-tests]
+    timeout-minutes: 30
+    needs: [shellcheck, shell-tests]
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -111,6 +69,45 @@ jobs:
         with:
           context: .
           push: false
+          load: true
           tags: agentmill:ci
+          # GID 20 is `dialout` in node:22-slim. Building with it exercises the
+          # Linux path where the requested host GID already has another name.
+          build-args: |
+            AGENT_UID=12345
+            AGENT_GID=20
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Verify packaged reviewer boundary and Linux ownership
+        run: |
+          docker run --rm --init --pids-limit 512 --entrypoint python3 \
+            -e LANDLOCK_EXEC=/usr/local/bin/landlock-exec \
+            -e LANDLOCK_RUN_AS=agentmill-reviewer \
+            -e EXPECTED_AGENT_UID=12345 \
+            -e EXPECTED_AGENT_GID=20 \
+            -v "$GITHUB_WORKSPACE/tests/test_landlock.py:/test_landlock.py:ro" \
+            agentmill:ci /test_landlock.py
+
+          docker run --rm --init --pids-limit 512 --entrypoint bash \
+            -v "$GITHUB_WORKSPACE/tests/test_image_evaluator.sh:/test_image_evaluator.sh:ro" \
+            agentmill:ci /test_image_evaluator.sh
+
+          docker run --rm --init --pids-limit 512 --entrypoint bash agentmill:ci -ceu '
+            for cli in claude codex; do
+              scratch="$(mktemp -d /tmp/agentmill-cli-smoke.XXXXXX)"
+              mkdir -p "$scratch"/{.claude,.codex,cache,config,data,state}
+              chmod -R a+rwX "$scratch"
+              cli_path="$(command -v "$cli")"
+              /usr/bin/timeout --kill-after=1 10 \
+                sudo -n -u agentmill-reviewer /usr/bin/env -i \
+                HOME="$scratch" TMPDIR="$scratch" TMP="$scratch" TEMP="$scratch" \
+                PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
+                XDG_CACHE_HOME="$scratch/cache" XDG_CONFIG_HOME="$scratch/config" \
+                XDG_DATA_HOME="$scratch/data" XDG_STATE_HOME="$scratch/state" \
+                CODEX_HOME="$scratch/.codex" CLAUDE_CONFIG_DIR="$scratch/.claude" \
+                /usr/bin/python3 -I /usr/local/bin/landlock-exec \
+                --write-root "$scratch" --allow-device /dev/null --max-processes 448 -- \
+                "$cli_path" --version
+            done
+          '
