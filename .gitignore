@@ -4,6 +4,8 @@
 logs/
 .claude/
 .DS_Store
+__pycache__/
+*.py[cod]
 
 # Secrets & credentials
 *.pem

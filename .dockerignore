@@ -1,2 +1,4 @@
 *
 !loop.sh
+!landlock_exec.py
+!reviewer_control.py

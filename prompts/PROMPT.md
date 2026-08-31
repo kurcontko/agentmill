@@ -99,8 +99,10 @@ run a fresh-context reviewer over the whole diff — before honoring it. A
 rejected claim is written back into `PROGRESS.md` and you are respawned to fix
 what it names. So do not claim completion you cannot back with verifier output.
 
-If the run is plain-text (no schema in force), end the final message with the
-literal string `TASK_COMPLETE` instead; it is the fallback completion signal.
+If the run is plain-text (no schema in force), the `<completion-promise>` block
+in the session's loop context contains the configured fallback completion
+signal as a JSON string. Decode that string and, when it is non-empty, end the
+final message with its exact value.
 
 ---
 

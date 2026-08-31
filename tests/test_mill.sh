@@ -12,7 +12,26 @@ make_env() {  # sandbox holding its own copy of mill, so MILL_DIR is disposable
     cat > "$TMP/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DOCKER_LOG"
-printf 'ANTHROPIC_API_KEY=%s\n' "${ANTHROPIC_API_KEY:-}" >> "$DOCKER_ENV_LOG"
+for key in ANTHROPIC_API_KEY GIT_EMAIL MODEL SETUP_CMD CHECK_CMD GITHUB_TOKEN \
+    CUSTOM_FLAG CUSTOM_CRLF MAX_TURNS MIN_TURNS MAX_BUDGET_USD \
+    MAX_TOTAL_BUDGET_USD DONE_CMD EVALUATOR CLAUDE_BARE METRIC_CMD \
+    METRIC_DIRECTION HTTP_PROXY HTTPS_PROXY NO_PROXY NODE_EXTRA_CA_CERTS \
+    http_proxy https_proxy no_proxy DOCKER_HOST BASH_ENV LD_PRELOAD; do
+    printf '%s=%s\n' "$key" "${!key-}" >> "$DOCKER_ENV_LOG"
+done
+previous=
+for arg in "$@"; do
+    if [[ "$previous" == --env-file ]]; then
+        printf 'ENV_FILE=%s\n' "$arg" >> "$DOCKER_FILE_ENV_LOG"
+        permissions="$(LC_ALL=C ls -l "$arg")"
+        printf 'ENV_MODE=%s\n' "${permissions%% *}" >> "$DOCKER_FILE_ENV_LOG"
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            printf 'ENV:%s\n' "$line" >> "$DOCKER_FILE_ENV_LOG"
+        done < "$arg"
+    fi
+    previous="$arg"
+done
+[[ "${DOCKER_FAIL_RUN:-}" == true && "${1:-}" == run ]] && exit 7
 exit 0
 STUB
     chmod +x "$TMP/bin/docker"
@@ -25,30 +44,88 @@ STUB
     export AGENTMILL_CONFIG="$TMP/config"   # the user-level config file
     export DOCKER_LOG="$TMP/docker.log"
     export DOCKER_ENV_LOG="$TMP/docker-env.log"
+    export DOCKER_FILE_ENV_LOG="$TMP/docker-file-env.log"
     : > "$DOCKER_LOG"
     : > "$DOCKER_ENV_LOG"
+    : > "$DOCKER_FILE_ENV_LOG"
 }
 
 mill() { PATH="$TMP/bin:$PATH" bash "$TMP/mill" "$@"; }
 mill_in() { local d="$1"; shift; (cd "$d" && mill "$@"); }
 run_line() { grep '^run --rm --name' "$DOCKER_LOG" | tail -1; }
+assert_bare_key() {
+    local key="$1"
+    run_line | grep -q -- "-e $key " || { run_line; fail "$key was not forwarded by name"; }
+    if run_line | grep -q -- "-e $key="; then
+        run_line
+        fail "$key was forwarded as KEY=value in docker argv"
+    fi
+}
+assert_client_env_value() {
+    grep -Fqx -- "$1=$2" "$DOCKER_ENV_LOG" || {
+        grep -F -- "$1=" "$DOCKER_ENV_LOG" | tail -3
+        fail "$1 did not reach the Docker client with the expected caller value"
+    }
+}
+assert_file_env_value() {
+    grep -Fqx -- "ENV:$1=$2" "$DOCKER_FILE_ENV_LOG" || {
+        grep -F -- "ENV:$1=" "$DOCKER_FILE_ENV_LOG" | tail -3
+        fail "$1 did not reach the private Docker env file with the expected value"
+    }
+}
+assert_file_key() {
+    grep -Fq -- "ENV:$1=" "$DOCKER_FILE_ENV_LOG" \
+        || fail "$1 was not represented in the private Docker env file"
+    if run_line | grep -q -- "-e $1"; then
+        run_line
+        fail "file-provided $1 entered docker argv instead of --env-file"
+    fi
+}
+assert_env_file_private_and_cleaned() {
+    local file mode
+    file="$(grep '^ENV_FILE=' "$DOCKER_FILE_ENV_LOG" | tail -1 | cut -d= -f2-)"
+    [[ -n "$file" ]] || fail "docker run received no private env file"
+    mode="$(grep '^ENV_MODE=' "$DOCKER_FILE_ENV_LOG" | tail -1)"
+    [[ "$mode" == 'ENV_MODE=-rw-------' ]] \
+        || { cat "$DOCKER_FILE_ENV_LOG"; fail "Docker env file was not mode 0600"; }
+    [[ ! -e "$file" ]] || fail "Docker env file was not cleaned up: $file"
+}
+assert_not_forwarded() {
+    if run_line | grep -q -- "-e $1"; then
+        run_line
+        fail "host-managed $1 was forwarded to the container"
+    fi
+    if grep -Fq -- "ENV:$1=" "$DOCKER_FILE_ENV_LOG"; then
+        cat "$DOCKER_FILE_ENV_LOG"
+        fail "host-managed $1 was written to the Docker env file"
+    fi
+}
 
 # --- 1: config file is read whole (no trailing newline) and the caller's env wins ---
 make_env
 printf 'ANTHROPIC_API_KEY=fromfile\nGIT_EMAIL=fromfile' > "$TMP/config"   # deliberately unterminated
 mill -C "$TMP/a/api" run >/dev/null || fail "mill run exited nonzero"
-run_line | grep -q -- '-e GIT_EMAIL=fromfile' || fail "unterminated last the config file line was dropped"
-run_line | grep -q -- '-e ANTHROPIC_API_KEY' || fail "API key name was not forwarded"
+assert_file_key GIT_EMAIL
+assert_file_key ANTHROPIC_API_KEY
 run_line | grep -q -- '--label agentmill.stop-timeout=60' || { run_line; fail "resolved stop timeout not recorded as a label"; }
-run_line | grep -q -- '-e ANTHROPIC_API_KEY=' && fail "API key value leaked into docker argv"
-grep -q '^ANTHROPIC_API_KEY=fromfile$' "$DOCKER_ENV_LOG" || fail "the config file API key was not exported to docker"
+assert_file_env_value GIT_EMAIL fromfile
+assert_file_env_value ANTHROPIC_API_KEY fromfile
+assert_env_file_private_and_cleaned
 : > "$DOCKER_LOG"
 : > "$DOCKER_ENV_LOG"
+: > "$DOCKER_FILE_ENV_LOG"
 GIT_EMAIL=fromcaller ANTHROPIC_API_KEY=fromcaller mill -C "$TMP/a/api" run >/dev/null \
     || fail "mill exited nonzero when a the config file var was already set in the environment"
-run_line | grep -q -- '-e GIT_EMAIL=fromcaller' || fail "caller env did not override the config file"
-run_line | grep -q -- '-e ANTHROPIC_API_KEY=' && fail "caller API key leaked into docker argv"
-grep -q '^ANTHROPIC_API_KEY=fromcaller$' "$DOCKER_ENV_LOG" || fail "caller-only value not forwarded to docker"
+assert_bare_key GIT_EMAIL
+assert_bare_key ANTHROPIC_API_KEY
+assert_client_env_value GIT_EMAIL fromcaller
+assert_client_env_value ANTHROPIC_API_KEY fromcaller
+if grep -Eq '^ENV:(GIT_EMAIL|ANTHROPIC_API_KEY)=' "$DOCKER_FILE_ENV_LOG"; then
+    cat "$DOCKER_FILE_ENV_LOG"
+    fail "caller override was also copied from the lower-precedence config file"
+fi
+grep -q '^ENV_FILE=' "$DOCKER_FILE_ENV_LOG" \
+    && { cat "$DOCKER_FILE_ENV_LOG"; fail "an empty private env file was created"; }
 rm -rf "$TMP"
 echo "PASS: config file parsing and credential-safe caller-env forwarding"
 
@@ -106,36 +183,193 @@ common="${common%/worktrees/*}"
 run_line | grep -q -- "-v $common:$common" || { run_line; fail "worktree git dir not mounted"; }
 # ...and every recorded worktree .git file, so `git worktree prune` inside sees them.
 wt_git="$(head -1 "$common"/worktrees/*/gitdir)"
-run_line | grep -q -- "-v $wt_git:$wt_git:ro" || { run_line; fail "worktree .git file not mounted"; }
+run_line | grep -Eq -- "-v [^ ]+:$wt_git:ro" || { run_line; fail "worktree .git file not mounted"; }
+run_line | grep -Fq -- "-v $wt_git:$wt_git:ro" \
+    && { run_line; fail "mutable worktree .git path was used as its own bind source"; }
 canonical_wt="$(cd -P "$TMP/a/api-b" && pwd)"
 run_line | grep -q -- "-v $canonical_wt:$canonical_wt" || { run_line; fail "worktree relocated in container"; }
 run_line | grep -q -- '-v [^ ]*:/workspace/repo' && { run_line; fail "worktree was relocated to /workspace/repo"; }
 grep -q '^gitdir: \.\.' "$TMP/a/api-b/vendor/sub/.git" \
     || fail "fixture did not create the relative submodule gitdir under review"
+# Starting from the main checkout must protect linked siblings too. Its .git is
+# a directory, which used to make worktree_mount return before adding these.
+: > "$DOCKER_LOG"
+mill -C "$TMP/a/api" run >/dev/null
+sibling_git="$(cd -P "$TMP/a/api-b" && pwd)/.git"
+run_line | grep -Fq -- "-v $common:$common" \
+    || { run_line; fail "main checkout did not pin its common git directory"; }
+run_line | grep -Eq -- "-v [^ ]+:$sibling_git:ro" \
+    || { run_line; fail "main checkout did not mount its sibling worktree's .git file"; }
+run_line | grep -Fq -- "-v $sibling_git:$sibling_git:ro" \
+    && { run_line; fail "main checkout mounted a worker-mutable gitfile source"; }
+
+# Common git metadata is writable in the container. A forged sibling record
+# must not turn an arbitrary existing host file into a bind mount on the next
+# run; only a `.git` file that points back to this exact entry is accepted.
+mkdir -p "$TMP/victim" "$common/worktrees/poison"
+printf 'host-only secret\n' > "$TMP/victim/.git"
+printf '%s\n' "$TMP/victim/.git" > "$common/worktrees/poison/gitdir"
+: > "$DOCKER_LOG"
+mill -C "$TMP/a/api" run >/dev/null 2>"$TMP/poison.err"
+grep -q 'ignoring malformed worktree metadata' "$TMP/poison.err" \
+    || { cat "$TMP/poison.err"; fail "poisoned worktree record was not rejected"; }
+if run_line | grep -Fq -- "$TMP/victim/.git"; then
+    run_line
+    fail "poisoned worktree metadata exposed an arbitrary host file"
+fi
 rm -rf "$TMP"
-echo "PASS: linked worktrees preserve initialized submodule paths"
+echo "PASS: main and linked worktrees preserve sibling and submodule git paths"
 
 # --- 6: config file values: inline comments, quotes, whitespace; host-only keys stay home ---
 make_env
-cat > "$TMP/config" <<'ENV'
+export BASH_ENV_MARKER="$TMP/bash-env-sourced"
+# shellcheck disable=SC2016 # literal payload: it must expand only if wrongly sourced
+printf '%s\n' 'printf "sourced\n" > "$BASH_ENV_MARKER"' > "$TMP/bash-env-poison"
+cat > "$TMP/config" <<ENV
 ANTHROPIC_API_KEY=sk-test   
 MODEL=opus   # Claude model
 SETUP_CMD="uv sync"
 CHECK_CMD='pytest -q # not a comment'
+GITHUB_TOKEN=gh-secret
+DOCKER_HOST=tcp://must-not-control-host.example:2375
+BASH_ENV=$TMP/bash-env-poison
+LD_PRELOAD=/tmp/agentmill-must-not-load.so
+TAR_OPTIONS=--checkpoint=1
 PATH=/nowhere
 AGENTMILL_IMAGE=custom-image
+LOG_DIR=/tmp/poison-log
+PROMPT_FILE=/tmp/poison-prompt
+EVALUATOR_FILE=/tmp/poison-evaluator
+MISSION_FILE=/tmp/poison-mission
 ENV
-mill -C "$TMP/a/api" run >/dev/null || fail "mill run exited nonzero"
-run_line | grep -q -- '-e ANTHROPIC_API_KEY -e' || { run_line; fail "API key name missing"; }
-run_line | grep -q -- 'sk-test' && { run_line; fail "API key value exposed in docker argv"; }
-grep -q '^ANTHROPIC_API_KEY=sk-test$' "$DOCKER_ENV_LOG" || fail "trailing whitespace kept in API key"
-run_line | grep -q -- '-e MODEL=opus -e' || { run_line; fail "inline comment kept"; }
-run_line | grep -q -- '-e SETUP_CMD=uv sync -e' || { run_line; fail "double quotes kept"; }
-run_line | grep -q -- '-e CHECK_CMD=pytest -q # not a comment -e REPO_DIR=' || { run_line; fail "single quotes mishandled"; }
-run_line | grep -q -- '-e PATH=' && fail "PATH from the config file forwarded to the container"
+(
+    unset DOCKER_HOST BASH_ENV LD_PRELOAD
+    mill -C "$TMP/a/api" run >/dev/null
+) || fail "mill run exited nonzero"
+for key in ANTHROPIC_API_KEY MODEL SETUP_CMD CHECK_CMD GITHUB_TOKEN DOCKER_HOST; do
+    assert_file_key "$key"
+done
+assert_file_env_value ANTHROPIC_API_KEY sk-test
+assert_file_env_value MODEL opus
+assert_file_env_value SETUP_CMD 'uv sync'
+assert_file_env_value CHECK_CMD 'pytest -q # not a comment'
+assert_file_env_value GITHUB_TOKEN gh-secret
+assert_file_env_value DOCKER_HOST tcp://must-not-control-host.example:2375
+for key in DOCKER_HOST BASH_ENV LD_PRELOAD; do
+    grep -Fqx -- "$key=" "$DOCKER_ENV_LOG" || {
+        grep -F -- "$key=" "$DOCKER_ENV_LOG" | tail -3
+        fail "config-file $key contaminated the host Docker client environment"
+    }
+done
+assert_not_forwarded BASH_ENV
+assert_not_forwarded LD_PRELOAD
+assert_not_forwarded TAR_OPTIONS
+[[ ! -e "$BASH_ENV_MARKER" ]] || fail "config-file BASH_ENV was sourced by the host Docker stub"
+for secret in sk-test gh-secret 'uv sync' 'pytest -q # not a comment' \
+    must-not-control-host.example bash-env-poison agentmill-must-not-load.so; do
+    if run_line | grep -Fq -- "$secret"; then
+        run_line
+        fail "config-file value exposed in docker argv: $secret"
+    fi
+done
+for key in PATH LOG_DIR PROMPT_FILE EVALUATOR_FILE MISSION_FILE; do
+    assert_not_forwarded "$key"
+done
+assert_env_file_private_and_cleaned
 run_line | grep -q -- ' custom-image$' || { run_line; fail "AGENTMILL_IMAGE from the config file ignored"; }
+: > "$DOCKER_LOG"
+: > "$DOCKER_ENV_LOG"
+: > "$DOCKER_FILE_ENV_LOG"
+GITHUB_TOKEN=trusted-caller-override mill -C "$TMP/a/api" run >/dev/null \
+    || fail "trusted user-config key did not accept a caller override"
+assert_bare_key GITHUB_TOKEN
+assert_client_env_value GITHUB_TOKEN trusted-caller-override
+grep -Fq 'ENV:GITHUB_TOKEN=' "$DOCKER_FILE_ENV_LOG" \
+    && { cat "$DOCKER_FILE_ENV_LOG"; fail "overridden user-config secret remained in env file"; }
+unset BASH_ENV_MARKER
 rm -rf "$TMP"
-echo "PASS: config file quoting, comments, and host-only keys"
+echo "PASS: config values use a private env file without affecting the host Docker client"
+
+# --- 6b: proxy and custom-CA settings are inherited in both common casings ---
+make_env
+HTTP_PROXY=http://upper-http.example HTTPS_PROXY=http://upper-https.example \
+NO_PROXY=localhost,127.0.0.1 NODE_EXTRA_CA_CERTS=/tmp/agentmill-ca.pem \
+http_proxy=http://lower-http.example https_proxy=http://lower-https.example \
+no_proxy=internal.example mill -C "$TMP/a/api" run >/dev/null \
+    || fail "mill run with proxy settings exited nonzero"
+for key in HTTP_PROXY HTTPS_PROXY NO_PROXY NODE_EXTRA_CA_CERTS http_proxy https_proxy no_proxy; do
+    assert_bare_key "$key"
+done
+assert_client_env_value HTTP_PROXY http://upper-http.example
+assert_client_env_value HTTPS_PROXY http://upper-https.example
+assert_client_env_value NO_PROXY localhost,127.0.0.1
+assert_client_env_value NODE_EXTRA_CA_CERTS /tmp/agentmill-ca.pem
+assert_client_env_value http_proxy http://lower-http.example
+assert_client_env_value https_proxy http://lower-https.example
+assert_client_env_value no_proxy internal.example
+for value in upper-http.example upper-https.example agentmill-ca.pem lower-http.example lower-https.example internal.example; do
+    if run_line | grep -Fq -- "$value"; then
+        run_line
+        fail "proxy/TLS value exposed in docker argv: $value"
+    fi
+done
+rm -rf "$TMP"
+echo "PASS: proxy and custom-CA settings reach the container without argv exposure"
+
+# --- 6c: private env files are removed after detach, shell, and Docker failure ---
+make_env
+printf 'GITHUB_TOKEN=cleanup-secret\n' > "$TMP/config"
+mill -C "$TMP/a/api" run -d >/dev/null || fail "detached mill run exited nonzero"
+assert_file_env_value GITHUB_TOKEN cleanup-secret
+assert_env_file_private_and_cleaned
+
+: > "$DOCKER_LOG"
+: > "$DOCKER_FILE_ENV_LOG"
+mill -C "$TMP/a/api" shell >/dev/null || fail "mill shell exited nonzero"
+grep -q '^run --rm -it --entrypoint bash ' "$DOCKER_LOG" \
+    || { cat "$DOCKER_LOG"; fail "interactive shell did not reach docker run"; }
+assert_file_env_value GITHUB_TOKEN cleanup-secret
+assert_env_file_private_and_cleaned
+
+: > "$DOCKER_LOG"
+: > "$DOCKER_FILE_ENV_LOG"
+if DOCKER_FAIL_RUN=true mill -C "$TMP/a/api" run >/dev/null 2>"$TMP/err"; then
+    fail "mill hid the Docker run failure"
+fi
+assert_file_env_value GITHUB_TOKEN cleanup-secret
+assert_env_file_private_and_cleaned
+
+# A foreground interrupt must unlink the secret file immediately, even while
+# the Docker client is still alive and ignoring TERM.
+cat > "$TMP/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+if [[ "${1:-}" != run ]]; then exit 0; fi
+previous=
+for arg in "$@"; do
+    if [[ "$previous" == --env-file ]]; then printf '%s\n' "$arg" > "$SIGNAL_ENV_PATH"; fi
+    previous="$arg"
+done
+printf '%s\n' "$$" > "$SIGNAL_DOCKER_PID"
+trap '' HUP INT TERM
+while :; do sleep 30; done
+STUB
+chmod +x "$TMP/bin/docker"
+set -m
+SIGNAL_ENV_PATH="$TMP/signal-env-path" SIGNAL_DOCKER_PID="$TMP/signal-docker-pid" \
+    PATH="$TMP/bin:$PATH" bash "$TMP/mill" -C "$TMP/a/api" run >/dev/null 2>&1 &
+mill_pid=$!
+for _ in $(seq 1 100); do [[ -s "$TMP/signal-env-path" ]] && break; sleep 0.05; done
+[[ -s "$TMP/signal-env-path" ]] || fail "blocking Docker client never received the env file"
+signal_env_file="$(cat "$TMP/signal-env-path")"
+[[ -f "$signal_env_file" ]] || fail "private env file disappeared before the signal test"
+kill -TERM -- "-$mill_pid" 2>/dev/null || kill -TERM "$mill_pid" 2>/dev/null || true
+for _ in $(seq 1 100); do [[ ! -e "$signal_env_file" ]] && break; sleep 0.05; done
+[[ ! -e "$signal_env_file" ]] || fail "signal left the private Docker env file behind"
+kill -KILL -- "-$mill_pid" 2>/dev/null || true
+wait "$mill_pid" 2>/dev/null || true
+set +m
+rm -rf "$TMP"
+echo "PASS: private Docker env files are always cleaned up"
 
 # --- 7: mill stop sends TERM and waits before removing containers ---
 make_env
@@ -164,6 +398,14 @@ echo "PASS: mill stop is graceful and per-checkout with a repo, global without"
 
 # --- 8: DinD is polled to readiness, with a bounded failure path ---
 make_env
+printf 'EVALUATOR=true\n' > "$TMP/config"
+if mill -C "$TMP/a/api" run --dind >"$TMP/out" 2>"$TMP/err"; then
+    fail "mill combined the evaluator with privileged DinD"
+fi
+grep -q 'EVALUATOR=true cannot be combined with --dind' "$TMP/err" \
+    || { cat "$TMP/err"; fail "missing evaluator/DinD isolation error"; }
+[[ ! -s "$DOCKER_LOG" ]] || { cat "$DOCKER_LOG"; fail "evaluator/DinD rejection reached Docker"; }
+: > "$TMP/config"
 cat > "$TMP/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DOCKER_LOG"
@@ -186,11 +428,16 @@ exit 0
 STUB
 chmod +x "$TMP/bin/docker" "$TMP/bin/sleep"
 export DIND_COUNT="$TMP/dind-count"
+printf 'DOCKER_HOST=tcp://lower-precedence.example:2375\n' > "$TMP/config"
 mill -C "$TMP/a/api" run --dind >"$TMP/out" || { cat "$TMP/out"; fail "ready dind was rejected"; }
 [[ "$(cat "$DIND_COUNT")" -eq 3 ]] || fail "mill did not poll dind readiness"
 ready_line="$(grep -n '^exec agentmill-dind docker -H tcp://127.0.0.1:2375 info$' "$DOCKER_LOG" | tail -1 | cut -d: -f1)"
 agent_line="$(grep -n '^run --rm --name agentmill-api-' "$DOCKER_LOG" | cut -d: -f1)"
 [[ "$ready_line" -lt "$agent_line" ]] || fail "agent container started before dind was ready"
+case "$(grep '^run --rm --name agentmill-api-' "$DOCKER_LOG")" in
+    *--env-file*'-e DOCKER_HOST=tcp://agentmill-dind:2375'*) ;;
+    *) cat "$DOCKER_LOG"; fail "DinD DOCKER_HOST did not follow the lower-precedence env file" ;;
+esac
 
 : > "$DOCKER_LOG"
 cat > "$TMP/bin/docker" <<'STUB'
@@ -237,23 +484,84 @@ cat > "$TMP/a/api/MILL.md" <<'MD'
 check_cmd: "pytest -q"   # the ratchet
 model: sonnet
 custom_flag: yes
+host_secret_probe: repository-placeholder
 empty_one:
+log_dir: /tmp/poison-log
+prompt_file: /tmp/poison-prompt
+evaluator_file: /tmp/poison-evaluator
+mission_file: /tmp/poison-mission
 ---
 # Mission
 MD
-mill -C "$TMP/a/api" run >/dev/null || fail "mill run with frontmatter failed"
-run_line | grep -q -- '-e CHECK_CMD=pytest -q ' || { run_line; fail "frontmatter check_cmd not forwarded"; }
-run_line | grep -q -- '-e MODEL=sonnet ' || { run_line; fail "MILL.md did not override the config file"; }
-run_line | grep -q -- '-e CUSTOM_FLAG=yes ' || { run_line; fail "custom frontmatter key not forwarded"; }
+HOST_SECRET_PROBE=host-only-value mill -C "$TMP/a/api" run >/dev/null \
+    || fail "mill run with frontmatter failed"
+for key in CHECK_CMD MODEL CUSTOM_FLAG HOST_SECRET_PROBE; do assert_file_key "$key"; done
+assert_file_env_value CHECK_CMD 'pytest -q'
+assert_file_env_value MODEL sonnet
+assert_file_env_value CUSTOM_FLAG yes
+assert_file_env_value HOST_SECRET_PROBE repository-placeholder
+! grep -Fq 'host-only-value' "$DOCKER_FILE_ENV_LOG" \
+    || { cat "$DOCKER_FILE_ENV_LOG"; fail "frontmatter selected an unrelated host secret"; }
 run_line | grep -q -- '-e EMPTY_ONE' && { run_line; fail "empty frontmatter value forwarded"; }
+for key in LOG_DIR PROMPT_FILE EVALUATOR_FILE MISSION_FILE; do assert_not_forwarded "$key"; done
 : > "$DOCKER_LOG"
+: > "$DOCKER_ENV_LOG"
+: > "$DOCKER_FILE_ENV_LOG"
+mill -C "$TMP/a/api" run --model from-flag >/dev/null
+assert_file_env_value MODEL sonnet
+env_path="$(grep '^ENV_FILE=' "$DOCKER_FILE_ENV_LOG" | tail -1 | cut -d= -f2-)"
+case "$(run_line)" in
+    *"--env-file $env_path"*"-e MODEL=from-flag"*) ;;
+    *) run_line; fail "the private env file was ordered after a higher-precedence flag" ;;
+esac
+
+: > "$DOCKER_LOG"
+: > "$DOCKER_ENV_LOG"
+: > "$DOCKER_FILE_ENV_LOG"
 MODEL=from-env mill -C "$TMP/a/api" run >/dev/null
-run_line | grep -q -- '-e MODEL=from-env ' || { run_line; fail "environment did not beat MILL.md"; }
+assert_bare_key MODEL
+assert_client_env_value MODEL from-env
+grep -Fq 'ENV:MODEL=' "$DOCKER_FILE_ENV_LOG" \
+    && { cat "$DOCKER_FILE_ENV_LOG"; fail "config/frontmatter MODEL survived a caller override"; }
 rm "$TMP/b/api/MILL.md"
 if mill -C "$TMP/b/api" run >/dev/null 2>"$TMP/err"; then fail "mill ran without MILL.md"; fi
 grep -q 'no MILL.md' "$TMP/err" || { cat "$TMP/err"; fail "expected a missing-MILL.md error"; }
 rm -rf "$TMP"
 echo "PASS: MILL.md frontmatter and precedence"
+
+# --- 10b: CRLF fences parse, while an unclosed fence fails before forwarding ---
+make_env
+printf '%s\r\n' \
+    '---' \
+    'check_cmd: "pytest -q"' \
+    'custom_crlf: works' \
+    '---' \
+    '# Mission' \
+    'Body: this is mission text' > "$TMP/a/api/MILL.md"
+mill -C "$TMP/a/api" run >/dev/null || fail "CRLF frontmatter was rejected"
+assert_file_key CHECK_CMD
+assert_file_key CUSTOM_CRLF
+assert_file_env_value CHECK_CMD 'pytest -q'
+assert_file_env_value CUSTOM_CRLF works
+
+cat > "$TMP/a/api/MILL.md" <<'MD'
+---
+model: staged-only
+# Mission
+body_setting: must-never-be-config
+MD
+: > "$DOCKER_LOG"
+if mill -C "$TMP/a/api" run >/dev/null 2>"$TMP/err"; then
+    fail "MILL.md with unclosed frontmatter was accepted"
+fi
+grep -q 'unclosed frontmatter' "$TMP/err" \
+    || { cat "$TMP/err"; fail "missing unclosed-frontmatter diagnostic"; }
+if grep -q '^run --rm --name' "$DOCKER_LOG"; then
+    cat "$DOCKER_LOG"
+    fail "docker started after unclosed frontmatter"
+fi
+rm -rf "$TMP"
+echo "PASS: CRLF and unclosed MILL.md frontmatter are handled safely"
 
 # --- 11: mill init writes MILL.md + config once; logs are per checkout; symlinked mill finds MILL_DIR ---
 make_env
@@ -292,7 +600,9 @@ MAX_TOTAL_BUDGET_USD=20
 ENV
 mill -C "$TMP/a/api" run >/dev/null || fail "mill run exited nonzero"
 for kv in 'MAX_TURNS=12' 'MIN_TURNS=3' 'MAX_BUDGET_USD=1.50' 'MAX_TOTAL_BUDGET_USD=20'; do
-    run_line | grep -q -- "-e $kv " || { run_line; fail "$kv not forwarded to the container"; }
+    key="${kv%%=*}" value="${kv#*=}"
+    assert_file_key "$key"
+    assert_file_env_value "$key" "$value"
 done
 rm -rf "$TMP"
 echo "PASS: budget and turn caps reach the container"
@@ -306,7 +616,9 @@ CLAUDE_BARE=true
 ENV
 mill -C "$TMP/a/api" run >/dev/null || fail "mill run exited nonzero"
 for kv in 'DONE_CMD=pytest -q' 'EVALUATOR=true' 'CLAUDE_BARE=true'; do
-    run_line | grep -q -- "-e $kv " || { run_line; fail "$kv not forwarded to the container"; }
+    key="${kv%%=*}" value="${kv#*=}"
+    assert_file_key "$key"
+    assert_file_env_value "$key" "$value"
 done
 rm -rf "$TMP"
 echo "PASS: DONE_CMD, EVALUATOR, and CLAUDE_BARE reach the container"
@@ -381,7 +693,9 @@ METRIC_DIRECTION=max
 ENV
 mill -C "$TMP/a/api" run >/dev/null || fail "mill run exited nonzero"
 for kv in 'METRIC_CMD=python3 bench.py' 'METRIC_DIRECTION=max'; do
-    run_line | grep -q -- "-e $kv " || { run_line; fail "$kv not forwarded to the container"; }
+    key="${kv%%=*}" value="${kv#*=}"
+    assert_file_key "$key"
+    assert_file_env_value "$key" "$value"
 done
 rm -rf "$TMP"
 echo "PASS: METRIC_CMD and METRIC_DIRECTION reach the container"

@@ -22,8 +22,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && userdel -r node \
     && (getent group "${AGENT_GID}" >/dev/null || groupadd -g "${AGENT_GID}" agent) \
     && useradd -m -u "${AGENT_UID}" -g "${AGENT_GID}" -s /bin/bash agent \
+    && groupadd -r agentmill-reviewer \
+    && useradd -m -r -g agentmill-reviewer -s /bin/bash agentmill-reviewer \
     && echo 'agent ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt' \
-        > /etc/sudoers.d/agent
+        > /etc/sudoers.d/agent \
+    && echo 'agent ALL=(agentmill-reviewer) NOPASSWD: SETENV: ALL' \
+        >> /etc/sudoers.d/agent \
+    && echo 'agent ALL=(root) NOPASSWD: /usr/local/bin/agentmill-reviewer-control *' \
+        >> /etc/sudoers.d/agent
 
 # The docker CLI, so --dind's DOCKER_HOST is actually usable by the agent.
 RUN curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-${DOCKER_CLI_VERSION}.tgz" \
@@ -31,9 +37,15 @@ RUN curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/dock
     && docker --version
 
 WORKDIR /workspace
-RUN chown agent:agent /workspace
+# AGENT_GID may already belong to a differently named base-image group. Resolve
+# the user's primary group instead of assuming the fallback `agent` group was
+# created above.
+RUN chown "agent:$(id -gn agent)" /workspace
 COPY loop.sh /loop.sh
-RUN chmod 755 /loop.sh
+COPY landlock_exec.py /usr/local/bin/landlock-exec
+COPY reviewer_control.py /usr/local/bin/agentmill-reviewer-control
+RUN chmod 755 /loop.sh /usr/local/bin/landlock-exec \
+        /usr/local/bin/agentmill-reviewer-control
 
 USER agent
 # Skip onboarding; bypassPermissions is intentional — the container is the boundary.

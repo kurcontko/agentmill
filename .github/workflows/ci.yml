@@ -44,6 +44,12 @@ jobs:
       - name: Run mill smoke tests
         run: bash tests/test_mill.sh
 
+      - name: Run Landlock confinement tests
+        run: python3 tests/test_landlock.py
+
+      - name: Compile Python helpers
+        run: python3 -m compileall -q landlock_exec.py reviewer_control.py tests/test_landlock.py
+
   docker-build:
     name: Docker Build
     runs-on: ubuntu-latest
@@ -63,6 +69,45 @@ jobs:
         with:
           context: .
           push: false
+          load: true
           tags: agentmill:ci
+          # GID 20 is `dialout` in node:22-slim. Building with it exercises the
+          # Linux path where the requested host GID already has another name.
+          build-args: |
+            AGENT_UID=12345
+            AGENT_GID=20
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Verify packaged reviewer boundary and Linux ownership
+        run: |
+          docker run --rm --init --pids-limit 512 --entrypoint python3 \
+            -e LANDLOCK_EXEC=/usr/local/bin/landlock-exec \
+            -e LANDLOCK_RUN_AS=agentmill-reviewer \
+            -e EXPECTED_AGENT_UID=12345 \
+            -e EXPECTED_AGENT_GID=20 \
+            -v "$GITHUB_WORKSPACE/tests/test_landlock.py:/test_landlock.py:ro" \
+            agentmill:ci /test_landlock.py
+
+          docker run --rm --init --pids-limit 512 --entrypoint bash \
+            -v "$GITHUB_WORKSPACE/tests/test_image_evaluator.sh:/test_image_evaluator.sh:ro" \
+            agentmill:ci /test_image_evaluator.sh
+
+          docker run --rm --init --pids-limit 512 --entrypoint bash agentmill:ci -ceu '
+            for cli in claude codex; do
+              scratch="$(mktemp -d /tmp/agentmill-cli-smoke.XXXXXX)"
+              mkdir -p "$scratch"/{.claude,.codex,cache,config,data,state}
+              chmod -R a+rwX "$scratch"
+              cli_path="$(command -v "$cli")"
+              /usr/bin/timeout --kill-after=1 10 \
+                sudo -n -u agentmill-reviewer /usr/bin/env -i \
+                HOME="$scratch" TMPDIR="$scratch" TMP="$scratch" TEMP="$scratch" \
+                PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
+                XDG_CACHE_HOME="$scratch/cache" XDG_CONFIG_HOME="$scratch/config" \
+                XDG_DATA_HOME="$scratch/data" XDG_STATE_HOME="$scratch/state" \
+                CODEX_HOME="$scratch/.codex" CLAUDE_CONFIG_DIR="$scratch/.claude" \
+                /usr/bin/python3 -I /usr/local/bin/landlock-exec \
+                --write-root "$scratch" --allow-device /dev/null --max-processes 448 -- \
+                "$cli_path" --version
+            done
+          '

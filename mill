@@ -16,6 +16,15 @@ unset self link
 CONFIG_FILE="${AGENTMILL_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/agentmill/env}"
 NET="agentmill"
 DIND="agentmill-dind"
+GITFILE_SNAPSHOT_DIR=""
+GITFILE_SNAPSHOT_COUNT=0
+
+cleanup_gitfile_snapshots() {
+    [[ -n "$GITFILE_SNAPSHOT_DIR" ]] || return 0
+    rm -rf -- "$GITFILE_SNAPSHOT_DIR"
+    GITFILE_SNAPSHOT_DIR=""
+}
+trap cleanup_gitfile_snapshots EXIT
 
 usage() {
     cat <<EOF
@@ -40,7 +49,7 @@ Usage:
 The checkout is the git repository containing the current directory (or DIR).
 Its MILL.md holds the mission and per-repo settings; credentials and defaults
 live in $CONFIG_FILE (see .env.example).
-Precedence: flags > environment > MILL.md > config file.
+Precedence for supported/user-config keys: flags > environment > MILL.md > config file.
 Parallel agents: one worktree per agent, run mill once per worktree —
   git worktree add ../repo-b agent-b && mill -C ../repo-b run -d
 EOF
@@ -74,38 +83,151 @@ require_mission() {
 
 path_hash() { printf '%s' "$1" | (shasum 2>/dev/null || cksum) | tr -cd 'a-f0-9' | cut -c1-6; }
 
+# Validate one <common>/worktrees/<id>/gitdir record before treating its
+# contents as a Docker bind source. That metadata is writable by the agent;
+# without the reverse `.git -> this exact entry` check it could name an
+# arbitrary existing host file and expose it in the next container.
+VALIDATED_WORKTREE_GITFILE=""
+VALIDATED_WORKTREE_DIR=""
+VALIDATED_WORKTREE_POINTER=""
+validate_worktree_gitdir_record() {
+    local common="$1" entry="$2" worktrees_root entry_dir path path_parent
+    local worktrees_physical entry_physical parent_physical pointer target target_physical
+    VALIDATED_WORKTREE_GITFILE=""
+    VALIDATED_WORKTREE_DIR=""
+    VALIDATED_WORKTREE_POINTER=""
+    [[ -f "$entry" && ! -L "$entry" ]] || return 1
+    worktrees_root="$common/worktrees"
+    [[ -d "$worktrees_root" && ! -L "$worktrees_root" ]] || return 1
+    worktrees_physical="$(cd -P -- "$worktrees_root" 2>/dev/null && pwd)" || return 1
+    entry_dir="${entry%/gitdir}"
+    entry_physical="$(cd -P -- "$entry_dir" 2>/dev/null && pwd)" || return 1
+    [[ "${entry_physical%/*}" == "$worktrees_physical" ]] || return 1
+
+    path="$(cat -- "$entry")" || return 1
+    [[ -n "$path" && "$path" != *$'\n'* && "$path" == /* ]] || return 1
+    [[ "${path##*/}" == .git && -f "$path" && ! -L "$path" ]] || return 1
+    path_parent="${path%/.git}"
+    parent_physical="$(cd -P -- "$path_parent" 2>/dev/null && pwd)" || return 1
+
+    pointer="$(cat -- "$path")" || return 1
+    [[ -n "$pointer" && "$pointer" != *$'\n'* && "$pointer" == gitdir:* ]] || return 1
+    target="${pointer#gitdir:}"
+    target="${target#"${target%%[![:space:]]*}"}"
+    [[ -n "$target" ]] || return 1
+    [[ "$target" == /* ]] || target="$parent_physical/$target"
+    target_physical="$(cd -P -- "$target" 2>/dev/null && pwd)" || return 1
+    [[ "$target_physical" == "$entry_physical" ]] || return 1
+
+    VALIDATED_WORKTREE_GITFILE="$path"
+    VALIDATED_WORKTREE_DIR="$parent_physical"
+    VALIDATED_WORKTREE_POINTER="$pointer"
+}
+
+SNAPSHOTTED_GITFILE=""
+snapshot_validated_gitfile() {
+    local snapshot copied
+    SNAPSHOTTED_GITFILE=""
+    if [[ -z "$GITFILE_SNAPSHOT_DIR" ]]; then
+        GITFILE_SNAPSHOT_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agentmill-gitfiles.XXXXXX")" \
+            || return 1
+        chmod 700 "$GITFILE_SNAPSHOT_DIR" || return 1
+    fi
+    GITFILE_SNAPSHOT_COUNT=$((GITFILE_SNAPSHOT_COUNT + 1))
+    snapshot="$GITFILE_SNAPSHOT_DIR/gitfile-$GITFILE_SNAPSHOT_COUNT"
+    # -P snapshots a racing symlink as a symlink instead of dereferencing it;
+    # the regular-file check below then fails closed. Docker sees only this
+    # private immutable copy, never the worker-mutable host pathname.
+    /bin/cp -P "$VALIDATED_WORKTREE_GITFILE" "$snapshot" 2>/dev/null \
+        || return 1
+    [[ -f "$snapshot" && ! -L "$snapshot" ]] || return 1
+    copied="$(cat -- "$snapshot")" || return 1
+    [[ "$copied" == "$VALIDATED_WORKTREE_POINTER" ]] || return 1
+    chmod 400 "$snapshot" || return 1
+    SNAPSHOTTED_GITFILE="$snapshot"
+}
+
 # A linked worktree's .git is a file pointing at <main repo>/.git/worktrees/<name>;
 # that exact path must exist inside the container too, or git fails on the first
-# command. Use the recorded path verbatim — it is what git will dereference.
+# command. The main checkout has a .git directory instead, but still needs every
+# linked sibling's .git file mounted so a prune inside the container cannot
+# mistake that sibling for a missing checkout.
 worktree_mount() {
-    [[ -f "$REPO_PATH/.git" ]] || return 0
-    local gitdir common entry path
-    gitdir="$(sed -n 's/^gitdir: *//p' "$REPO_PATH/.git" | head -1)"
-    [[ -n "$gitdir" ]] || { echo "Error: $REPO_PATH/.git has no gitdir: pointer" >&2; exit 1; }
-    [[ "$gitdir" == /* ]] || {
-        echo "Error: $REPO_PATH records a relative gitdir ($gitdir), which cannot be" >&2
-        echo "       mapped into the container. Recreate the worktree with absolute paths." >&2
+    local gitdir common entry path gitdir_physical active_gitfile_snapshot=""
+    if [[ -f "$REPO_PATH/.git" ]]; then
+        [[ ! -L "$REPO_PATH/.git" ]] \
+            || { echo "Error: linked-worktree .git may not be a symlink" >&2; exit 1; }
+        gitdir="$(sed -n 's/^gitdir: *//p' "$REPO_PATH/.git")"
+        [[ -n "$gitdir" ]] || { echo "Error: $REPO_PATH/.git has no gitdir: pointer" >&2; exit 1; }
+        [[ "$gitdir" != *$'\n'* ]] \
+            || { echo "Error: $REPO_PATH/.git has multiple gitdir pointers" >&2; exit 1; }
+        [[ "$gitdir" == /* ]] || {
+            echo "Error: $REPO_PATH records a relative gitdir ($gitdir), which cannot be" >&2
+            echo "       mapped into the container. Recreate the worktree with absolute paths." >&2
+            exit 1
+        }
+        [[ "$gitdir" == */worktrees/* && -d "$gitdir" && ! -L "$gitdir" ]] \
+            || { echo "Error: malformed linked-worktree gitdir: $gitdir" >&2; exit 1; }
+        gitdir_physical="$(cd -P -- "$gitdir" 2>/dev/null && pwd)" \
+            || { echo "Error: linked-worktree gitdir not found: $gitdir" >&2; exit 1; }
+        [[ "$gitdir_physical" == "$gitdir" ]] \
+            || { echo "Error: linked-worktree gitdir must use a canonical path" >&2; exit 1; }
+        common="${gitdir%/worktrees/*}"      # the main repo's git dir
+        [[ -d "$common" && ! -L "$common" ]] \
+            || { echo "Error: common git dir $common is not a regular directory" >&2; exit 1; }
+        if ! validate_worktree_gitdir_record "$common" "$gitdir/gitdir" \
+            || [[ "$VALIDATED_WORKTREE_DIR" != "$REPO_PATH" ]]; then
+            echo "Error: linked-worktree metadata does not round-trip to $REPO_PATH/.git" >&2
+            exit 1
+        fi
+        snapshot_validated_gitfile \
+            || { echo "Error: linked-worktree .git changed while it was validated" >&2; exit 1; }
+        active_gitfile_snapshot="$SNAPSHOTTED_GITFILE"
+    elif [[ -d "$REPO_PATH/.git" ]]; then
+        [[ ! -L "$REPO_PATH/.git" ]] \
+            || { echo "Error: main-checkout .git may not be a symlink" >&2; exit 1; }
+        common="$REPO_PATH/.git"
+    else
+        echo "Error: no git metadata found for $REPO_PATH" >&2
         exit 1
-    }
-    common="${gitdir%/worktrees/*}"          # the main repo's git dir
+    fi
     [[ -d "$common" ]] || { echo "Error: git dir $common not found for worktree $REPO_PATH" >&2; exit 1; }
+    # Pin the common directory as its own bind mount even for a main checkout.
+    # Besides exposing an out-of-tree common dir for linked checkouts, the
+    # nested main-checkout mount makes the validated .git directory a mount
+    # point: a parallel worker cannot rename/symlink-swap it while Docker is
+    # resolving a later container's bind sources.
     RUN_ARGS+=(-v "$common:$common")
+    # Never rely on its writable common-dir record to rediscover the active
+    # linked checkout's pointer file.
+    [[ -z "$active_gitfile_snapshot" ]] \
+        || RUN_ARGS+=(-v "$active_gitfile_snapshot:$REPO_PATH/.git:ro")
     # Each worktrees/<name>/gitdir records the host path of that checkout's
     # .git file. `git worktree prune` (also run by gc) deletes any entry whose
     # path does not exist — inside the container none of them would, so one
     # prune would wreck this worktree and every sibling's on the host. Make
     # every recorded path resolve by mounting the .git file itself, read-only.
     for entry in "$common"/worktrees/*/gitdir; do
-        [[ -f "$entry" ]] || continue
-        path="$(head -1 "$entry")"
-        [[ "$path" == /* && -f "$path" ]] || continue
-        RUN_ARGS+=(-v "$path:$path:ro")
+        [[ -e "$entry" || -L "$entry" ]] || continue
+        if ! validate_worktree_gitdir_record "$common" "$entry"; then
+            echo "Warning: ignoring malformed worktree metadata: $entry" >&2
+            continue
+        fi
+        path="$VALIDATED_WORKTREE_GITFILE"
+        [[ "$path" != "$REPO_PATH/.git" ]] || continue
+        if ! snapshot_validated_gitfile; then
+            echo "Warning: ignoring worktree .git changed during validation: $path" >&2
+            continue
+        fi
+        RUN_ARGS+=(-v "$SNAPSHOTTED_GITFILE:$path:ro")
     done
 }
 
 # Config the container understands. Keys found in the config file or MILL.md
 # frontmatter are appended, so a custom var set there reaches the agent too.
 ENV_KEYS=(ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY
+          HTTP_PROXY HTTPS_PROXY NO_PROXY NODE_EXTRA_CA_CERTS
+          http_proxy https_proxy no_proxy
           AGENT MODEL FALLBACK_MODEL MAX_ITERATIONS MAX_ERRORS MAX_NOOPS
           ITER_TIMEOUT LOOP_DELAY ERROR_BACKOFF MAX_BACKOFF SHUTDOWN_GRACE
           MAX_TURNS MIN_TURNS MAX_BUDGET_USD MAX_TOTAL_BUDGET_USD
@@ -114,13 +236,27 @@ ENV_KEYS=(ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY
           GIT_USER GIT_EMAIL)
 ENV_FILE_KEYS=() ENV_FILE_VALS=()   # parallel arrays: bash 3 has no assoc arrays
 MISSION_KEYS=() MISSION_VALS=()     # MILL.md frontmatter, uppercased
+FORWARD_FILE_KEYS=() FORWARD_FILE_VALS=() # private --env-file, never host env
+CALLER_ENV_KEYS=()                  # fixed keys + names trusted by user config
+ENV_FILE_INSERT_AT=0
 
-# Resolved config value: environment > MILL.md frontmatter > config file, so
-# `ANTHROPIC_API_KEY=... mill run` overrides both files and a repo's own
-# check_cmd overrides a global default.
+# Resolved config value: environment > MILL.md frontmatter > config file for
+# fixed keys and names explicitly trusted in the user config. Repository-only
+# names deliberately cannot select unrelated values from the caller environment.
+caller_env_allowed() {
+    local allowed
+    for allowed in "${CALLER_ENV_KEYS[@]}"; do
+        [[ "$allowed" == "$1" ]] && return 0
+    done
+    return 1
+}
+
 cfg() {
     local i
-    if [[ -n "${!1:-}" ]]; then printf '%s' "${!1}"; return; fi
+    if caller_env_allowed "$1" && [[ -n "${!1:-}" ]]; then
+        printf '%s' "${!1}"
+        return
+    fi
     for i in ${MISSION_KEYS[@]+"${!MISSION_KEYS[@]}"}; do
         [[ "${MISSION_KEYS[$i]}" == "$1" && -n "${MISSION_VALS[$i]}" ]] \
             && { printf '%s' "${MISSION_VALS[$i]}"; return 0; }
@@ -134,8 +270,11 @@ cfg() {
 remember_key() {  # make a file-provided key reach the container
     local k
     case "$1" in
-        PATH|HOME|REPO_DIR|AGENTMILL_IMAGE|AGENTMILL_CONFIG|DIND_READY_TIMEOUT)
+        PATH|HOME|REPO_DIR|LOG_DIR|PROMPT_FILE|EVALUATOR_FILE|MISSION_FILE|AGENTMILL_IMAGE|AGENTMILL_CONFIG|AGENTMILL_LOG_REPO_REL|DIND_READY_TIMEOUT)
             return 0 ;; # mill-only / host-managed
+        BASH_ENV|ENV|LD_*|DYLD_*|GCONV_PATH|LOCPATH|NLSPATH|TAR_OPTIONS)
+            echo "Warning: ignoring unsafe container environment key: $1" >&2
+            return 0 ;; # can execute before loop.sh establishes its boundary
     esac
     for k in "${ENV_KEYS[@]}"; do [[ "$k" == "$1" ]] && return 0; done
     ENV_KEYS+=("$1")
@@ -145,10 +284,17 @@ remember_key() {  # make a file-provided key reach the container
 # (lowercase env var names; quotes optional). The body is the mission and is
 # read by loop.sh inside the container; only the settings are parsed here.
 load_mission() {
-    local line key val
-    [[ "$(head -1 "$MISSION_FILE")" == "---" ]] || return 0
+    local line key val i closed=false
+    local parsed_keys=() parsed_vals=()
+    IFS= read -r line < "$MISSION_FILE" || true
+    line="${line%$'\r'}"
+    [[ "$line" == "---" ]] || return 0
     while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$line" == "---" ]] && break
+        line="${line%$'\r'}"
+        if [[ "$line" == "---" ]]; then
+            closed=true
+            break
+        fi
         [[ "$line" =~ ^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*:(.*)$ ]] || continue
         key="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:lower:]' '[:upper:]')" val="${BASH_REMATCH[2]}"
         val="${val#"${val%%[![:space:]]*}"}"
@@ -161,17 +307,26 @@ load_mission() {
             val="${val%%[[:space:]]#*}"
             val="${val%"${val##*[![:space:]]}"}"
         fi
-        MISSION_KEYS+=("$key") MISSION_VALS+=("$val")
-        remember_key "$key"
+        parsed_keys+=("$key") parsed_vals+=("$val")
     done < <(tail -n +2 "$MISSION_FILE")
+    [[ "$closed" == true ]] || {
+        echo "Error: unclosed frontmatter in $MISSION_FILE (missing closing ---)" >&2
+        exit 1
+    }
+    # Do not expose any setting until the whole block has been validated. This
+    # keeps mission-body lines from becoming config when the closing fence is
+    # missing.
+    for i in ${parsed_keys[@]+"${!parsed_keys[@]}"}; do
+        MISSION_KEYS+=("${parsed_keys[$i]}") MISSION_VALS+=("${parsed_vals[$i]}")
+        remember_key "${parsed_keys[$i]}"
+    done
 }
 
 # The config file is KEY=value. Values may be "double" or 'single' quoted;
 # unquoted values end at an inline ` # comment` and lose surrounding
 # whitespace. Parsed into ENV_FILE_* rather than sourced: a PATH= or
-# DOCKER_HOST= line must not redirect mill's own commands. Selected
-# credentials are exported later, immediately before they are forwarded with
-# Docker's bare -e form.
+# DOCKER_HOST= line must not redirect mill's own commands. Resolved file values
+# are forwarded later through a private Docker --env-file.
 load_env() {
     local file="$CONFIG_FILE" line key val
     if [[ ! -f "$file" && -f "$MILL_DIR/.env" ]]; then
@@ -237,22 +392,26 @@ common_args() {  # fills RUN_ARGS with env + mounts shared by run/shell
     # container's own shutdown_grace without re-deriving config.
     RUN_ARGS=(--label agentmill --label "agentmill.stop-timeout=$(container_stop_timeout)"
               --init --memory 4g --pids-limit 512)
-    # API credentials use Docker's bare -e KEY form. Values loaded from .env
-    # are exported only in this mill process, keeping them out of the long-lived
-    # `docker run` argv while leaving the caller's environment untouched.
+    # Caller-provided values already live in Docker's environment, so bare
+    # -e KEY preserves them (including values an env file cannot represent).
+    # File/frontmatter values may be arbitrary secrets or host-sensitive names
+    # such as DOCKER_HOST. Stage those for a private --env-file:
+    # neither their names nor values enter the host Docker client's environment.
     local key val
+    FORWARD_FILE_KEYS=() FORWARD_FILE_VALS=()
     for key in "${ENV_KEYS[@]}"; do
         val="$(cfg "$key")"
         [[ -n "$val" ]] || continue
-        case "$key" in
-            ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN|OPENAI_API_KEY)
-                printf -v "$key" '%s' "$val"
-                export "${key?}"
-                RUN_ARGS+=(-e "$key")
-                ;;
-            *) RUN_ARGS+=(-e "$key=$val") ;;
-        esac
+        if caller_env_allowed "$key" && [[ -n "${!key:-}" ]]; then
+            RUN_ARGS+=(-e "$key")
+        else
+            FORWARD_FILE_KEYS+=("$key") FORWARD_FILE_VALS+=("$val")
+        fi
     done
+    # Remember this position before mounts and the flag-/DinD-provided -e
+    # options appended by cmd_run. Inserting the env file here preserves
+    # Docker's normal last-value-wins precedence without an argv sentinel.
+    ENV_FILE_INSERT_AT=${#RUN_ARGS[@]}
     LOG_DIR_HOST="$MILL_DIR/logs/$CONTAINER_NAME"   # per checkout: parallel runs must not interleave
     mkdir -p "$LOG_DIR_HOST" "$MILL_DIR/prompts"
     # The operator drop-box (STOP / STEER.md) rides in the bind-mounted
@@ -264,7 +423,72 @@ common_args() {  # fills RUN_ARGS with env + mounts shared by run/shell
         -v "$LOG_DIR_HOST:/workspace/logs"
         -v "$MILL_DIR/prompts:/prompts:ro"
     )
+    [[ "$LOG_DIR_HOST" != "$REPO_PATH/"* ]] \
+        || RUN_ARGS+=(-e "AGENTMILL_LOG_REPO_REL=${LOG_DIR_HOST#"$REPO_PATH/"}")
     worktree_mount
+}
+
+docker_with_env_file() {
+    local insert_at="$1" i arg env_file docker_pid="" docker_rc=0 signal_rc=0
+    local signal_name="" docker_launching=false
+    local position=0 docker_args=()
+    shift
+    if [[ ${#FORWARD_FILE_KEYS[@]} -eq 0 ]]; then
+        docker "$@"
+        return
+    fi
+    (
+        # mktemp creates the file atomically; chmod makes the privacy contract
+        # explicit across implementations. EXIT cleanup covers success, Docker
+        # failure, interactive exit, detach completion, and signals.
+        env_file="$(mktemp "${TMPDIR:-/tmp}/agentmill-env.XXXXXX")"
+        # shellcheck disable=SC2329 # invoked through EXIT below
+        cleanup_env_file() { rm -f -- "$env_file"; }
+        # shellcheck disable=SC2329 # invoked through HUP/INT/TERM traps below
+        forward_docker_signal() {
+            local signal="$1" status="$2"
+            signal_name="$signal" signal_rc="$status"
+            # Remove secrets immediately; Bash otherwise defers an EXIT trap
+            # while a foreground Docker client is still handling the signal.
+            cleanup_env_file
+            if [[ -n "$docker_pid" ]]; then
+                kill "-$signal" "$docker_pid" 2>/dev/null || true
+            elif [[ "$docker_launching" == false ]]; then
+                exit "$status"
+            fi
+        }
+        trap cleanup_env_file EXIT
+        trap 'forward_docker_signal HUP 129' HUP
+        trap 'forward_docker_signal INT 130' INT
+        trap 'forward_docker_signal TERM 143' TERM
+        chmod 600 "$env_file"
+        for i in ${FORWARD_FILE_KEYS[@]+"${!FORWARD_FILE_KEYS[@]}"}; do
+            printf '%s=%s\n' "${FORWARD_FILE_KEYS[$i]}" "${FORWARD_FILE_VALS[$i]}" >> "$env_file"
+        done
+        for arg in "$@"; do
+            if [[ "$position" -eq "$insert_at" ]]; then
+                docker_args+=(--env-file "$env_file")
+            fi
+            docker_args+=("$arg")
+            position=$((position + 1))
+        done
+        [[ "$position" -ne "$insert_at" ]] || docker_args+=(--env-file "$env_file")
+        # Explicit stdin keeps `mill shell` interactive even though the client
+        # is backgrounded so Bash can run the signal traps immediately.
+        docker_launching=true
+        docker "${docker_args[@]}" <&0 &
+        docker_pid=$!
+        docker_launching=false
+        [[ "$signal_rc" -eq 0 ]] \
+            || kill "-$signal_name" "$docker_pid" 2>/dev/null || true
+        until wait "$docker_pid"; do
+            docker_rc=$?
+            kill -0 "$docker_pid" 2>/dev/null || break
+            docker_rc=0
+        done
+        [[ "$signal_rc" -eq 0 ]] || docker_rc="$signal_rc"
+        exit "$docker_rc"
+    )
 }
 
 cmd_run() {
@@ -283,6 +507,10 @@ cmd_run() {
     done
     resolve_repo
     require_mission
+    if [[ "$dind" == true && "$(cfg EVALUATOR)" == true ]]; then
+        echo "Error: EVALUATOR=true cannot be combined with --dind; the reviewer must not share a privileged Docker API" >&2
+        exit 1
+    fi
 
     common_args
     [[ -n "$agent" ]]      && RUN_ARGS+=(-e "AGENT=$agent")
@@ -301,7 +529,8 @@ cmd_run() {
         exit 1
     fi
     docker rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
-    docker run --rm --name "$CONTAINER_NAME" "${RUN_ARGS[@]}" "$IMAGE"
+    docker_with_env_file "$((4 + ENV_FILE_INSERT_AT))" \
+        run --rm --name "$CONTAINER_NAME" "${RUN_ARGS[@]}" "$IMAGE"
 }
 
 cmd_shell() {
@@ -317,7 +546,8 @@ cmd_shell() {
     [[ -f "$MISSION_FILE" ]] && load_mission   # shell works without a mission
     common_args
     [[ "$dind" == true ]] && { ensure_dind; RUN_ARGS+=("${DIND_ARGS[@]}"); }
-    docker run --rm -it --entrypoint bash "${RUN_ARGS[@]}" -w "$REPO_PATH" "$IMAGE"
+    docker_with_env_file "$((5 + ENV_FILE_INSERT_AT))" \
+        run --rm -it --entrypoint bash "${RUN_ARGS[@]}" -w "$REPO_PATH" "$IMAGE"
 }
 
 # Newest-last list of a checkout's log files matching $1. Collected into an
@@ -391,7 +621,7 @@ cmd_build() {
 }
 
 # Give loop.sh enough time to enforce its own agent SIGKILL deadline and then
-# checkpoint/check/revert the bind-mounted checkout before Docker escalates.
+# run its bounded cleanup of uncommitted bind-mounted checkout residue.
 container_stop_timeout() {
     local grace
     grace="$(cfg SHUTDOWN_GRACE)"
@@ -512,7 +742,7 @@ check_cmd:            # ratchet: an iteration that fails this is reverted
 setup_cmd:            # runs once before the loop (uv sync, npm ci, ...)
 # done_cmd:           # must pass before a "done" claim stops the loop
 # max_total_budget_usd:   # stop once the run has spent this much
-# evaluator: true     # one read-only reviewer session must PASS a done claim
+# evaluator: true     # one isolated reviewer session must PASS a done claim
 # metric_cmd:         # prints a score; only a strict improvement is kept
 # metric_direction: min   # min | max — which way is better
 ---
@@ -546,6 +776,11 @@ while [[ $# -gt 0 ]]; do
 done
 [[ "$REPO_START" == /* ]] || REPO_START="$PWD/$REPO_START"
 load_env
+# Freeze caller-environment eligibility before repository frontmatter is read.
+# Fixed supported keys and names explicitly present in the user config retain
+# normal environment precedence; a repository cannot select an unrelated host
+# secret merely by naming that variable in MILL.md.
+CALLER_ENV_KEYS=("${ENV_KEYS[@]}" AGENTMILL_IMAGE DIND_READY_TIMEOUT)
 IMAGE="$(cfg AGENTMILL_IMAGE)"; IMAGE="${IMAGE:-agentmill}"
 case "${1:-}" in
     run)    shift; cmd_run "$@" ;;

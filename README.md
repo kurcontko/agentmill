@@ -35,8 +35,8 @@ What the loop adds around the bare `while true; do claude -p ...` idea:
   if a benchmark number strictly improves. Kept history is always green. Because
   a revert discards the worktree, the loop refuses to start on a dirty repo.
 - **Verified completion** — "done" is a claim, not a stop: `DONE_CMD` (or a
-  green `CHECK_CMD`) must pass, and with `EVALUATOR=true` a read-only reviewer
-  session judges the whole run's diff before the loop ends.
+  green `CHECK_CMD`) must pass, and with `EVALUATOR=true` a reviewer in a
+  disposable checkout judges the whole run's diff before the loop ends.
 - **A paper trail** — per-iteration `.summary` digests beside commit-keyed
   event logs, one JSON line per iteration in `results.jsonl`, a `metrics.tsv`
   ledger in metric mode, and `mill logs --results` to tabulate it.
@@ -51,7 +51,7 @@ cd ~/path/to/repo
 mill init                        # writes MILL.md here + ~/.config/agentmill/env once
 $EDITOR ~/.config/agentmill/env  # set your auth key
 $EDITOR MILL.md                  # describe the mission
-mill run                         # go. Ctrl-C stops the agent, commits, exits.
+mill run                         # go. Ctrl-C stops cleanly; completed commits stay.
 ```
 
 Like `git`, `mill` acts on the repository containing the current directory;
@@ -124,9 +124,42 @@ itself).
 
 The agent's final message is a JSON object; `done: true` is a claim, not a stop.
 Before the loop honours it, `DONE_CMD` must pass (or, if unset, `CHECK_CMD` must
-have been green on this iteration), and with `EVALUATOR=true` a fresh read-only
-session (`prompts/EVALUATOR.md`) reviews the run's commits and diffstat against
-the mission, re-runs the verifier, and returns `PASS` or `NEEDS_WORK`.
+have been green on this iteration), and with `EVALUATOR=true` a fresh session
+(`prompts/EVALUATOR.md`) reviews the run's commits and diffstat against the
+mission, re-runs the verifier, and returns `PASS` or `NEEDS_WORK`. The reviewer
+gets a writable disposable snapshot under a Linux Landlock write sandbox. The
+snapshot is copied without worker-controlled Git state, initialized as a fresh
+repository, and tied to source digests captured before and after review. Its
+verifier can create build artifacts in that scratch tree, but writes through
+absolute paths or escaping symlinks cannot alter the checkout being reviewed.
+Reviewer CLI state is generated from fixed settings: Claude runs `--bare` with
+repository skill/slash-command loading disabled,
+while Codex ignores repository instructions, rules, config, hooks, and bundled
+skills. Every discoverable repository skill is explicitly disabled by both its
+logical and canonical path, so explicit skill mentions cannot load it; an
+incomplete skill scan rejects evaluator setup. Within
+that reviewer boundary, a failed CLI session is rejected even if it left a
+schema-valid `PASS` event.
+`EVALUATOR=true` requires Linux Landlock ABI 3 or newer (Linux 6.2+) with the
+relevant sandbox syscalls enabled; it fails closed on older/blocked kernels
+or outside the published `linux/amd64` and `linux/arm64` image targets, without
+affecting ordinary worker sessions. Metadata-changing syscalls such as `chmod`,
+`chown`, timestamp changes, and xattrs are disabled for the reviewer. `ioctl`
+is default-denied except for a small set of harmless descriptor and terminal
+queries required by the agent CLIs; filesystem-specific requests remain
+blocked. Reviewer descendants also cannot use process-injection syscalls.
+Seccomp skips `setpgid` and `setsid` while reporting a compatibility success,
+so verifiers cannot detach from the recorded shutdown group. Codex uses a fixed
+profile that delegates filesystem confinement to this authoritative outer
+boundary while retaining restricted networking for verifier tools. Its direct
+fast path avoids relying on host support for unprivileged user namespaces. A
+reviewer process limit reserves capacity for bounded supervisor cleanup even
+if a verifier forks aggressively. Before reviewer code starts,
+its process group is copied to a protected supervisor record, so an external
+shutdown can still enforce the TERM/KILL deadline if an inner wrapper crashes.
+A fixed root-owned controller validates the reviewer uid, PID/PGID, and Linux
+process start times before signaling; reviewer-owned code cannot kill or spoof
+that cleanup authority.
 
 A rejection is appended to `PROGRESS.md`, committed, and the loop keeps going,
 so the next session sees why its predecessor's claim did not stick. CLIs that
@@ -186,6 +219,19 @@ Precedence: flags > environment > `MILL.md` frontmatter >
 `~/.config/agentmill/env` (`KEY=value`, see `.env.example`; override the
 path with `AGENTMILL_CONFIG`). Values may be quoted; an unquoted value ends
 at an inline ` # comment`. Every key below works in either file.
+Caller-exported values use Docker's bare `-e KEY` form. Values resolved from
+the config file or frontmatter use a private, mode-0600 temporary `--env-file`.
+Their secrets therefore do not appear in the long-lived `docker run` command
+line or in the host Docker client's environment. Repository frontmatter cannot
+select an unrelated caller secret by naming its environment variable; caller
+precedence applies only to supported keys and names explicitly trusted in the
+user config file.
+`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`, and lowercase
+proxy variants are inherited when set.
+Interpreter/loader startup controls (`BASH_ENV`, `ENV`, `LD_*`, `DYLD_*`,
+`GCONV_PATH`, `LOCPATH`, `NLSPATH`, and `TAR_OPTIONS`) are refused when they
+come from config/frontmatter because they can execute before `loop.sh` creates
+its isolation boundary.
 
 | Var | Default | Meaning |
 |-----|---------|---------|
@@ -205,7 +251,7 @@ at an inline ` # comment`. Every key below works in either file.
 | `SETUP_CMD` | — | runs once before the loop (`uv sync`, `npm ci`, …) |
 | `CHECK_CMD` | — | the ratchet: failure reverts the iteration |
 | `DONE_CMD` | — | completion verifier; empty = require `CHECK_CMD` green instead |
-| `EVALUATOR` | `false` | run a read-only reviewer session before honouring a done claim |
+| `EVALUATOR` | `false` | run a reviewer in a disposable checkout before honouring a done claim; incompatible with `--dind` |
 | `METRIC_CMD` / `METRIC_DIRECTION` | — / `min` | metric ratchet: last stdout line is the score; `min` or `max` is better |
 | `CLAUDE_BARE` | `false` | claude only: `--bare`, skipping `CLAUDE.md` and hook discovery |
 
@@ -217,13 +263,27 @@ to apt only) and installs what the work needs, or you make it deterministic with
 `SETUP_CMD`. For repos whose work itself needs Docker (testcontainers, image
 builds), `--dind` starts a docker:dind sidecar, waits for its TCP endpoint, then
 points the image's docker client at it — the host socket is never mounted.
+Because that API controls a privileged daemon, `mill` refuses to combine
+`--dind` with `EVALUATOR=true`.
 
 ## Security
 
 The agent runs with permission checks bypassed **inside the container** — that
-is the point: the container is the boundary. It gets your API key and your repo,
-nothing else. API-key values are passed through the Docker client's environment,
-not its process arguments. Don't run `loop.sh` on your host.
+is the point: the container is the worker boundary. It receives the repository,
+the bundled prompts, API credentials, and explicitly forwarded runtime settings
+such as proxy/TLS variables. Caller-exported values use Docker's bare `-e KEY`;
+values parsed from config/frontmatter travel in a private mode-0600 `--env-file`,
+so they are absent from both `docker run` arguments and the Docker client's own
+environment. The evaluator adds a narrower write boundary around its disposable
+snapshot. That boundary contains reviewer and verifier effects; it is not an
+isolation boundary from the primary worker, which already owns and is expected
+to modify the real checkout inside the container. Linked-worktree metadata
+mounts are accepted only after their canonical `.git` and
+`worktrees/<name>` references round-trip to one another; pointer files are then
+copied to private read-only bind sources. The common Git directory is pinned as
+a separate mount, including for a main checkout, so a parallel worker cannot
+replace that validated path while Docker resolves it. Don't run `loop.sh` on
+your host.
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
