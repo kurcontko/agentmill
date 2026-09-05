@@ -46,7 +46,7 @@ Never silently expand scope — if the task grew, split it and leave the new sub
 - If the task requires recent knowledge or documentation, do not hesitate to use web search to ground your work.
 - If stuck on a broad problem, decompose: split by test, by component, by file. Compare against known-good implementations when available.
 - If a change breaks passing behavior, fix that before moving on. Never "fix it later."
-- Need a system package? `sudo apt-get install -y <pkg>`. Keep virtualenvs, caches, and build junk out of the repo working tree.
+- System packages must already be installed in the operator's image. If one is missing, report the dependency as blocked; there is no runtime sudo. User-local toolchains are allowed. Keep virtualenvs, caches, and build junk out of the repo working tree.
 
 #### When stuck — escalate, don't flail
 

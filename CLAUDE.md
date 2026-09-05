@@ -19,7 +19,7 @@ mill init / build / ps                     # init writes MILL.md + user config
 bash tests/test_loop.sh && bash tests/test_mill.sh
 python3 tests/test_landlock.py                 # Linux kernel boundary
 # tests/test_image_evaluator.sh runs inside the built image (see CI)
-shellcheck loop.sh mill tests/*.sh
+shellcheck loop.sh mill reviewer_exec.sh dind_watch.sh tests/*.sh
 ```
 
 ## Architecture
@@ -27,9 +27,14 @@ shellcheck loop.sh mill tests/*.sh
 ```
 loop.sh            # the whole framework: agent loop, stop conditions, ratchet
 mill               # CLI wrapper — plain docker run (no compose)
-Dockerfile         # node:22-slim + claude + codex + git/jq/python3/sudo
+Dockerfile         # node:22-slim + claude + codex + git/jq/python3; no sudo
 landlock_exec.py   # Linux Landlock write boundary for reviewer processes
+supervisor.py      # trusted root entrypoint, drops uid/caps before any repo command
+reviewer_rpc.py    # unprivileged, bounded Unix-socket client
+reviewer_exec.sh   # adapter for the supervisor's fixed confined reviewer launch
 reviewer_control.py # root-owned, identity-checked reviewer group TERM/KILL
+dind/Dockerfile    # digest-pinned sidecar reference, updated through Dependabot
+dind_watch.sh      # host-only per-run resource cleanup, survives detached launch
 prompts/PROMPT.md  # framework prompt (claude: --append-system-prompt-file):
                    #   one task per session, PROGRESS.md, failed-approaches log,
                    #   {done, summary, blocked} reply
@@ -41,6 +46,8 @@ tests/test_loop.sh # smoke tests with a stubbed CLI (no network, no docker)
 tests/test_mill.sh # smoke tests for the CLI with a stubbed docker
 tests/test_landlock.py # kernel-level reviewer write-confinement test (Linux)
 tests/test_image_evaluator.sh # built-image reviewer isolation/shutdown test
+tests/test_supervisor.sh # built-image RPC/uid/capability/deadline checks
+tests/test_dind.sh # host integration: two private TLS daemons and lifecycle
 logs/<container>/  # per-checkout: results.jsonl, metrics.tsv (metric mode),
                    #   iter-N-<sha>.log / .summary, hidden .eval-N.* review dirs,
                    #   and dot-files for the last parse/schemas
@@ -52,6 +59,8 @@ logs/<container>/  # per-checkout: results.jsonl, metrics.tsv (metric mode),
   preamble (recent commits + head of PROGRESS.md + current METRIC best).
 - **Initializer**: no PROGRESS.md = first session; the preamble tells it to turn
   the mission into a checklist, ensure a verifier, commit, and exit.
+  In metric mode, successful initialization creating PROGRESS.md may keep an
+  unchanged score; checks and the rejection of worse/unreadable scores still apply.
 - **Structured reply**: `--json-schema` (claude) / `--output-schema` (codex)
   yields `{done, summary, blocked}`; `summary` replaces the raw final message.
   `DONE_PROMISE` in plain text is the fallback when no schema reply came back.
@@ -97,7 +106,10 @@ logs/<container>/  # per-checkout: results.jsonl, metrics.tsv (metric mode),
   therefore refuses to start on a dirty worktree.
 - **Metric ratchet**: `METRIC_CMD`'s last stdout line is the score; baseline
   measured on the clean tree (unparseable = fatal), then only a strictly better
-  score in `METRIC_DIRECTION` is kept. Floats compared with awk, not the shell.
+  score in `METRIC_DIRECTION` is kept (initializer exception above). Numeric
+  text is normalized for JSON without rounding; floats are compared with awk.
+  Each CHECK_CMD, DONE_CMD, and METRIC_CMD invocation, including the baseline,
+  is bounded by ITER_TIMEOUT plus SHUTDOWN_GRACE; expiry fails the operation.
 - **Cost & health stops**: per-session cost/turns/tokens parsed from the result
   event; `MAX_BUDGET_USD`/`MAX_TURNS` bound a session (claude),
   `MAX_TOTAL_BUDGET_USD` the run. `MIN_TURNS` turns an idle "successful"
@@ -123,10 +135,13 @@ logs/<container>/  # per-checkout: results.jsonl, metrics.tsv (metric mode),
   `.git` ↔ `worktrees/<name>` reference. The common-directory mount also pins
   the validated directory against replacement by a parallel worker before
   Docker resolves later mounts. `mill stop <repo>` stops one checkout.
-- **Agent installs its own deps**: scoped passwordless sudo for apt; optional
-  `SETUP_CMD` for determinism; `--dind` sidecar when the work needs docker.
-  The agent starts only after the sidecar's TCP Docker endpoint passes a
-  bounded readiness check.
+- **Dependencies**: system packages belong in a trusted derived image selected
+  with AGENTMILL_IMAGE. SETUP_CMD and user-local installers run unprivileged.
+  Missing system dependencies are blocked work, never a reason for runtime sudo.
+  --dind creates unique per-run daemon/network/client-certificate resources,
+  waits for a mutual-TLS readiness check, and cleans them on exit (also detached).
+  Pinning and TLS do not contain privileged DinD; use a disposable VM for
+  untrusted Docker workloads. It remains incompatible with EVALUATOR=true.
 
 ## Conventions
 
@@ -155,5 +170,6 @@ logs/<container>/  # per-checkout: results.jsonl, metrics.tsv (metric mode),
 - Container user `agent` has `AGENT_UID`/`AGENT_GID` build args (Linux hosts
   need them to match the caller; `mill build` passes them).
 - Git operations bounded — never retry infinitely.
-- Container runs as non-root `agent`; permission bypass inside the container
-  is intentional (the container is the boundary).
+- The fixed supervisor starts as root with only SETUID/SETGID/KILL. All worker
+  and reviewer commands run under separate non-root uids with empty capabilities
+  and inherited no-new-privileges. There is no sudo in the runtime image.

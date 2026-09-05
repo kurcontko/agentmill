@@ -1,8 +1,8 @@
 #!/usr/bin/python3 -I
 """Root-side liveness/signal control for AgentMill's dedicated reviewer uid.
 
-The primary agent may invoke this fixed, root-owned program through one narrow
-sudoers entry.  It can inspect or signal only a process group authenticated by
+The fixed supervisor invokes this root-owned program through a narrow RPC.
+It can inspect or signal only a process group authenticated by
 the pre-exec reviewer handshake, and only when that group still contains a
 process whose four uid fields all belong to ``agentmill-reviewer``.
 """
@@ -22,7 +22,7 @@ _DECIMAL = re.compile(r"[1-9][0-9]*\Z")
 _SIGNALS = {"0": 0, "TERM": signal.SIGTERM, "KILL": signal.SIGKILL}
 _KILL_DRAIN_SECONDS = 2.0
 _INTERNAL_DEADLINE_SECONDS = 3
-# Keep "confirmed no authenticated reviewer member" distinct from sudo's own
+# Keep "confirmed no authenticated reviewer member" distinct from transport
 # conventional rc=1 setup/policy failures. The shell maps this private code to
 # its logical dead state only after the root helper has completed its scan.
 CONFIRMED_DEAD = 10
@@ -121,8 +121,10 @@ def _group_exists(pgid: int) -> bool:
 
     A /proc directory walk is not an atomic liveness test: a hostile process
     can fork a successor and exit while the walk is consuming its buffered
-    directory entries.  killpg(..., 0) is the authoritative check and ESRCH
-    is the only state that may be reported to the shell as confirmed dead.
+    directory entries.  killpg(..., 0) is the authoritative check; ESRCH here
+    and an authenticated reuse of the group-leader slot (see
+    ``_validate_identity``) are the only states that may be reported to the
+    shell as confirmed dead.
     """
     try:
         os.killpg(pgid, 0)
@@ -143,25 +145,41 @@ def _validate_identity(
     if pgid == os.getpgrp():
         raise Refusal("refusing to target the control helper's own process group")
 
+    # A PID recycled to a process that fails the handshake checks proves the
+    # recorded anchor is gone; it says nothing about the rest of the group,
+    # which the member scan below decides on its own evidence.
     anchor = _read_process(pid)
-    if anchor is not None:
-        if anchor.uids != (reviewer_uid,) * 4:
-            raise Refusal("reviewer PID no longer belongs to the reviewer uid")
-        if anchor.pgrp != pgid or anchor.starttime != pid_starttime:
-            raise Refusal("reviewer PID identity no longer matches the handshake")
+    anchor_stale = False
+    if anchor is not None and (
+        anchor.uids != (reviewer_uid,) * 4
+        or anchor.pgrp != pgid
+        or anchor.starttime != pid_starttime
+    ):
+        anchor = None
+        anchor_stale = True
 
     leader = _read_process(pgid)
-    if leader is not None and pg_starttime:
-        if leader.starttime != pg_starttime:
-            raise Refusal("reviewer process-group leader was reused")
+    leader_recycled = False
+    if leader is not None and pg_starttime and leader.starttime != pg_starttime:
+        leader = None
+        leader_recycled = True
 
     members = _reviewer_members(pgid, reviewer_uid)
     if not members:
+        if leader_recycled:
+            # The kernel frees a pgid only once its group has no members, and
+            # an emptied group can never be rejoined, so an authenticated
+            # reuse of the pid==pgid slot alone proves the group is gone.
+            return []
         if _group_exists(pgid):
             raise Refusal(
                 "reviewer process group exists without an authenticated member"
             )
         return []
+    if leader_recycled:
+        raise Refusal("reviewer process-group leader was reused")
+    if anchor_stale:
+        raise Refusal("reviewer PID identity no longer matches the handshake")
     # If the anchor PID disappeared, live members retain the group identity;
     # Linux cannot reuse that pgrp number while any such member remains.
     if anchor is None and leader is None:
@@ -180,8 +198,8 @@ def _usage() -> None:
 
 
 def main() -> int:
-    # Do not rely solely on the caller's non-root timeout to stop a setuid-root
-    # sudo child. This process owns its own hard deadline, including NSS and
+    # Do not rely solely on the caller's non-root timeout to stop the root
+    # controller. This process owns its own hard deadline, including NSS and
     # /proc operations.
     signal.signal(signal.SIGALRM, lambda _signum, _frame: os._exit(124))
     signal.alarm(_INTERNAL_DEADLINE_SECONDS)

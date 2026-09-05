@@ -14,7 +14,7 @@ LOG_DIR="${LOG_DIR:-/workspace/logs}"
 MAX_ITERATIONS="${MAX_ITERATIONS:-0}"    # 0 = unbounded
 MAX_ERRORS="${MAX_ERRORS:-3}"            # consecutive agent failures before giving up (0 = unbounded)
 MAX_NOOPS="${MAX_NOOPS:-3}"              # consecutive no-progress iterations before stopping (0 = unbounded)
-ITER_TIMEOUT="${ITER_TIMEOUT:-3600}"     # seconds per iteration
+ITER_TIMEOUT="${ITER_TIMEOUT:-3600}"     # seconds per agent session / verifier / measurement
 LOOP_DELAY="${LOOP_DELAY:-5}"            # seconds between iterations
 ERROR_BACKOFF="${ERROR_BACKOFF:-30}"     # backoff base after a failure
 MAX_BACKOFF="${MAX_BACKOFF:-900}"        # cap on the error backoff
@@ -51,14 +51,17 @@ TIMEOUT_KILL_AFTER="$SHUTDOWN_GRACE"
 # --help must not hang the loop before it has run anything.
 if timeout --kill-after=1 1 true >/dev/null 2>&1; then
     TIMEOUT_CMD=(timeout "--kill-after=$TIMEOUT_KILL_AFTER" "$ITER_TIMEOUT")
+    COMMAND_TIMEOUT_CMD=(timeout --foreground "--kill-after=$TIMEOUT_KILL_AFTER" "$ITER_TIMEOUT")
     PROBE_CMD=(timeout --kill-after=1 10)
     SHUTDOWN_CLEANUP_CMD=(timeout --kill-after=1 20)
 elif timeout -k 1 1 true >/dev/null 2>&1; then
     TIMEOUT_CMD=(timeout -k "$TIMEOUT_KILL_AFTER" "$ITER_TIMEOUT")
+    COMMAND_TIMEOUT_CMD=(timeout --foreground -k "$TIMEOUT_KILL_AFTER" "$ITER_TIMEOUT")
     PROBE_CMD=(timeout -k 1 10)
     SHUTDOWN_CLEANUP_CMD=(timeout -k 1 20)
 else
     TIMEOUT_CMD=(env)
+    COMMAND_TIMEOUT_CMD=(env)
     PROBE_CMD=(env)
     SHUTDOWN_CLEANUP_CMD=(env)
 fi
@@ -80,6 +83,8 @@ SESSION_REVIEWER_PGID=""
 SESSION_REVIEWER_PID_START=""
 SESSION_REVIEWER_PG_START=""
 REVIEWER_CONTROL=/usr/local/bin/agentmill-reviewer-control
+# Unprivileged client for the supervisor's fixed Landlock launch operation.
+REVIEWER_EXEC=/usr/local/bin/agentmill-reviewer-exec
 REVIEWER_CONTROL_FAILED=false
 
 read_state_file() {
@@ -127,7 +132,7 @@ reviewer_session_alive() {
     state="$(read_reviewer_state)" || { rc=$?; return "$rc"; }
     read -r reviewer_pid reviewer_pgid reviewer_pid_start reviewer_pg_start <<<"$state"
     /usr/bin/timeout --kill-after=1 4 \
-        /usr/bin/sudo -n "$REVIEWER_CONTROL" 0 \
+        /usr/local/bin/reviewer-rpc control 0 \
         "$reviewer_pid" "$reviewer_pgid" "$reviewer_pid_start" "$reviewer_pg_start" \
         >/dev/null 2>&1 || rc=$?
     case "$rc" in
@@ -152,7 +157,7 @@ signal_session_group() {
     local signal="$1" pid="$2" state reviewer_pid reviewer_pgid
     local reviewer_pid_start reviewer_pg_start state_rc=0 control_rc=0 alive_rc=0
     kill "-$signal" -- "-$pid" 2>/dev/null || kill "-$signal" "$pid" 2>/dev/null || true
-    # Sudo runs the production evaluator under a distinct uid. A same-uid
+    # The supervisor runs the production evaluator under a distinct uid. A same-uid
     # verifier could kill a reviewer-owned signal helper, so only the fixed
     # root-owned controller enforces this second process-group boundary.
     state="$(read_reviewer_state)" || state_rc=$?
@@ -166,7 +171,7 @@ signal_session_group() {
     if [[ "$state_rc" -eq 0 ]]; then
         read -r reviewer_pid reviewer_pgid reviewer_pid_start reviewer_pg_start <<<"$state"
         /usr/bin/timeout --kill-after=1 4 \
-            /usr/bin/sudo -n "$REVIEWER_CONTROL" "$signal" \
+            /usr/local/bin/reviewer-rpc control "$signal" \
             "$reviewer_pid" "$reviewer_pgid" "$reviewer_pid_start" "$reviewer_pg_start" \
             >/dev/null 2>&1 || control_rc=$?
         case "$control_rc" in
@@ -220,7 +225,7 @@ wait_agent() {
     # run_interruptible helpers can return after starting an ordinary
     # background child. Drain the wrapper's direct process group before
     # accepting a baseline/check/metric result or canceling an outer watchdog.
-    # The evaluator may also have a second sudo-owned group, handled below.
+    # The evaluator also has a supervisor-owned group, handled below.
     if kill -0 -- "-$finished_agent_pid" 2>/dev/null; then
         kill -KILL -- "-$finished_agent_pid" 2>/dev/null || true
         for ((attempt = 0; attempt < 100; attempt++)); do
@@ -277,6 +282,20 @@ run_interruptible() {
     return "$rc"
 }
 
+# Called inside run_interruptible's process group (also via run_metric).
+# Foreground timeout and disabled job control keep descendants in that group:
+# external shutdown and wait_agent's final drain can still reach all of them.
+run_bounded_command() {
+    local command_rc=0
+    set +m
+    "${COMMAND_TIMEOUT_CMD[@]}" bash -c "$1" || command_rc=$?
+    case "$command_rc" in
+        124|137) printf 'command timed out after %ss (exit %s)\n' \
+                     "$ITER_TIMEOUT" "$command_rc" >&2 ;;
+    esac
+    return "$command_rc"
+}
+
 # Interruptible sleep: a foreground `sleep` defers the TERM/INT trap until it
 # ends, so a shutdown during LOOP_DELAY or the error backoff would start one
 # more full agent session. Backgrounded, the trap runs at once.
@@ -292,12 +311,12 @@ pause() {
 case "$AGENT" in
     claude) [[ -n "${ANTHROPIC_API_KEY:-}${CLAUDE_CODE_OAUTH_TOKEN:-}" ]] \
                 || die "set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN" ;;
-    codex)  [[ -n "${OPENAI_API_KEY:-}" || -d "$HOME/.codex" ]] \
-                || die "set OPENAI_API_KEY or mount ~/.codex" ;;
+    codex)  [[ -n "${CODEX_API_KEY:-}${OPENAI_API_KEY:-}" || -d "$HOME/.codex" ]] \
+                || die "set OPENAI_API_KEY / CODEX_API_KEY or mount ~/.codex" ;;
     *) die "AGENT must be claude or codex, got: $AGENT" ;;
 esac
-# Resolve the selected executable before crossing the sudo boundary. Sudo's
-# secure_path is deliberately not relaxed, and the sandbox helper must never
+# Resolve the selected executable before crossing the supervisor boundary.
+# The sandbox helper must never
 # rely on a caller-controlled PATH to choose the reviewer executable.
 AGENT_BIN="$(command -v "$AGENT" 2>/dev/null || true)"
 [[ -n "$AGENT_BIN" && -x "$AGENT_BIN" ]] || die "$AGENT executable not found"
@@ -327,12 +346,16 @@ fi
 if [[ "$EVALUATOR" == true && -x /usr/local/bin/landlock-exec ]]; then
     /usr/bin/id -u agentmill-reviewer >/dev/null 2>&1 \
         || die "EVALUATOR=true requires the agentmill-reviewer user"
-    /usr/bin/sudo -n -u agentmill-reviewer /usr/bin/true >/dev/null 2>&1 \
+    [[ -x "$REVIEWER_EXEC" ]] \
+        || die "EVALUATOR=true requires $REVIEWER_EXEC"
+    # --help exits before sandbox setup, probing the broker and uid transition.
+    "$REVIEWER_EXEC" --help \
+        >/dev/null 2>&1 \
         || die "EVALUATOR=true cannot start the isolated reviewer user"
     [[ -x "$REVIEWER_CONTROL" ]] \
         || die "EVALUATOR=true requires $REVIEWER_CONTROL"
     reviewer_control_probe_rc=0
-    /usr/bin/sudo -n "$REVIEWER_CONTROL" 0 1 2 1 0 \
+    /usr/local/bin/reviewer-rpc control 0 1 2 1 0 \
         >/dev/null 2>&1 || reviewer_control_probe_rc=$?
     [[ "$reviewer_control_probe_rc" -eq 2 ]] \
         || die "EVALUATOR=true cannot invoke the root reviewer controller"
@@ -483,6 +506,8 @@ start feature work this session. Instead:
 4. Commit PROGRESS.md (and the verifier, if you added one).
 5. EXIT. Do not implement anything from the checklist yet — the loop
    respawns you with fresh context for that.
+In metric mode, this initialization may keep an unchanged score. It must
+still pass the verifier and must not regress the metric.
 </initializer>
 INIT
 }
@@ -606,7 +631,7 @@ after_session_launch() {
                 signal_session_group KILL "$SESSION_PID" || true
                 return 1
             fi
-            # A signal may have arrived while sudo was still creating its
+            # A signal may have arrived while the broker was still creating its
             # separate reviewer process group. Forward it again now that the
             # helper has published the exact PID/PGID.
             if [[ "$SESSION_STOP_REQUESTED" == true ]] \
@@ -906,7 +931,7 @@ prepare_evaluator_runtime() {
         "$EVAL_ROOT/data" "$EVAL_ROOT/state"
 
     # Build the reviewer's complete environment in a protected scratch file.
-    # The pre-sandbox sudo command starts under env -i, and landlock-exec reads
+    # The broker starts the helper with a fixed environment; landlock-exec reads
     # this JSON into memory before confinement, so BASH_ENV/LD_PRELOAD and
     # arbitrary worker/frontmatter variables never reach reviewer setup or CLI.
     /usr/bin/python3 -I -c '
@@ -935,7 +960,7 @@ environment = {
     "GIT_ATTR_NOSYSTEM": "1",
 }
 allowed = (
-    "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY",
     "ANTHROPIC_BASE_URL", "OPENAI_BASE_URL",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
     "http_proxy", "https_proxy", "no_proxy",
@@ -945,6 +970,8 @@ allowed = (
 for key in allowed:
     if key in os.environ:
         environment[key] = os.environ[key]
+if not environment.get("CODEX_API_KEY") and environment.get("OPENAI_API_KEY"):
+    environment["CODEX_API_KEY"] = environment["OPENAI_API_KEY"]
 if os.environ.get("AGENTMILL_EVALUATOR_TEST_MODE") == "true":
     for key in ("EVAL_MODE", "REAL_REPO"):
         if key in os.environ:
@@ -1130,9 +1157,7 @@ initialize_evaluator_snapshot() {
         # Landlock-confined and process/ioctl escape paths still seccomp-denied.
         # shellcheck disable=SC2016  # $1/$2 belong to the fixed bash -c program
         /usr/bin/timeout --kill-after=1 30 \
-            /usr/bin/sudo -n -u agentmill-reviewer \
-            /usr/bin/env -i HOME="$EVAL_ROOT/home" PATH=/usr/bin:/bin \
-            /usr/bin/python3 -I /usr/local/bin/landlock-exec \
+            "$REVIEWER_EXEC" \
             --write-root "$EVAL_ROOT" --allow-device /dev/null \
             --allow-metadata --max-processes 448 -- \
             /usr/bin/env -i \
@@ -1243,7 +1268,9 @@ remove_evaluator_checkout() {
     # Reviewer-created directories may be mode 0700. Let their owner make them
     # traversable first; then the agent-owned top-level tree can be removed.
     if [[ -x /usr/local/bin/landlock-exec ]]; then
-        /usr/bin/sudo -n -u agentmill-reviewer /usr/bin/chmod -R a+rwX "$1" \
+        "$REVIEWER_EXEC" \
+            --write-root "$1" --allow-metadata -- \
+            /usr/bin/chmod -R a+rwX "$1" \
             >/dev/null 2>&1 || true
         chmod -R u+rwX "$1" >/dev/null 2>&1 || true
     fi
@@ -1276,9 +1303,10 @@ run_agent() {
     unset OLDPWD
     if [[ "$mode" == review ]]; then
         unset MISSION_FILE
-        # Neutralize inherited path controls. Sudo filters TMPDIR even with -E,
-        # so the same assignments are also supplied explicitly on its command
-        # line below (all are non-secret paths inside the disposable root).
+        # Neutralize inherited path controls. On the sandboxed path none of
+        # these exports cross the broker — the reviewer's whole environment comes
+        # from the supervisor-written reviewer-env.json instead; the exports
+        # serve the unsandboxed smoke-test fallback below.
         unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
         unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG_SYSTEM GIT_CONFIG_COUNT
         unset GIT_CONFIG_PARAMETERS
@@ -1293,14 +1321,11 @@ run_agent() {
         export CLAUDE_CONFIG_DIR="$EVAL_ROOT/home/.claude"
         export GIT_CONFIG_GLOBAL="$EVAL_ROOT/home/.gitconfig" GIT_CONFIG_NOSYSTEM=1
         if [[ -x /usr/local/bin/landlock-exec ]]; then
-            # Keep the trusted deadline outside sudo and under the supervisor
-            # uid. Reviewer code can signal same-uid ancestors, so an inner
-            # timeout could be SIGSTOPed to disable ITER_TIMEOUT.
+            # This caller deadline complements the root broker's independent
+            # deadline. Reviewer code cannot signal either supervisor uid.
             review_exec=(/usr/bin/timeout
                          "--kill-after=$TIMEOUT_KILL_AFTER" "$ITER_TIMEOUT"
-                         /usr/bin/sudo -n -u agentmill-reviewer
-                         /usr/bin/env -i HOME="$HOME" PATH=/usr/bin:/bin
-                         /usr/bin/python3 -I /usr/local/bin/landlock-exec
+                         "$REVIEWER_EXEC"
                          --write-root "$EVAL_ROOT"
                          --environment-file "$EVAL_ROOT/reviewer-env.json"
                          --max-processes 448
@@ -1308,7 +1333,9 @@ run_agent() {
                          --session-ack "$REVIEWER_ACK_FILE"
                          --allow-device /dev/null)
             [[ ! -e /dev/tty ]] || review_exec+=(--allow-device /dev/tty)
-            review_exec+=(--)
+            # Change directory only after dropping uid and installing the
+            # boundary; the root broker never traverses worker-chosen paths.
+            review_exec+=(-- /usr/bin/env -C "$session_repo_dir")
             session_timeout=()
         fi
     fi
@@ -1354,6 +1381,11 @@ run_agent() {
             tail -n +2 "$parse_file"
             ;;
         codex)
+            # exec reads CODEX_API_KEY. Keep the translation local to this
+            # session; the isolated reviewer gets it from its env file.
+            if [[ -z "${CODEX_API_KEY:-}" && -n "${OPENAI_API_KEY:-}" ]]; then
+                export CODEX_API_KEY="$OPENAI_API_KEY"
+            fi
             [[ -n "$MODEL" ]] && args=(-m "$MODEL")
             # MAX_TURNS/MAX_BUDGET_USD have no codex equivalent; ignored, not an error.
             args+=(--ephemeral --output-schema "$agent_schema")
@@ -1581,7 +1613,10 @@ checkpoint_leftovers() {
 restore_iteration_interruptible() {
     if ! run_interruptible restore_iteration; then
         if [[ "$SHUTDOWN" == true ]]; then
-            shutdown_clean_checkout
+            # The ratchet already condemned this iteration; the bounded
+            # shutdown path must finish the revert, not freeze HEAD on the
+            # failing commits.
+            shutdown_clean_checkout revert
             return 0
         fi
         die "could not restore iteration $iter"
@@ -1603,9 +1638,12 @@ clean_check_artifacts_interruptible() {
 # spend that window running user-controlled checks or metrics, and do not let a
 # slow git hook/filter/submodule operation run until Docker resorts to SIGKILL.
 # Commits the agent completed before TERM remain at HEAD; only uncommitted
-# residue is discarded. GNU timeout is guaranteed in the image (the env
-# fallback exists solely for the host-side smoke tests).
+# residue is discarded — except in `revert` mode, where a condemned iteration's
+# interrupted revert is finished so kept history stays green. GNU timeout is
+# guaranteed in the image (the env fallback exists solely for the host-side
+# smoke tests).
 shutdown_clean_checkout() {
+    local revert="${1:-}"
     [[ "${shutdown_cleanup_done:-false}" != true ]] || return 0
     shutdown_cleanup_done=true
     log "shutdown: skipping checkpoint/check/metric and discarding uncommitted leftovers"
@@ -1619,16 +1657,36 @@ shutdown_clean_checkout() {
         status_file=$3
         count_file=$4
         start_ref=$5
+        start_head_ref=$6
+        revert=$7
         cd "$repo" || exit 1
-        if git rev-parse --verify HEAD >/dev/null 2>&1; then
+        if [ "$revert" = revert ] && [ -n "$start_ref" ]; then
+            # Idempotent whether the interrupted revert had moved HEAD yet.
+            if [ -n "$start_head_ref" ]; then
+                git symbolic-ref HEAD "$start_head_ref" || exit 1
+            else
+                git update-ref --no-deref HEAD "$start_ref" || exit 1
+            fi
+            git reset -q --hard "$start_ref" || exit 1
+        elif [ "$revert" = revert ]; then
+            # The iteration created the first commit on an unborn branch;
+            # delete it and restore the original unborn HEAD.
+            git read-tree --empty || exit 1
+            if [ -n "$start_head_ref" ]; then
+                git symbolic-ref HEAD "$start_head_ref" || exit 1
+                git update-ref -d "$start_head_ref" 2>/dev/null || true
+            fi
+        elif ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+            git read-tree --empty || exit 1
+        else
             git reset -q --hard HEAD || exit 1
+        fi
+        if git rev-parse --verify HEAD >/dev/null 2>&1; then
             git submodule foreach -q --recursive \
                 '\''git reset -q --hard && git clean -q -ffd'\'' || true
             git submodule update -q --recursive --force || true
             git submodule foreach -q --recursive \
                 '\''git reset -q --hard && git clean -q -ffd'\'' || true
-        else
-            git read-tree --empty || exit 1
         fi
         git clean -q -ffd
         git rev-parse --verify HEAD >"$head_file" 2>/dev/null || : >"$head_file"
@@ -1639,7 +1697,7 @@ shutdown_clean_checkout() {
             git rev-list --count HEAD >"$count_file" 2>/dev/null || echo 0 >"$count_file"
         fi
     ' agentmill-shutdown-clean "$REPO_DIR" "$state_head_file" "$state_status_file" \
-        "$state_count_file" "$start_ref"; then
+        "$state_count_file" "$start_ref" "$start_head_ref" "$revert"; then
         log "warning: shutdown cleanup did not finish within 20 seconds"
     fi
 }
@@ -1653,12 +1711,24 @@ METRIC_BEST=""
 # The last line of a metric run, as a number. Ints, floats, and negatives are
 # accepted; anything else yields nothing, which the caller reads as "revert".
 metric_number() {
-    local last
+    local last sign="" mantissa exponent="" integer fraction=""
     last="$(tail -1 "$1" 2>/dev/null | tr -d '\r' || true)"
     last="${last#"${last%%[![:space:]]*}"}"
     last="${last%"${last##*[![:space:]]}"}"
     [[ "$last" =~ ^[-+]?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][-+]?[0-9]+)?$ ]] || return 0
-    printf '%s' "$last"
+    # Normalize text rather than round through a float: JSON forbids a leading
+    # plus, leading integer zeros, and an empty side of a decimal point.
+    last="${last#+}"
+    if [[ "$last" == -* ]]; then sign=-; last="${last#-}"; fi
+    mantissa="${last%%[eE]*}"
+    [[ "$mantissa" == "$last" ]] || exponent="${last#"$mantissa"}"
+    integer="${mantissa%%.*}"
+    integer="${integer#"${integer%%[!0]*}"}"
+    if [[ "$mantissa" == *.* ]]; then
+        fraction=".${mantissa#*.}"
+        [[ "$fraction" != . ]] || fraction=.0
+    fi
+    printf '%s%s%s%s' "$sign" "${integer:-0}" "$fraction" "$exponent"
 }
 
 # Runs METRIC_CMD with its output appended to $1 (the iteration log) and
@@ -1668,7 +1738,7 @@ metric_number() {
 # belongs to the caller.
 run_metric() {
     local out="$LOG_DIR/.metric-out" rc=0
-    bash -c "$METRIC_CMD" >"$out" 2>>"$1" || rc=$?
+    run_bounded_command "$METRIC_CMD" >"$out" 2>>"$1" || rc=$?
     cat "$out" >>"$1" 2>/dev/null || true
     [[ "$rc" -eq 0 ]] || return 0
     metric_number "$out"
@@ -1839,7 +1909,7 @@ verify_done_claim() {
     fi
     if [[ -n "$cmd" ]]; then
         log "$label: $cmd"
-        run_interruptible bash -c "$cmd" >"$out" 2>&1 || ok=false
+        run_interruptible run_bounded_command "$cmd" >"$out" 2>&1 || ok=false
         if [[ "$SHUTDOWN" == true ]]; then
             shutdown_clean_checkout
             return 1
@@ -1950,7 +2020,11 @@ while true; do
     : >"$state_count_file"
     : > "$msg_file"
     read_steer
-    [[ -f PROGRESS.md ]] || log "initializer session (no PROGRESS.md)"
+    initializing=false
+    if [[ ! -f PROGRESS.md ]]; then
+        initializing=true
+        log "initializer session (no PROGRESS.md)"
+    fi
     # Backgrounded so TERM/INT is handled while the agent runs, not after it.
     note_mission_changes
     session_files work
@@ -2048,7 +2122,7 @@ while true; do
         status=reverted
     elif [[ "$SHUTDOWN" != true && "$mutated" == true && -n "$CHECK_CMD" ]]; then
         log "check: $CHECK_CMD"
-        if ! run_interruptible bash -c "$CHECK_CMD" >>"$iter_log" 2>&1; then
+        if ! run_interruptible run_bounded_command "$CHECK_CMD" >>"$iter_log" 2>&1; then
             if [[ "$SHUTDOWN" == true ]]; then
                 shutdown_clean_checkout
             else
@@ -2076,7 +2150,8 @@ while true; do
 
     # Metric ratchet: a green check only says the tree is not broken. When
     # METRIC_CMD is set the iteration must also move the number the right way
-    # — anything else, including a score that cannot be read, is reverted.
+    # — except a successful initializer may retain an unchanged score once it
+    # creates PROGRESS.md. Worse or unreadable scores are always reverted.
     if [[ "$SHUTDOWN" != true && -n "$METRIC_CMD" && "$mutated" == true \
           && "$status" != reverted ]]; then
         metric_ran=true
@@ -2098,6 +2173,9 @@ while true; do
         elif metric_better "$metric_value" "$METRIC_BEST"; then
             log "iteration $iter: kept (metric $metric_value → best $METRIC_BEST)"
             METRIC_BEST="$metric_value"
+        elif [[ "$initializing" == true && -f PROGRESS.md && "$status" == kept ]] \
+             && ! metric_better "$METRIC_BEST" "$metric_value"; then
+            log "iteration $iter: kept initializer (metric unchanged: $metric_value)"
         else
             log "metric $metric_value not better than $METRIC_BEST — reverting"
             restore_iteration_interruptible

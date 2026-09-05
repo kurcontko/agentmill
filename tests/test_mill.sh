@@ -9,10 +9,13 @@ make_env() {  # sandbox holding its own copy of mill, so MILL_DIR is disposable
     TMP="$(mktemp -d)"
     mkdir -p "$TMP/bin" "$TMP/a/api" "$TMP/b/api"
     cp "$ROOT/mill" "$ROOT/.env.example" "$TMP/"
+    cp "$ROOT/dind_watch.sh" "$TMP/"
+    mkdir -p "$TMP/dind"
+    cp "$ROOT/dind/Dockerfile" "$TMP/dind/"
     cat > "$TMP/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DOCKER_LOG"
-for key in ANTHROPIC_API_KEY GIT_EMAIL MODEL SETUP_CMD CHECK_CMD GITHUB_TOKEN \
+for key in ANTHROPIC_API_KEY OPENAI_API_KEY CODEX_API_KEY GIT_EMAIL MODEL SETUP_CMD CHECK_CMD GITHUB_TOKEN \
     CUSTOM_FLAG CUSTOM_CRLF MAX_TURNS MIN_TURNS MAX_BUDGET_USD \
     MAX_TOTAL_BUDGET_USD DONE_CMD EVALUATOR CLAUDE_BARE METRIC_CMD \
     METRIC_DIRECTION HTTP_PROXY HTTPS_PROXY NO_PROXY NODE_EXTRA_CA_CERTS \
@@ -326,7 +329,7 @@ assert_env_file_private_and_cleaned
 : > "$DOCKER_LOG"
 : > "$DOCKER_FILE_ENV_LOG"
 mill -C "$TMP/a/api" shell >/dev/null || fail "mill shell exited nonzero"
-grep -q '^run --rm -it --entrypoint bash ' "$DOCKER_LOG" \
+grep -q '^run --rm -it .* bash$' "$DOCKER_LOG" \
     || { cat "$DOCKER_LOG"; fail "interactive shell did not reach docker run"; }
 assert_file_env_value GITHUB_TOKEN cleanup-secret
 assert_env_file_private_and_cleaned
@@ -405,13 +408,16 @@ fi
 grep -q 'EVALUATOR=true cannot be combined with --dind' "$TMP/err" \
     || { cat "$TMP/err"; fail "missing evaluator/DinD isolation error"; }
 [[ ! -s "$DOCKER_LOG" ]] || { cat "$DOCKER_LOG"; fail "evaluator/DinD rejection reached Docker"; }
+if mill -C "$TMP/a/api" shell --dind >"$TMP/out" 2>"$TMP/err"; then
+    fail "interactive shell combined the evaluator with DinD"
+fi
+[[ ! -s "$DOCKER_LOG" ]] || fail "shell evaluator/DinD rejection reached Docker"
 : > "$TMP/config"
 cat > "$TMP/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DOCKER_LOG"
 case "$*" in
-    "network inspect agentmill"|"container inspect agentmill-dind") exit 1 ;;
-    "exec agentmill-dind docker -H tcp://127.0.0.1:2375 info")
+    exec\ agentmill-dind-*\ info)
         count=0
         [[ -f "$DIND_COUNT" ]] && count="$(cat "$DIND_COUNT")"
         count=$((count + 1))
@@ -431,20 +437,31 @@ export DIND_COUNT="$TMP/dind-count"
 printf 'DOCKER_HOST=tcp://lower-precedence.example:2375\n' > "$TMP/config"
 mill -C "$TMP/a/api" run --dind >"$TMP/out" || { cat "$TMP/out"; fail "ready dind was rejected"; }
 [[ "$(cat "$DIND_COUNT")" -eq 3 ]] || fail "mill did not poll dind readiness"
-ready_line="$(grep -n '^exec agentmill-dind docker -H tcp://127.0.0.1:2375 info$' "$DOCKER_LOG" | tail -1 | cut -d: -f1)"
+ready_line="$(grep -n '^exec agentmill-dind-.* --host=tcp://docker:2376 --tlsverify .* info$' "$DOCKER_LOG" | tail -1 | cut -d: -f1)"
 agent_line="$(grep -n '^run --rm --name agentmill-api-' "$DOCKER_LOG" | cut -d: -f1)"
 [[ "$ready_line" -lt "$agent_line" ]] || fail "agent container started before dind was ready"
 case "$(grep '^run --rm --name agentmill-api-' "$DOCKER_LOG")" in
-    *--env-file*'-e DOCKER_HOST=tcp://agentmill-dind:2375'*) ;;
+    *--env-file*'-e DOCKER_HOST=tcp://docker:2376 -e DOCKER_TLS_VERIFY=1 -e DOCKER_CERT_PATH=/certs/client'*) ;;
     *) cat "$DOCKER_LOG"; fail "DinD DOCKER_HOST did not follow the lower-precedence env file" ;;
 esac
+grep -q 'docker:27.5.1-dind@sha256:[a-f0-9]\{64\}' "$DOCKER_LOG" || fail "DinD image is not pinned"
+grep -q -- '--security-opt no-new-privileges --cap-drop ALL' "$DOCKER_LOG" || fail "worker hardening missing"
+grep -q -- '-e DOCKER_TLS_CERTDIR=/certs' "$DOCKER_LOG" || fail "DinD TLS is disabled"
+grep -q -- ':/certs/client:ro' "$DOCKER_LOG" || fail "worker client certificates are not read-only"
+first_network="$(sed -n 's/^network create .* \(agentmill-net-.*\)$/\1/p' "$DOCKER_LOG")"
+mill -C "$TMP/b/api" run --dind >/dev/null || fail "second isolated DinD run failed"
+second_network="$(sed -n 's/^network create .* \(agentmill-net-.*\)$/\1/p' "$DOCKER_LOG" | tail -1)"
+[[ -n "$first_network" && -n "$second_network" && "$first_network" != "$second_network" ]] \
+    || fail "two runs shared a DinD network"
+grep -q "^network rm $first_network$" "$DOCKER_LOG" || fail "foreground run leaked its network"
+grep -q '^volume rm agentmill-certs-' "$DOCKER_LOG" || fail "foreground run leaked its client certificates"
 
 : > "$DOCKER_LOG"
 cat > "$TMP/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DOCKER_LOG"
 case "$*" in
-    "network inspect agentmill"|"container inspect agentmill-dind"|"exec agentmill-dind docker -H tcp://127.0.0.1:2375 info") exit 1 ;;
+    exec\ agentmill-dind-*\ info) exit 1 ;;
 esac
 exit 0
 STUB
@@ -456,6 +473,9 @@ grep -q 'did not become ready within 0s' "$TMP/err" \
     || { cat "$TMP/err"; fail "missing bounded dind readiness error"; }
 grep -q '^run --rm --name agentmill-api-' "$DOCKER_LOG" \
     && fail "agent container started after dind readiness failure"
+grep -q '^rm -f agentmill-dind-' "$DOCKER_LOG" || fail "failed startup leaked its daemon"
+grep -q '^network rm agentmill-net-' "$DOCKER_LOG" || fail "failed startup leaked its network"
+grep -q '^volume rm agentmill-certs-' "$DOCKER_LOG" || fail "failed startup leaked its certificates"
 rm -rf "$TMP"
 echo "PASS: dind readiness is bounded and precedes the agent"
 
@@ -699,5 +719,14 @@ for kv in 'METRIC_CMD=python3 bench.py' 'METRIC_DIRECTION=max'; do
 done
 rm -rf "$TMP"
 echo "PASS: METRIC_CMD and METRIC_DIRECTION reach the container"
+
+make_env
+OPENAI_API_KEY=test-openai CODEX_API_KEY=test-codex \
+    mill -C "$TMP/a/api" run --agent codex >/dev/null || fail "Codex mill run failed"
+for key in OPENAI_API_KEY CODEX_API_KEY; do assert_bare_key "$key"; done
+assert_client_env_value OPENAI_API_KEY test-openai
+assert_client_env_value CODEX_API_KEY test-codex
+rm -rf "$TMP"
+echo "PASS: Codex authentication keys are forwarded without argv exposure"
 
 echo "OK: all mill smoke tests passed"

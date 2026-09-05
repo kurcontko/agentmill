@@ -12,10 +12,10 @@ ARG DOCKER_CLI_VERSION=27.5.1
 ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 
-# Only what the loop itself needs. Repo toolchains are the agent's job:
-# it runs `sudo apt-get install` (scoped below) or a language installer.
+# System dependencies belong in this image or an operator-built derived image.
+# Neither worker nor reviewer receives sudo or a runtime package-install API.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl git jq openssh-client python3 sudo \
+        ca-certificates curl git jq openssh-client python3 \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
                       "@openai/codex@${CODEX_VERSION}" \
@@ -24,12 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd -m -u "${AGENT_UID}" -g "${AGENT_GID}" -s /bin/bash agent \
     && groupadd -r agentmill-reviewer \
     && useradd -m -r -g agentmill-reviewer -s /bin/bash agentmill-reviewer \
-    && echo 'agent ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/apt' \
-        > /etc/sudoers.d/agent \
-    && echo 'agent ALL=(agentmill-reviewer) NOPASSWD: SETENV: ALL' \
-        >> /etc/sudoers.d/agent \
-    && echo 'agent ALL=(root) NOPASSWD: /usr/local/bin/agentmill-reviewer-control *' \
-        >> /etc/sudoers.d/agent
+    && mkdir -p /run/agentmill \
+    && chown "root:$(id -gn agent)" /run/agentmill \
+    && chmod 2750 /run/agentmill
 
 # The docker CLI, so --dind's DOCKER_HOST is actually usable by the agent.
 RUN curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-${DOCKER_CLI_VERSION}.tgz" \
@@ -44,8 +41,13 @@ RUN chown "agent:$(id -gn agent)" /workspace
 COPY loop.sh /loop.sh
 COPY landlock_exec.py /usr/local/bin/landlock-exec
 COPY reviewer_control.py /usr/local/bin/agentmill-reviewer-control
+COPY reviewer_exec.sh /usr/local/bin/agentmill-reviewer-exec
+COPY reviewer_rpc.py /usr/local/bin/reviewer-rpc
+COPY supervisor.py /usr/local/bin/agentmill-supervisor
 RUN chmod 755 /loop.sh /usr/local/bin/landlock-exec \
-        /usr/local/bin/agentmill-reviewer-control
+        /usr/local/bin/agentmill-reviewer-control \
+        /usr/local/bin/agentmill-reviewer-exec /usr/local/bin/reviewer-rpc \
+        /usr/local/bin/agentmill-supervisor
 
 USER agent
 # Skip onboarding; bypassPermissions is intentional — the container is the boundary.
@@ -53,4 +55,8 @@ RUN mkdir -p /home/agent/.claude \
     && echo '{"hasCompletedOnboarding":true}' > /home/agent/.claude.json \
     && echo '{"permissions":{"defaultMode":"bypassPermissions"}}' > /home/agent/.claude/settings.json
 
-ENTRYPOINT ["/loop.sh"]
+# Root runs only the fixed supervisor, which drops credentials before any
+# worker/reviewer command. mill grants it only SETUID, SETGID, and KILL.
+USER root
+ENV HOME=/home/agent
+ENTRYPOINT ["/usr/bin/python3", "-I", "/usr/local/bin/agentmill-supervisor"]

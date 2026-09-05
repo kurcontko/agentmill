@@ -31,11 +31,11 @@ def run_sandboxed(
 ) -> subprocess.CompletedProcess[str]:
     command: list[str] = []
     if RUN_AS:
-        command.extend(("sudo", "-n", "-E", "-u", RUN_AS))
+        assert RUN_AS == "agentmill-reviewer"
+        command.append("/usr/local/bin/agentmill-reviewer-exec")
+    else:
+        command.extend((sys.executable, "-I", str(WRAPPER)))
     command.extend([
-        sys.executable,
-        "-I",
-        str(WRAPPER),
         "--write-root",
         str(write_root),
     ])
@@ -145,12 +145,11 @@ if (pid, pgid) != (os.getpid(), os.getpgrp()) or pid_start <= 0 or pg_start < 0:
         dynamic_ack.write_text("")
         command: list[str] = []
         if RUN_AS:
-            command.extend(("sudo", "-n", "-E", "-u", RUN_AS))
+            command.append("/usr/local/bin/agentmill-reviewer-exec")
+        else:
+            command.extend((sys.executable, "-I", str(WRAPPER)))
         command.extend(
             (
-                sys.executable,
-                "-I",
-                str(WRAPPER),
                 "--write-root",
                 str(allowed),
                 "--session-state",
@@ -580,7 +579,7 @@ if child.returncode != 0 or child.stdout.strip() != "child-ok":
 
         # x32 shares AUDIT_ARCH_X86_64 but sets a high bit in syscall numbers.
         # The sandbox must kill such calls rather than interpret them using the
-        # native allowlist.  (sudo may mediate child status in RUN_AS mode.)
+        # native allowlist. (The broker mediates child status in RUN_AS mode.)
         if platform.machine().lower() == "x86_64" and not RUN_AS:
             result = run_sandboxed(
                 allowed,

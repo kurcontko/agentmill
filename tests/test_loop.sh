@@ -1589,4 +1589,233 @@ grep -q 'METRIC_DIRECTION must be min or max' "$TMP/out.log" \
 rm -rf "$TMP"
 echo "PASS: unparseable metrics revert and a missing baseline is fatal"
 
+# API-key-only Codex runs must authenticate both sessions without saved login.
+# Also inspect the env file used across sudo: host smoke tests inherit the
+# environment directly, which otherwise conceals isolated-reviewer auth bugs.
+for auth_mode in translated native precedence; do
+    make_env
+    printf 'review the work\n' > "$TMP/eval.md"
+    cat > "$TMP/bin/codex" <<'STUB'
+#!/usr/bin/env bash
+[[ "${CODEX_API_KEY:-}" == test-codex-key ]] || exit 41
+[[ ! -e "$HOME/.codex/auth.json" ]] || exit 42
+out=""
+while [[ $# -gt 0 ]]; do [[ "$1" != -o ]] || out="$2"; shift; done
+if [[ -f "${HOME%/home}/reviewer-env.json" ]]; then
+    python3 - "${HOME%/home}/reviewer-env.json" <<'PY'
+import json, sys
+with open(sys.argv[1]) as stream:
+    assert json.load(stream)["CODEX_API_KEY"] == "test-codex-key"
+PY
+    [[ $? -eq 0 ]] || exit 43
+    printf '{"verdict":"PASS","findings":"authenticated"}\n' > "$out"
+else
+    echo work > auth-work.txt
+    git add -A && git commit -qm 'agent: authenticated work'
+    printf '{"done":true,"summary":"authenticated","blocked":false}\n' > "$out"
+fi
+printf '{"type":"turn.completed","usage":{"input_tokens":2,"output_tokens":1}}\n'
+STUB
+    chmod +x "$TMP/bin/codex"
+    auth_openai=test-codex-key auth_codex=""
+    case "$auth_mode" in
+        native) auth_openai="" auth_codex=test-codex-key ;;
+        precedence) auth_openai=other-key auth_codex=test-codex-key ;;
+    esac
+    run_loop env AGENT=codex OPENAI_API_KEY="$auth_openai" CODEX_API_KEY="$auth_codex" \
+        MAX_ITERATIONS=1 EVALUATOR=true EVALUATOR_FILE="$TMP/eval.md"
+    grep -q 'agent signaled done, evaluator PASS' "$TMP/out.log" \
+        || { cat "$TMP/out.log"; fail "Codex API-key authentication failed ($auth_mode)"; }
+    ! grep -Rq 'test-codex-key' "$TMP/logs" \
+        || fail "Codex API key appeared in logs"
+    rm -rf "$TMP"
+done
+echo "PASS: Codex API keys reach workers and isolated reviewer environments"
+
+# A plan-only initializer survives a tied metric, then optimization starts.
+# A later tied score still reverts, even when that iteration edits the plan.
+make_env
+printf '1.0\n' > "$TMP/repo/score"
+git -C "$TMP/repo" add score
+git -C "$TMP/repo" -c user.email=t@t -c user.name=t commit -qm benchmark
+cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+n=1
+[[ ! -f "$COUNT" ]] || n=$(( $(cat "$COUNT") + 1 ))
+echo "$n" > "$COUNT"
+if [[ ! -f PROGRESS.md ]]; then
+    printf -- '- [ ] optimize; verifier: bash verify.sh\n' > PROGRESS.md
+    printf 'test -s score\n' > verify.sh
+elif [[ "$n" -eq 2 ]]; then
+    echo 0.9 > score
+    echo implemented > implementation.txt
+else
+    echo tied-attempt >> PROGRESS.md
+fi
+git add -A && git commit -qm "agent: step $n"
+printf '{"type":"result","is_error":false,"num_turns":4,"result":"continue"}\n'
+STUB
+chmod +x "$TMP/bin/claude"
+run_loop env MAX_ITERATIONS=3 COUNT="$TMP/count" CHECK_CMD='bash verify.sh' METRIC_CMD='cat score'
+[[ "$(grep -c 'initializer session' "$TMP/out.log")" -eq 1 ]] \
+    || { cat "$TMP/out.log"; fail "initializer repeated under metric gate"; }
+[[ -f "$TMP/repo/PROGRESS.md" && -f "$TMP/repo/implementation.txt" ]] \
+    || fail "initialization never advanced to implementation"
+python3 - "$TMP/logs/results.jsonl" <<'PY'
+import json, sys
+with open(sys.argv[1]) as stream:
+    rows = [json.loads(line) for line in stream]
+assert [row["status"] for row in rows] == ["kept", "kept", "reverted"], rows
+assert [row["best"] for row in rows] == [1.0, 0.9, 0.9], rows
+PY
+! grep -q tied-attempt "$TMP/repo/PROGRESS.md" || fail "later tied iteration survived"
+rm -rf "$TMP"
+echo "PASS: metric initialization survives a tie and later iterations require improvement"
+
+for init_failure in regression invalid check error missing_plan; do
+    make_env
+    printf '1.0\n' > "$TMP/repo/score"
+    git -C "$TMP/repo" add score
+    git -C "$TMP/repo" -c user.email=t@t -c user.name=t commit -qm benchmark
+    head_before="$(git -C "$TMP/repo" rev-parse HEAD)"
+    cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+[[ "$INIT_FAILURE" == missing_plan ]] || echo plan > PROGRESS.md
+case "$INIT_FAILURE" in
+    regression) echo 2 > score ;;
+    invalid) echo invalid > score ;;
+esac
+echo work > init-work.txt
+git add -A && git commit -qm 'agent: initialization attempt'
+[[ "$INIT_FAILURE" != error ]] || exit 1
+printf '{"type":"result","is_error":false,"num_turns":4,"result":"continue"}\n'
+STUB
+    chmod +x "$TMP/bin/claude"
+    init_check=true
+    [[ "$init_failure" != check ]] || init_check=false
+    run_loop env MAX_ITERATIONS=1 INIT_FAILURE="$init_failure" \
+        CHECK_CMD="$init_check" METRIC_CMD='cat score'
+    [[ "$(git -C "$TMP/repo" rev-parse HEAD)" == "$head_before" ]] \
+        || { cat "$TMP/out.log"; fail "metric initializer accepted $init_failure"; }
+    rm -rf "$TMP"
+done
+echo "PASS: initializer exception still rejects failures and regressions"
+
+# Parse with the standard JSON parser (jq also accepts some non-JSON numbers).
+# Decimal comparisons ensure normalization preserves the full numeric text.
+for metric_text in +0.5 .5 -.5 000.5 5.e-1 +00001E-1 0.12345678901234567890123456789; do
+    make_env
+    printf '+0001.\n' > "$TMP/repo/score"
+    git -C "$TMP/repo" add score
+    git -C "$TMP/repo" -c user.email=t@t -c user.name=t commit -qm benchmark
+    cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+printf '%s\n' "$METRIC_TEXT" > score
+echo attempt >> metric-attempts.txt
+git add score metric-attempts.txt && git commit -qm 'agent: measured score'
+printf '{"type":"result","is_error":false,"num_turns":4,"result":"continue"}\n'
+STUB
+    chmod +x "$TMP/bin/claude"
+    run_loop env MAX_ITERATIONS=1 METRIC_TEXT="$metric_text" METRIC_CMD='cat score'
+    python3 - "$TMP/logs/results.jsonl" "$metric_text" <<'PY'
+from decimal import Decimal
+import json, sys
+with open(sys.argv[1]) as stream:
+    rows = [json.loads(line, parse_float=Decimal) for line in stream]
+assert len(rows) == 1 and rows[0]["status"] == "kept", rows
+assert rows[0]["metric"] == rows[0]["best"] == Decimal(sys.argv[2]), rows
+PY
+    # A second run records a tied/reverted attempt against the normalized
+    # baseline, exercising baseline serialization in the best field as well.
+    run_loop env MAX_ITERATIONS=1 METRIC_TEXT="$metric_text" \
+        METRIC_CMD='cat score' CHECK_CMD=true MIN_TURNS=0
+    python3 - "$TMP/logs/results.jsonl" "$metric_text" <<'PY'
+from decimal import Decimal
+import json, sys
+with open(sys.argv[1]) as stream:
+    rows = [json.loads(line, parse_float=Decimal) for line in stream]
+assert rows[-1]["best"] == Decimal(sys.argv[2]), rows
+PY
+    rm -rf "$TMP"
+done
+echo "PASS: metric and baseline numbers serialize as valid JSON without rounding"
+
+# Real deadlines: each hanging verifier/measurement starts a TERM-ignoring
+# descendant. Expiry must fail closed, clean artifacts, and leave no live child.
+if timeout --kill-after=1 1 true >/dev/null 2>&1; then
+    for timeout_phase in check 'done' done_check metric baseline; do
+        make_env
+        cat > "$TMP/bin/claude" <<'STUB'
+#!/usr/bin/env bash
+[[ "$1" == --help ]] && exit 0
+if [[ "$TIMEOUT_PHASE" != done_check ]]; then
+    echo work > timed-work.txt
+    git add -A && git commit -qm 'agent: timed verification'
+fi
+printf '{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0,"num_turns":4,"result":"TASK_COMPLETE"}\n'
+STUB
+        cat > "$TMP/hang.sh" <<'STUB'
+#!/usr/bin/env bash
+echo junk > timeout-artifact.txt
+echo 0.1  # a number printed before timeout must not be accepted
+trap '' TERM
+(trap '' TERM; exec sleep 30) &
+echo "$!" > "$CHILD_PID_FILE"
+wait
+STUB
+        chmod +x "$TMP/bin/claude"
+        head_before="$(git -C "$TMP/repo" rev-parse HEAD)"
+        timeout_args=()
+        case "$timeout_phase" in
+            check|done_check) timeout_args+=(CHECK_CMD="bash $TMP/hang.sh") ;;
+            done) timeout_args+=(DONE_CMD="bash $TMP/hang.sh") ;;
+            metric)
+                # shellcheck disable=SC2016 # expanded by the metric shell
+                timeout_args+=('METRIC_CMD=if [[ -f timed-work.txt ]]; then bash "$HANG_SCRIPT"; else echo 1; fi') ;;
+            baseline) timeout_args+=(METRIC_CMD="bash $TMP/hang.sh") ;;
+        esac
+        timeout_started="$(date +%s)"
+        timeout_rc=0
+        run_loop_raw env ITER_TIMEOUT=1 SHUTDOWN_GRACE=1 MAX_ITERATIONS=1 \
+            TIMEOUT_PHASE="$timeout_phase" HANG_SCRIPT="$TMP/hang.sh" \
+            CHILD_PID_FILE="$TMP/child-pid" "${timeout_args[@]}" || timeout_rc=$?
+        timeout_elapsed=$(( $(date +%s) - timeout_started ))
+        [[ "$timeout_elapsed" -lt 10 ]] \
+            || { cat "$TMP/out.log"; fail "$timeout_phase hung for ${timeout_elapsed}s"; }
+        [[ -s "$TMP/child-pid" ]] || { cat "$TMP/out.log"; fail "$timeout_phase never started"; }
+        child_pid="$(cat "$TMP/child-pid")"
+        child_state="$(ps -o stat= -p "$child_pid" 2>/dev/null || true)"
+        [[ -z "$child_state" || "$child_state" == *Z* ]] \
+            || fail "$timeout_phase left a live descendant $child_pid"
+        [[ ! -e "$TMP/repo/timeout-artifact.txt" ]] || fail "$timeout_phase left artifacts"
+        [[ -z "$(git -C "$TMP/repo" status --porcelain)" ]] || fail "$timeout_phase left a dirty tree"
+        grep -Rq 'command timed out after 1s' "$TMP/logs" \
+            || fail "$timeout_phase did not report timeout"
+        if [[ "$timeout_phase" == baseline ]]; then
+            [[ "$timeout_rc" -ne 0 && ! -e "$TMP/repo/timed-work.txt" ]] \
+                || fail "timed-out baseline allowed an agent session"
+        else
+            [[ "$timeout_rc" -eq 0 ]] || { cat "$TMP/out.log"; fail "$timeout_phase aborted loop"; }
+            ! grep -q 'signaled TASK_COMPLETE' "$TMP/out.log" || fail "$timeout_phase accepted done"
+            case "$timeout_phase" in
+                check|metric)
+                    [[ "$(git -C "$TMP/repo" rev-parse HEAD)" == "$head_before" ]] \
+                        || fail "$timeout_phase did not revert"
+                    grep -q '"status":"reverted"' "$TMP/logs/results.jsonl" || fail "missing revert"
+                    ;;
+                done|done_check)
+                    grep -q 'failed:.*command timed out' "$TMP/repo/PROGRESS.md" \
+                        || fail "$timeout_phase did not record verifier failure" ;;
+            esac
+        fi
+        rm -rf "$TMP"
+    done
+    echo "PASS: verifier and metric deadlines kill descendants and fail closed"
+else
+    echo "SKIP: verifier/metric deadline behavior requires GNU timeout"
+fi
+
 echo "OK: all loop.sh smoke tests passed"

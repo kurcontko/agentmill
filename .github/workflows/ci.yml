@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -26,7 +25,7 @@ jobs:
           persist-credentials: false
 
       - name: Run ShellCheck
-        run: shellcheck loop.sh mill tests/*.sh
+        run: shellcheck loop.sh mill reviewer_exec.sh dind_watch.sh tests/*.sh
 
   shell-tests:
     name: Shell Tests
@@ -48,7 +47,7 @@ jobs:
         run: python3 tests/test_landlock.py
 
       - name: Compile Python helpers
-        run: python3 -m compileall -q landlock_exec.py reviewer_control.py tests/test_landlock.py
+        run: python3 -m compileall -q landlock_exec.py reviewer_control.py supervisor.py reviewer_rpc.py tests
 
   docker-build:
     name: Docker Build
@@ -81,33 +80,51 @@ jobs:
 
       - name: Verify packaged reviewer boundary and Linux ownership
         run: |
-          docker run --rm --init --pids-limit 512 --entrypoint python3 \
+          docker run --rm --init --pids-limit 512 \
+            --security-opt no-new-privileges --cap-drop ALL \
+            --cap-add SETUID --cap-add SETGID --cap-add KILL \
             -e LANDLOCK_EXEC=/usr/local/bin/landlock-exec \
             -e LANDLOCK_RUN_AS=agentmill-reviewer \
             -e EXPECTED_AGENT_UID=12345 \
             -e EXPECTED_AGENT_GID=20 \
             -v "$GITHUB_WORKSPACE/tests/test_landlock.py:/test_landlock.py:ro" \
-            agentmill:ci /test_landlock.py
+            agentmill:ci python3 /test_landlock.py
 
-          docker run --rm --init --pids-limit 512 --entrypoint bash \
+          docker run --rm --init --pids-limit 512 \
+            --security-opt no-new-privileges --cap-drop ALL \
+            --cap-add SETUID --cap-add SETGID --cap-add KILL \
             -v "$GITHUB_WORKSPACE/tests/test_image_evaluator.sh:/test_image_evaluator.sh:ro" \
-            agentmill:ci /test_image_evaluator.sh
+            agentmill:ci bash /test_image_evaluator.sh
 
-          docker run --rm --init --pids-limit 512 --entrypoint bash agentmill:ci -ceu '
+          docker run --rm --init --pids-limit 512 \
+            --security-opt no-new-privileges --cap-drop ALL \
+            --cap-add SETUID --cap-add SETGID --cap-add KILL agentmill:ci bash -ceu '
             for cli in claude codex; do
               scratch="$(mktemp -d /tmp/agentmill-cli-smoke.XXXXXX)"
               mkdir -p "$scratch"/{.claude,.codex,cache,config,data,state}
               chmod -R a+rwX "$scratch"
               cli_path="$(command -v "$cli")"
               /usr/bin/timeout --kill-after=1 10 \
-                sudo -n -u agentmill-reviewer /usr/bin/env -i \
+                /usr/local/bin/agentmill-reviewer-exec \
+                --write-root "$scratch" --allow-device /dev/null --max-processes 448 -- \
+                /usr/bin/env -i \
                 HOME="$scratch" TMPDIR="$scratch" TMP="$scratch" TEMP="$scratch" \
                 PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
                 XDG_CACHE_HOME="$scratch/cache" XDG_CONFIG_HOME="$scratch/config" \
                 XDG_DATA_HOME="$scratch/data" XDG_STATE_HOME="$scratch/state" \
                 CODEX_HOME="$scratch/.codex" CLAUDE_CONFIG_DIR="$scratch/.claude" \
-                /usr/bin/python3 -I /usr/local/bin/landlock-exec \
-                --write-root "$scratch" --allow-device /dev/null --max-processes 448 -- \
                 "$cli_path" --version
             done
           '
+
+      - name: Verify concurrent DinD isolation and lifecycle
+        run: bash tests/test_dind.sh
+
+      - name: Verify supervisor RPC and independent deadline
+        run: |
+          docker run --rm --init --pids-limit 512 \
+            --security-opt no-new-privileges --cap-drop ALL \
+            --cap-add SETUID --cap-add SETGID --cap-add KILL \
+            -e ITER_TIMEOUT=1 -e SHUTDOWN_GRACE=1 \
+            -v "$GITHUB_WORKSPACE/tests/test_supervisor.sh:/test_supervisor.sh:ro" \
+            agentmill:ci bash /test_supervisor.sh

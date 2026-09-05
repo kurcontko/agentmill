@@ -14,8 +14,7 @@ done
 MILL_DIR="$(cd "$(dirname "$self")" && pwd)"
 unset self link
 CONFIG_FILE="${AGENTMILL_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/agentmill/env}"
-NET="agentmill"
-DIND="agentmill-dind"
+NET="" DIND="" DIND_CERTS="" DIND_STATE="" DIND_TRANSFERRED=false
 GITFILE_SNAPSHOT_DIR=""
 GITFILE_SNAPSHOT_COUNT=0
 
@@ -24,7 +23,19 @@ cleanup_gitfile_snapshots() {
     rm -rf -- "$GITFILE_SNAPSHOT_DIR"
     GITFILE_SNAPSHOT_DIR=""
 }
-trap cleanup_gitfile_snapshots EXIT
+cleanup_launch() {
+    cleanup_gitfile_snapshots
+    if [[ "$DIND_TRANSFERRED" == false ]]; then
+        [[ -z "$DIND" ]] || docker rm -f "$DIND" >/dev/null 2>&1 || true
+        [[ -z "$NET" ]] || docker network rm "$NET" >/dev/null 2>&1 || true
+        [[ -z "$DIND_CERTS" ]] || docker volume rm "$DIND_CERTS" >/dev/null 2>&1 || true
+        if [[ -n "$DIND_STATE" ]]; then
+            rm -f -- "$DIND_STATE/worker.cid" "$DIND_STATE/watch.sh"
+            rmdir -- "$DIND_STATE" 2>/dev/null || true
+        fi
+    fi
+}
+trap cleanup_launch EXIT
 
 usage() {
     cat <<EOF
@@ -225,7 +236,7 @@ worktree_mount() {
 
 # Config the container understands. Keys found in the config file or MILL.md
 # frontmatter are appended, so a custom var set there reaches the agent too.
-ENV_KEYS=(ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY
+ENV_KEYS=(ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY CODEX_API_KEY
           HTTP_PROXY HTTPS_PROXY NO_PROXY NODE_EXTRA_CA_CERTS
           http_proxy https_proxy no_proxy
           AGENT MODEL FALLBACK_MODEL MAX_ITERATIONS MAX_ERRORS MAX_NOOPS
@@ -352,29 +363,32 @@ load_env() {
     done < "$file"
 }
 
-# DinD sidecar for repos whose work needs docker (testcontainers, image
-# builds). Privileged, but the blast radius is the sidecar — never the host
-# docker socket.
+# Each run owns a daemon, network, and TLS client certificate volume. DinD
+# still requires a privileged container: use a disposable VM for untrusted
+# Docker workloads. Neither TLS nor digest pinning changes that host boundary.
 ensure_dind() {
-    local ready_timeout elapsed=0
-    docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
-    if docker container inspect "$DIND" >/dev/null 2>&1; then
-        # Normally redundant because the sidecar uses --rm, but it also
-        # recovers an old stopped container created by an earlier version.
-        docker start "$DIND" >/dev/null 2>&1 || true
-    else
-        echo "Starting dind sidecar..."
-        docker run -d --rm --name "$DIND" --label agentmill --label agentmill.dind --privileged \
-            --network "$NET" -e DOCKER_TLS_CERTDIR= docker:27-dind >/dev/null
-    fi
-
+    local ready_timeout elapsed=0 image run_id docker_bin
     ready_timeout="$(cfg DIND_READY_TIMEOUT)"
     ready_timeout="${ready_timeout:-30}"
-    [[ "$ready_timeout" != *[!0-9]* ]] \
+    [[ "$ready_timeout" =~ ^[0-9]+$ ]] \
         || { echo "Error: DIND_READY_TIMEOUT must be a non-negative integer" >&2; exit 1; }
-    # Probe the same plaintext TCP listener used by the agent containers, not
-    # only dockerd's local Unix socket inside the sidecar.
-    until docker exec "$DIND" docker -H tcp://127.0.0.1:2375 info >/dev/null 2>&1; do
+    image="$(sed -n 's/^FROM //p' "$MILL_DIR/dind/Dockerfile")"
+    [[ "$image" =~ ^docker:[a-zA-Z0-9_.-]+@sha256:[a-f0-9]{64}$ ]] \
+        || { echo "Error: DinD image must be pinned by digest in dind/Dockerfile" >&2; exit 1; }
+    DIND_STATE="$(mktemp -d "${TMPDIR:-/tmp}/agentmill-dind.XXXXXXXXXXXX")"
+    run_id="${DIND_STATE##*.}"
+    DIND="agentmill-dind-$run_id" NET="agentmill-net-$run_id" DIND_CERTS="agentmill-certs-$run_id"
+    docker network create --label agentmill.dind --label "agentmill.owner=$CONTAINER_NAME" "$NET" >/dev/null
+    docker volume create --label agentmill.dind --label "agentmill.owner=$CONTAINER_NAME" "$DIND_CERTS" >/dev/null
+    echo "Starting isolated dind sidecar..."
+    docker run -d --rm --name "$DIND" --label agentmill --label agentmill.dind \
+        --label "agentmill.owner=$CONTAINER_NAME" --privileged --network "$NET" \
+        --network-alias docker -e DOCKER_TLS_CERTDIR=/certs \
+        -v "$DIND_CERTS:/certs/client" "$image" >/dev/null
+    # Verify the mutually authenticated TCP endpoint used by this run.
+    until docker exec "$DIND" docker --host=tcp://docker:2376 --tlsverify \
+        --tlscacert=/certs/client/ca.pem --tlscert=/certs/client/cert.pem \
+        --tlskey=/certs/client/key.pem info >/dev/null 2>&1; do
         if [[ "$elapsed" -ge "$ready_timeout" ]]; then
             echo "Error: dind did not become ready within ${ready_timeout}s" >&2
             exit 1
@@ -383,7 +397,17 @@ ensure_dind() {
         sleep 1
         elapsed=$((elapsed + 1))
     done
-    DIND_ARGS=(--network "$NET" -e "DOCKER_HOST=tcp://$DIND:2375")
+    DIND_ARGS=(--network "$NET" -e DOCKER_HOST=tcp://docker:2376
+               -e DOCKER_TLS_VERIFY=1 -e DOCKER_CERT_PATH=/certs/client
+               -e DOCKER_CONTEXT= -v "$DIND_CERTS:/certs/client:ro"
+               --cidfile "$DIND_STATE/worker.cid")
+    # Snapshot the watcher before the worker can edit a checkout containing
+    # this installation. It outlives mill -d and cleans up after natural exit.
+    cp "$MILL_DIR/dind_watch.sh" "$DIND_STATE/watch.sh"
+    chmod 400 "$DIND_STATE/watch.sh"
+    docker_bin="$(command -v docker)"
+    nohup bash "$DIND_STATE/watch.sh" "$docker_bin" "$DIND_STATE" \
+        "$DIND" "$NET" "$DIND_CERTS" "$$" </dev/null >/dev/null 2>&1 &
 }
 
 common_args() {  # fills RUN_ARGS with env + mounts shared by run/shell
@@ -391,7 +415,9 @@ common_args() {  # fills RUN_ARGS with env + mounts shared by run/shell
     # and recorded on the container so `mill stop` (and --all) can honor each
     # container's own shutdown_grace without re-deriving config.
     RUN_ARGS=(--label agentmill --label "agentmill.stop-timeout=$(container_stop_timeout)"
-              --init --memory 4g --pids-limit 512)
+              --init --memory 4g --pids-limit 512
+              --security-opt no-new-privileges --cap-drop ALL
+              --cap-add SETUID --cap-add SETGID --cap-add KILL)
     # Caller-provided values already live in Docker's environment, so bare
     # -e KEY preserves them (including values an env file cannot represent).
     # File/frontmatter values may be arbitrary secrets or host-sensitive names
@@ -521,16 +547,16 @@ cmd_run() {
         [[ -f "$prompt" ]] || { echo "Error: prompt file not found: $prompt" >&2; exit 1; }
         RUN_ARGS+=(-v "$prompt:/prompts/PROMPT.md:ro")
     fi
-    [[ "$dind" == true ]] && { ensure_dind; RUN_ARGS+=("${DIND_ARGS[@]}"); }
-    [[ "$detach" == true ]] && RUN_ARGS+=(-d)
-
     if docker ps -q --filter "name=^/${CONTAINER_NAME}$" | grep -q .; then
         echo "Error: $CONTAINER_NAME is already running for $REPO_PATH (mill stop, or wait)" >&2
         exit 1
     fi
     docker rm "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    [[ "$dind" == true ]] && { ensure_dind; RUN_ARGS+=("${DIND_ARGS[@]}"); }
+    [[ "$detach" == true ]] && RUN_ARGS+=(-d)
     docker_with_env_file "$((4 + ENV_FILE_INSERT_AT))" \
         run --rm --name "$CONTAINER_NAME" "${RUN_ARGS[@]}" "$IMAGE"
+    [[ "$dind" != true || "$detach" != true ]] || DIND_TRANSFERRED=true
 }
 
 cmd_shell() {
@@ -544,10 +570,14 @@ cmd_shell() {
     done
     resolve_repo
     [[ -f "$MISSION_FILE" ]] && load_mission   # shell works without a mission
+    if [[ "$dind" == true && "$(cfg EVALUATOR)" == true ]]; then
+        echo "Error: EVALUATOR=true cannot be combined with --dind; the reviewer must not share a privileged Docker API" >&2
+        exit 1
+    fi
     common_args
     [[ "$dind" == true ]] && { ensure_dind; RUN_ARGS+=("${DIND_ARGS[@]}"); }
-    docker_with_env_file "$((5 + ENV_FILE_INSERT_AT))" \
-        run --rm -it --entrypoint bash "${RUN_ARGS[@]}" -w "$REPO_PATH" "$IMAGE"
+    docker_with_env_file "$((3 + ENV_FILE_INSERT_AT))" \
+        run --rm -it "${RUN_ARGS[@]}" -w "$REPO_PATH" "$IMAGE" bash
 }
 
 # Newest-last list of a checkout's log files matching $1. Collected into an
@@ -648,18 +678,8 @@ stop_container() {
     docker rm "$target" >/dev/null 2>&1 || true
 }
 
-running_agent_exists() {
-    local id dind_id
-    dind_id="$(docker ps -q --filter "name=^/${DIND}$" | head -1)"
-    while IFS= read -r id; do
-        [[ -n "$id" && "$id" != "$dind_id" ]] && return 0
-    done < <(docker ps -q --filter label=agentmill)
-    return 1
-}
-
 # Default: stop this checkout only, so parallel worktree runs survive each
-# other's stops. The shared dind sidecar and network go when the last agent
-# container is gone. --all: stop agents first, then dind.
+# other's stops. Resource labels scope sidecar cleanup to its owning checkout.
 # The soft brake: a file the running loop notices between iterations, so the
 # agent's session is never cut off mid-work. No docker involved.
 cmd_stop_soft() {
@@ -670,7 +690,7 @@ cmd_stop_soft() {
 }
 
 cmd_stop() {
-    local id dind_id all=false
+    local id all=false filters=(--filter label=agentmill.dind)
     case "${1:-}" in
         "") ;;
         -a|--all) all=true ;;
@@ -680,23 +700,21 @@ cmd_stop() {
     if [[ "$all" == false ]]; then
         resolve_repo
         stop_container "$CONTAINER_NAME"
-        if running_agent_exists; then
-            echo "Stopped $CONTAINER_NAME."
-            return 0
-        fi
-        stop_container "$DIND"
-        docker network rm "$NET" >/dev/null 2>&1 || true
-        echo "Stopped."
-        return 0
+        filters+=(--filter "label=agentmill.owner=$CONTAINER_NAME")
+    else
+        while IFS= read -r id; do
+            [[ -z "$id" ]] || stop_container "$id"
+        done < <(docker ps -aq --filter label=agentmill)
     fi
-
-    dind_id="$(docker ps -aq --filter "name=^/${DIND}$" | head -1)"
     while IFS= read -r id; do
-        [[ -n "$id" && "$id" != "$dind_id" ]] || continue
-        stop_container "$id"
-    done < <(docker ps -aq --filter label=agentmill)
-    stop_container "$DIND"
-    docker network rm "$NET" >/dev/null 2>&1 || true
+        [[ -z "$id" ]] || stop_container "$id"
+    done < <(docker ps -aq "${filters[@]}")
+    while IFS= read -r id; do
+        [[ -z "$id" ]] || docker network rm "$id" >/dev/null 2>&1 || true
+    done < <(docker network ls -q "${filters[@]}")
+    while IFS= read -r id; do
+        [[ -z "$id" ]] || docker volume rm "$id" >/dev/null 2>&1 || true
+    done < <(docker volume ls -q "${filters[@]}")
     echo "Stopped."
 }
 

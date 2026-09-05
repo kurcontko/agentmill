@@ -59,7 +59,10 @@ Like `git`, `mill` acts on the repository containing the current directory;
 
 Auth in `~/.config/agentmill/env`: `ANTHROPIC_API_KEY` (or
 `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`) for claude;
-`OPENAI_API_KEY` for codex.
+`OPENAI_API_KEY` for codex. The loop maps it to Codex's exec authentication
+variable, [`CODEX_API_KEY`](https://developers.openai.com/codex/noninteractive#use-api-key-auth),
+for workers and isolated reviewers. An explicitly
+configured `CODEX_API_KEY` takes precedence.
 
 ## MILL.md
 
@@ -159,7 +162,12 @@ its process group is copied to a protected supervisor record, so an external
 shutdown can still enforce the TERM/KILL deadline if an inner wrapper crashes.
 A fixed root-owned controller validates the reviewer uid, PID/PGID, and Linux
 process start times before signaling; reviewer-owned code cannot kill or spoof
-that cleanup authority.
+that cleanup authority. A fixed root supervisor owns reviewer launches and
+shutdown. Its Unix socket accepts requests only from the worker uid and exposes
+two operations: launch the fixed Landlock helper as the reviewer, or invoke the
+identity-validating controller. It never runs a repository command as root.
+Worker and reviewer commands have no capabilities, inherit `no-new-privileges`,
+and have no runtime sudo. The supervisor retains only SETUID, SETGID, and KILL.
 
 A rejection is appended to `PROGRESS.md`, committed, and the loop keeps going,
 so the next session sees why its predecessor's claim did not stick. CLIs that
@@ -185,7 +193,9 @@ brake — no session is cut off mid-work.
 
 `METRIC_CMD` turns the loop into a benchmark optimizer: its last stdout line is
 the score, measured once on the clean tree for a baseline and again after every
-iteration. Only a strict improvement is kept.
+iteration. Only a strict improvement is kept, except that a successful
+initializer creating `PROGRESS.md` may keep an unchanged score. Initialization
+still passes `CHECK_CMD`, and a worse or unreadable score is reverted.
 
 ```markdown
 ---
@@ -198,6 +208,12 @@ metric_direction: max            # min for loss/latency, max for accuracy
 The current best rides in every session's preamble, and each iteration appends a
 row to `logs/<container>/metrics.tsv` (`iter sha metric best status summary`). A
 worse score — or output that is not a number — is reverted.
+
+Each `CHECK_CMD`, `DONE_CMD`, and `METRIC_CMD` invocation (including the initial
+baseline) has its own `ITER_TIMEOUT` deadline and `SHUTDOWN_GRACE` before hard
+termination. Expiration fails the check or measurement; a failed baseline
+stops the run. Accepted numbers are normalized for the JSON ledger, including
+scores such as `+.5`, `1.`, or `001e-3`.
 
 ## Cost
 
@@ -241,7 +257,7 @@ its isolation boundary.
 | `MAX_ITERATIONS` | `0` | 0 = unbounded |
 | `MAX_ERRORS` / `MAX_NOOPS` | `3` / `3` | consecutive failures / no-progress iterations before stopping (0 = unbounded) |
 | `ERROR_BACKOFF` / `MAX_BACKOFF` | `30` / `900` | seconds: `ERROR_BACKOFF * 2^n` after n failures, capped |
-| `ITER_TIMEOUT` | `3600` | seconds per iteration |
+| `ITER_TIMEOUT` | `3600` | seconds per agent session and per verifier/metric command |
 | `SHUTDOWN_GRACE` | `30` | seconds before a timed-out or signalled agent is killed |
 | `DIND_READY_TIMEOUT` | `30` | seconds to wait for the `--dind` TCP endpoint |
 | `MIN_TURNS` | `2` | a session ending in fewer turns without touching the repo counts as an error, not a no-op (0 = off) |
@@ -258,18 +274,44 @@ its isolation boundary.
 ## How the agent installs things
 
 The image is deliberately generic — node (for the CLIs), git, jq, python3, and
-a docker client for `--dind`. Repo toolchains are the agent's job: it has passwordless `sudo apt-get` (scoped
-to apt only) and installs what the work needs, or you make it deterministic with
-`SETUP_CMD`. For repos whose work itself needs Docker (testcontainers, image
-builds), `--dind` starts a docker:dind sidecar, waits for its TCP endpoint, then
-points the image's docker client at it — the host socket is never mounted.
+a docker client for `--dind`. Install system dependencies in an operator-built
+derived image, then select it with `AGENTMILL_IMAGE`. For example:
+
+```dockerfile
+FROM ghcr.io/kurcontko/agentmill:<your-pinned-version>
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
+    && rm -rf /var/lib/apt/lists/*
+# Keep the inherited supervisor entrypoint; it drops privileges before work.
+```
+
+`SETUP_CMD` runs as the unprivileged worker and can prepare user-local tools.
+Missing system packages should be reported as blocked, not installed with sudo.
+
+For repos whose work itself needs Docker, `--dind` creates a unique sidecar,
+network, and TLS client certificate volume for each run. The client volume is
+read-only in the worker; the daemon requires mutual TLS on port 2376. No daemon
+port is published and the host Docker socket is never mounted. The image digest
+in `dind/Dockerfile` is the source of truth and receives Dependabot update PRs.
+A host watcher removes the sidecar, network, and certificates when the worker
+exits, including detached runs. Failed launches and `mill stop` also clean up
+their own resources. If the host daemon is temporarily unavailable, the watcher
+waits until it can establish that the worker has stopped. After a host restart,
+`mill stop --all` can remove orphaned resources using their labels.
 Because that API controls a privileged daemon, `mill` refuses to combine
 `--dind` with `EVALUATOR=true`.
 
+Privileged DinD still has host-level authority. TLS prevents other clients from
+using its API; pinning prevents an unnoticed tag replacement. Neither provides
+host isolation for the worker that holds the client certificate. Per-run TLS
+networks are not an isolation boundary between hostile tenants. Use a separate
+disposable VM for each untrusted Docker run.
+
 ## Security
 
-The agent runs with permission checks bypassed **inside the container** — that
-is the point: the container is the worker boundary. It receives the repository,
+The agent CLI runs with permission checks bypassed **inside the container**.
+The worker is a non-root process with no capabilities or privilege escalation;
+the fixed supervisor is the only root application process. It receives the repository,
 the bundled prompts, API credentials, and explicitly forwarded runtime settings
 such as proxy/TLS variables. Caller-exported values use Docker's bare `-e KEY`;
 values parsed from config/frontmatter travel in a private mode-0600 `--env-file`,
