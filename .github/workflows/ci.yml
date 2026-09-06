@@ -69,6 +69,9 @@ jobs:
       - name: Run Python unit tests
         run: python3 -m unittest discover -s tests -p 'test_*.py'
 
+      - name: Run Linux write-confinement tests
+        run: python3 tests/test_landlock.py
+
   shell-tests:
     name: Shell Tests
     runs-on: ubuntu-latest
