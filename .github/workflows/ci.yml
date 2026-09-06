@@ -49,11 +49,14 @@ jobs:
       - name: Run initialization and recovery tests
         run: bash tests/test_recovery.sh
 
+      - name: Run durable identity tests
+        run: python3 tests/test_run_state.py
+
       - name: Run Landlock confinement tests
         run: python3 tests/test_landlock.py
 
       - name: Compile Python helpers
-        run: python3 -m compileall -q landlock_exec.py reviewer_control.py supervisor.py reviewer_rpc.py tests
+        run: python3 -m compileall -q landlock_exec.py reviewer_control.py supervisor.py reviewer_rpc.py run_state.py tests
 
   docker-build:
     name: Docker Build

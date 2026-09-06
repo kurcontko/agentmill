@@ -116,6 +116,7 @@ mill [-C DIR] shell [--dind]   # interactive shell inside the container
 mill [-C DIR] logs             # follow the loop, else the last summaries
 mill [-C DIR] logs --raw       # tail the last iteration's full event log
 mill [-C DIR] logs --results   # results.jsonl as a table
+mill logs --run RUN_ID         # inspect an older run, from any directory
 mill [-C DIR] steer "..."      # one-shot note for the next session
 mill [-C DIR] stop             # stop this checkout's container
 mill [-C DIR] stop --soft      # finish the current iteration, then stop
@@ -142,7 +143,22 @@ Foreground runs return `0` only for verified completion. Other outcomes return
 cancellation), or `130`/`143` (interrupt/termination). A detached launch returning
 success only acknowledges that the container started.
 
-`outcome.json` in the log directory records the versioned terminal outcome,
+Each invocation receives a unique run ID and evidence directory under
+`$XDG_STATE_HOME/agentmill/runs/<run-id>/` (default:
+`~/.local/state/agentmill/runs/`). `mill logs` selects the latest run for the
+checkout; `--run RUN_ID` selects one explicitly. Legacy checkout logs remain
+readable when no new run has been recorded for that checkout.
+
+`manifest.json` records the original commit, mission and policy digests,
+effective supported configuration, and available image/CLI version metadata.
+`artifacts/` holds the original mission and acceptance-policy snapshot;
+`events.jsonl` records run boundaries and accepted checkpoints. Authentication
+environment variables are excluded; operator-authored mission and command text
+is retained, so keep credentials in environment variables rather than that text.
+Missing runtime metadata is recorded as unknown. A supplied run ID cannot
+restart existing evidence: durable resume is a separate future feature.
+
+`outcome.json` in that directory records the versioned terminal outcome,
 stop reason, worker claim, verification and review status, checked commit, and
 exit code. In `results.jsonl`, `agent_claimed_done` records the worker's claim;
 `completion_ok` and the compatibility field `done` record verified completion.
@@ -232,7 +248,7 @@ metric_direction: max            # min for loss/latency, max for accuracy
 ```
 
 The current best rides in every session's preamble, and each iteration appends a
-row to `logs/<container>/metrics.tsv` (`iter sha metric best status summary`). A
+row to the run's `metrics.tsv` (`iter sha metric best status summary`). A
 worse score — or output that is not a number — is reverted.
 
 Each `CHECK_CMD`, `DONE_CMD`, and `METRIC_CMD` invocation (including the initial

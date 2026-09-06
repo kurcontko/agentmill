@@ -72,7 +72,18 @@ log() { printf '[%s] %s\n' "$(date -u '+%H:%M:%S')" "$*"; }
 die() { stop_reason="${phase:-runtime}_failed"; log "FATAL: $*"; exit 1; }
 
 RUN_STATE_HELPER="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/run_state.py"
-RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+SOURCE_LOG_ROOT="$LOG_DIR"
+initialize_run_state() (
+    export AGENT MODEL FALLBACK_MODEL MAX_ITERATIONS MAX_ERRORS MAX_NOOPS ITER_TIMEOUT
+    export LOOP_DELAY ERROR_BACKOFF MAX_BACKOFF SHUTDOWN_GRACE MAX_TURNS MAX_BUDGET_USD
+    export MAX_TOTAL_BUDGET_USD MIN_TURNS DONE_PROMISE SETUP_CMD CHECK_CMD METRIC_CMD
+    export METRIC_DIRECTION DONE_CMD EVALUATOR CLAUDE_BARE
+    local args=("$SOURCE_LOG_ROOT" "$REPO_DIR" "$MISSION_FILE")
+    [[ -z "${AGENTMILL_RUN_ID:-}" ]] || args+=(--run-id "$AGENTMILL_RUN_ID")
+    python3 "$RUN_STATE_HELPER" init "${args[@]}"
+)
+LOG_DIR="$(initialize_run_state)" || die "could not initialize run evidence"
+RUN_ID="$(jq -r .run_id "$LOG_DIR/manifest.json")"
 verification_checks=not_run verification_review=not_run checked_commit=""
 phase=prepare
 mkdir -p "$LOG_DIR"
@@ -397,8 +408,8 @@ esac
 cd "$REPO_DIR"
 mkdir -p "$LOG_DIR"
 EVALUATOR_SOURCE_EXCLUDE="${AGENTMILL_LOG_REPO_REL:-}"
-if [[ "$LOG_DIR" == "$REPO_DIR/"* ]]; then
-    EVALUATOR_SOURCE_EXCLUDE="${LOG_DIR#"$REPO_DIR/"}"
+if [[ "$SOURCE_LOG_ROOT" == "$REPO_DIR/"* ]]; then
+    EVALUATOR_SOURCE_EXCLUDE="${SOURCE_LOG_ROOT#"$REPO_DIR/"}"
 fi
 if [[ -n "$EVALUATOR_SOURCE_EXCLUDE" ]]; then
     case "/$EVALUATOR_SOURCE_EXCLUDE/" in
@@ -2016,14 +2027,14 @@ results_log="$LOG_DIR/results.jsonl"
 msg_file="$LOG_DIR/.last-msg"
 parse_file="$LOG_DIR/.last-parse"
 iter=0 errors=0 noops=0 stop_reason="" total_cost=0
-RUN_BASE="$(head_oid)"                   # what the evaluator diffs the run against
+RUN_BASE="$(jq -r '.original_commit // ""' "$LOG_DIR/manifest.json")"
 CURRENT_MISSION=""
 
 # Baseline measurement happens before iteration 1, but it has the same
 # shutdown/cleanup contract as an iteration: a hung metric or git cleanup must
 # be addressable by the signal trap, and interrupted artifacts must be removed
 # without turning an operator shutdown into a fatal missing-metric error.
-start_ref="$RUN_BASE"
+start_ref="$(head_oid)"
 start_head_ref="$(git symbolic-ref -q HEAD 2>/dev/null || true)"
 shutdown_cleanup_done=false
 state_head_file="$LOG_DIR/.iteration-head"
@@ -2038,7 +2049,7 @@ if [[ -n "$CHECK_CMD" ]] && ! stop_file_requested; then
     log "baseline check: $CHECK_CMD"
     run_interruptible run_bounded_command "$CHECK_CMD" >"$LOG_DIR/baseline.log" 2>&1 || baseline_rc=$?
     python3 "$RUN_STATE_HELPER" observation "$LOG_DIR/baseline.json" \
-        "$CHECK_CMD" "$baseline_rc" "$RUN_BASE" "$LOG_DIR/baseline.log" \
+        "$CHECK_CMD" "$baseline_rc" "$start_ref" "$LOG_DIR/baseline.log" \
         || die "could not record baseline verification"
     if [[ "$SHUTDOWN" == true ]]; then
         shutdown_clean_checkout
@@ -2364,6 +2375,13 @@ while true; do
         "$RUN_ID" "$completion_ok" "$completion_ok" "$verification_checks" \
         "$verification_review" "$checked_commit"
     } >>"$results_log"
+    if [[ "$status" == kept && "$mutated" == true ]]; then
+        checkpoint_kind=implementation
+        [[ "$metadata_only" != true ]] || checkpoint_kind=planning
+        python3 "$RUN_STATE_HELPER" checkpoint "$LOG_DIR" "$current_head" "$iter" "$checkpoint_kind" \
+            "$verification_checks" "$checked_commit" \
+            || die "could not record accepted checkpoint"
+    fi
     log "iteration $iter: $status ($new_commits commits, \$$(fmt_cost "$cost"), ${m_turns:-?} turns, ${duration_s}s; total \$$(fmt_cost "$total_cost"))"
     if [[ "$SHUTDOWN" == true ]]; then
         write_summary

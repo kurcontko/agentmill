@@ -7,6 +7,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 
 make_env() {  # sandbox holding its own copy of mill, so MILL_DIR is disposable
     TMP="$(mktemp -d)"
+    export XDG_STATE_HOME="$TMP/state"
     mkdir -p "$TMP/bin" "$TMP/a/api" "$TMP/b/api"
     cp "$ROOT/mill" "$ROOT/.env.example" "$TMP/"
     cp "$ROOT/dind_watch.sh" "$TMP/"
@@ -150,7 +151,8 @@ name_a="$(run_line | sed 's/.*--name \([^ ]*\).*/\1/')"
 mill -C "$TMP/b/api" run >/dev/null
 name_b="$(run_line | sed 's/.*--name \([^ ]*\).*/\1/')"
 [[ "$name_a" != "$name_b" ]] || fail "same-basename repos collide on container name: $name_a"
-run_line | grep -q -- "-v $TMP/logs/$name_b:/workspace/logs" || fail "log dir is not per-container"
+run_b="$(cat "$XDG_STATE_HOME/agentmill/checkouts/$name_b/latest")"
+run_line | grep -q -- "-v $XDG_STATE_HOME/agentmill/runs/$run_b:/workspace/logs" || fail "log dir is not per-run"
 rm -rf "$TMP"
 echo "PASS: distinct container and log dir per checkout"
 
@@ -666,7 +668,8 @@ echo "PASS: DONE_CMD, EVALUATOR, and CLAUDE_BARE reach the container"
 make_env
 mill -C "$TMP/a/api" run >/dev/null
 name="$(run_line | sed 's/.*--name \([^ ]*\).*/\1/')"
-logs="$TMP/logs/$name"
+run_id="$(cat "$XDG_STATE_HOME/agentmill/checkouts/$name/latest")"
+logs="$XDG_STATE_HOME/agentmill/runs/$run_id"
 printf '{"iter":1,"agent":"claude","status":"kept","commits":2,"head":"abc1234","ts":"t","subtype":"success","cost_usd":0.42,"duration_s":83,"turns":7}\n' \
     > "$logs/results.jsonl"
 printf 'raw event stream\n' > "$logs/iter-1-abc1234.log"
@@ -757,5 +760,25 @@ for outcome_exit in 0 1 2 3 4 130 143; do
 done
 rm -rf "$TMP"
 echo "PASS: foreground mill run preserves every terminal outcome exit code"
+
+make_env
+mill -C "$TMP/a/api" run >/dev/null
+name="$(run_line | sed 's/.*--name \([^ ]*\).*/\1/')"
+first_run="$(cat "$XDG_STATE_HOME/agentmill/checkouts/$name/latest")"
+first_logs="$XDG_STATE_HOME/agentmill/runs/$first_run"
+printf 'first run evidence\n' > "$first_logs/iter-1-first.summary"
+mill -C "$TMP/a/api" run >/dev/null
+second_run="$(cat "$XDG_STATE_HOME/agentmill/checkouts/$name/latest")"
+[[ "$first_run" != "$second_run" ]] || fail "repeated launch reused a run ID"
+mill -C "$TMP" logs --run "$first_run" >"$TMP/old-log"
+grep -q 'first run evidence' "$TMP/old-log" || fail "older run cannot be read outside its checkout"
+if mill -C "$TMP" logs --run '../escape' >/dev/null 2>&1; then fail "invalid run path accepted"; fi
+rm -f "$XDG_STATE_HOME/agentmill/checkouts/$name/latest"
+mkdir -p "$TMP/logs/$name"
+printf 'legacy evidence\n' > "$TMP/logs/$name/iter-1-legacy.summary"
+mill -C "$TMP/a/api" logs >"$TMP/legacy-log"
+grep -q 'legacy evidence' "$TMP/legacy-log" || fail "legacy checkout logs are inaccessible"
+rm -rf "$TMP"
+echo "PASS: run IDs isolate repeated launches and explicit/legacy log lookup works"
 
 echo "OK: all mill smoke tests passed"

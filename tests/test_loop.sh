@@ -43,7 +43,7 @@ chmod +x "$TMP/bin/claude"
 run_loop 0 env MAX_ITERATIONS=5
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected done-promise stop"; }
 [[ "$(git -C "$TMP/repo" rev-list --count HEAD)" -eq 2 ]] || fail "expected exactly one agent commit"
-grep -q '"status":"kept"' "$TMP/logs/results.jsonl" || fail "results.jsonl missing kept status"
+grep -q '"status":"kept"' "$TMP/logs/latest/results.jsonl" || fail "results.jsonl missing kept status"
 rm -rf "$TMP"
 echo "PASS: done promise stops the loop, work kept"
 
@@ -60,7 +60,7 @@ head_before="$(git -C "$TMP/repo" rev-parse HEAD)"
 run_loop 2 env MAX_ITERATIONS=10 MAX_NOOPS=2 CHECK_CMD=false
 grep -q "consecutive no-progress" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected no-progress stop"; }
 [[ "$(git -C "$TMP/repo" rev-parse HEAD)" == "$head_before" ]] || fail "reverted iteration left commits behind"
-grep -q '"status":"reverted"' "$TMP/logs/results.jsonl" || fail "results.jsonl missing reverted status"
+grep -q '"status":"reverted"' "$TMP/logs/latest/results.jsonl" || fail "results.jsonl missing reverted status"
 rm -rf "$TMP"
 echo "PASS: failing CHECK_CMD reverts the iteration (ratchet)"
 
@@ -70,7 +70,7 @@ printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/claude"
 chmod +x "$TMP/bin/claude"
 run_loop 1 env MAX_ERRORS=1
 grep -q "1 consecutive errors" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected error stop"; }
-grep -q '"status":"error"' "$TMP/logs/results.jsonl" || fail "results.jsonl missing error status"
+grep -q '"status":"error"' "$TMP/logs/latest/results.jsonl" || fail "results.jsonl missing error status"
 rm -rf "$TMP"
 echo "PASS: consecutive errors stop the loop"
 
@@ -86,7 +86,7 @@ head_before="$(git -C "$TMP/repo" rev-parse HEAD)"
 run_loop 2 env MAX_ITERATIONS=1 MAX_ERRORS=5 CHECK_CMD=false
 [[ "$(git -C "$TMP/repo" rev-parse HEAD)" == "$head_before" ]] || fail "errored iteration was not reverted"
 [[ -e "$TMP/repo/broken.txt" ]] && fail "revert left the agent's file behind"
-grep -q '"status":"reverted"' "$TMP/logs/results.jsonl" || fail "expected reverted status after agent error"
+grep -q '"status":"reverted"' "$TMP/logs/latest/results.jsonl" || fail "expected reverted status after agent error"
 rm -rf "$TMP"
 echo "PASS: a failed/timed-out iteration is checked and reverted too"
 
@@ -98,7 +98,7 @@ exit 1
 chmod +x "$TMP/bin/claude"
 run_loop 2 env MAX_ERRORS=0 MAX_NOOPS=0 MAX_ITERATIONS=2
 grep -q "max iterations" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected max-iterations stop"; }
-[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 2 ]] || fail "0 limits stopped the loop early"
+[[ "$(wc -l < "$TMP/logs/latest/results.jsonl")" -eq 2 ]] || fail "0 limits stopped the loop early"
 rm -rf "$TMP"
 echo "PASS: MAX_ERRORS=0 / MAX_NOOPS=0 are unbounded"
 
@@ -206,8 +206,8 @@ printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/claude"
 run_loop 2 env MAX_ITERATIONS=1 MIN_TURNS=0
 grep -q 'signaled TASK_COMPLETE' "$TMP/out.log" \
     && { cat "$TMP/out.log"; fail "reused Claude log replayed an old done event"; }
-[[ ! -s "$(echo "$TMP"/logs/iter-1-*.log)" ]] \
-    || { cat "$(echo "$TMP"/logs/iter-1-*.log)"; fail "Claude event log was not truncated"; }
+[[ ! -s "$(echo "$TMP"/logs/latest/iter-1-*.log)" ]] \
+    || { cat "$(echo "$TMP"/logs/latest/iter-1-*.log)"; fail "Claude event log was not truncated"; }
 
 cat > "$TMP/bin/codex" <<'STUB'
 #!/usr/bin/env bash
@@ -224,9 +224,9 @@ printf '{"done":false,"summary":"fresh","blocked":false}\n' > "$out"
 STUB
 chmod +x "$TMP/bin/codex"
 run_loop 2 env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=1 MIN_TURNS=0
-tail -1 "$TMP/logs/results.jsonl" | grep -q '"subtype":"success"' \
-    || { cat "$TMP/logs/results.jsonl"; fail "reused Codex log replayed an old error event"; }
-! grep -q 'old failure' "$(echo "$TMP"/logs/iter-1-*.log)" \
+tail -1 "$TMP/logs/latest/results.jsonl" | grep -q '"subtype":"success"' \
+    || { cat "$TMP/logs/latest/results.jsonl"; fail "reused Codex log replayed an old error event"; }
+! grep -q 'old failure' "$(echo "$TMP"/logs/latest/iter-1-*.log)" \
     || fail "Codex event log was not truncated"
 rm -rf "$TMP"
 echo "PASS: reused iteration event logs cannot replay stale completion/errors"
@@ -287,8 +287,8 @@ term_elapsed=$(( $(date +%s) - term_started ))
     || { cat "$TMP/out.log"; fail "agent process group took ${term_elapsed}s to stop after TERM"; }
 [[ -f "$TMP/repo/got-term" ]] || { cat "$TMP/out.log"; fail "agent CLI did not receive TERM"; }
 grep -q "shutdown signal" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected shutdown stop"; }
-[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 1 ]] || fail "a new session started after the signal"
-grep -q '"status":"kept"' "$TMP/logs/results.jsonl" || fail "the agent's own commit on TERM was not kept"
+[[ "$(wc -l < "$TMP/logs/latest/results.jsonl")" -eq 1 ]] || fail "a new session started after the signal"
+grep -q '"status":"kept"' "$TMP/logs/latest/results.jsonl" || fail "the agent's own commit on TERM was not kept"
 rm -rf "$TMP"
 echo "PASS: TERM stops the agent gracefully and the loop waits for it"
 
@@ -303,12 +303,12 @@ HOME="$TMP/home" PATH="$TMP/bin:$PATH" ANTHROPIC_API_KEY=test \
     REPO_DIR="$TMP/repo" LOG_DIR="$TMP/logs" PROMPT_FILE="$TMP/prompt.md" \
     LOOP_DELAY=30 MAX_NOOPS=0 bash "$ROOT/loop.sh" >"$TMP/out.log" 2>&1 &
 loop_pid=$!
-for _ in $(seq 1 50); do [[ -f "$TMP/logs/results.jsonl" ]] && break; sleep 0.1; done
+for _ in $(seq 1 50); do [[ -f "$TMP/logs/latest/results.jsonl" ]] && break; sleep 0.1; done
 sleep 0.5
 kill -TERM "$loop_pid"
 wait_rc=0; wait "$loop_pid" || wait_rc=$?
 [[ "$wait_rc" -eq 143 ]] || { cat "$TMP/out.log"; fail "expected cancellation exit 143, got $wait_rc"; }
-[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 1 ]] || fail "signal during sleep started another session"
+[[ "$(wc -l < "$TMP/logs/latest/results.jsonl")" -eq 1 ]] || fail "signal during sleep started another session"
 rm -rf "$TMP"
 echo "PASS: a signal during the sleep stops the loop immediately"
 
@@ -476,7 +476,7 @@ make_env
 printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/claude"
 chmod +x "$TMP/bin/claude"
 run_loop 2 env MAX_ERRORS=0 MAX_ITERATIONS=70 ERROR_BACKOFF=1 MAX_BACKOFF=0
-[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 70 ]] || { cat "$TMP/out.log"; fail "backoff arithmetic broke the loop"; }
+[[ "$(wc -l < "$TMP/logs/latest/results.jsonl")" -eq 70 ]] || { cat "$TMP/out.log"; fail "backoff arithmetic broke the loop"; }
 rm -rf "$TMP"
 echo "PASS: error backoff is capped by MAX_BACKOFF"
 
@@ -687,12 +687,12 @@ run_loop 2 env MAX_ITERATIONS=1 MAX_ERRORS=5
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" && { cat "$TMP/out.log"; fail "done promise honored on an errored session"; }
 grep -q "agent reported an error (error_during_execution" "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "is_error:true with exit 0 was not treated as an error"; }
-grep -q '"status":"error"' "$TMP/logs/results.jsonl" || fail "results.jsonl missing error status"
-grep -q '"subtype":"error_during_execution"' "$TMP/logs/results.jsonl" || fail "subtype not recorded"
-grep -q '"cost_usd":0.25' "$TMP/logs/results.jsonl" || { cat "$TMP/logs/results.jsonl"; fail "cost not recorded"; }
-grep -q '"turns":4' "$TMP/logs/results.jsonl" || fail "turns not recorded"
-grep -q '"tokens_in":100,"tokens_out":20' "$TMP/logs/results.jsonl" || fail "token counts not recorded"
-grep -q '"duration_s":' "$TMP/logs/results.jsonl" || fail "wall-clock duration not recorded"
+grep -q '"status":"error"' "$TMP/logs/latest/results.jsonl" || fail "results.jsonl missing error status"
+grep -q '"subtype":"error_during_execution"' "$TMP/logs/latest/results.jsonl" || fail "subtype not recorded"
+grep -q '"cost_usd":0.25' "$TMP/logs/latest/results.jsonl" || { cat "$TMP/logs/latest/results.jsonl"; fail "cost not recorded"; }
+grep -q '"turns":4' "$TMP/logs/latest/results.jsonl" || fail "turns not recorded"
+grep -q '"tokens_in":100,"tokens_out":20' "$TMP/logs/latest/results.jsonl" || fail "token counts not recorded"
+grep -q '"duration_s":' "$TMP/logs/latest/results.jsonl" || fail "wall-clock duration not recorded"
 rm -rf "$TMP"
 echo "PASS: a failed result event beats exit 0 and blocks the done promise"
 
@@ -707,7 +707,7 @@ STUB
 chmod +x "$TMP/bin/claude"
 run_loop 1 env MAX_ERRORS=1
 grep -q "1 consecutive errors" "$TMP/out.log" || { cat "$TMP/out.log"; fail "error_max_turns did not stop the loop"; }
-grep -q '"subtype":"error_max_turns"' "$TMP/logs/results.jsonl" || fail "subtype not recorded"
+grep -q '"subtype":"error_max_turns"' "$TMP/logs/latest/results.jsonl" || fail "subtype not recorded"
 rm -rf "$TMP"
 echo "PASS: an error_* subtype is a failed iteration"
 
@@ -723,7 +723,7 @@ STUB
 chmod +x "$TMP/bin/claude"
 run_loop 2 env MAX_ITERATIONS=10 MAX_TOTAL_BUDGET_USD=1
 grep -q 'budget exhausted ([$]1.20 of [$]1.00)' "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected a budget stop"; }
-[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 2 ]] || fail "budget stop came at the wrong iteration"
+[[ "$(wc -l < "$TMP/logs/latest/results.jsonl")" -eq 2 ]] || fail "budget stop came at the wrong iteration"
 grep -q 'total [$]1.20' "$TMP/out.log" || { cat "$TMP/out.log"; fail "cumulative cost missing from the iteration line"; }
 grep -q 'total cost: [$]1.20 across 2 iterations' "$TMP/out.log" || fail "final cost summary missing"
 rm -rf "$TMP"
@@ -753,12 +753,12 @@ chmod +x "$TMP/bin/claude"
 run_loop 1 env MAX_ERRORS=3 MAX_NOOPS=5 MAX_ITERATIONS=4
 grep -q 'agent produced no work in 1 turns' "$TMP/out.log" || { cat "$TMP/out.log"; fail "health check did not fire"; }
 grep -q "3 consecutive errors" "$TMP/out.log" || { cat "$TMP/out.log"; fail "health errors did not accumulate"; }
-[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 3 ]] \
+[[ "$(wc -l < "$TMP/logs/latest/results.jsonl")" -eq 3 ]] \
     || { cat "$TMP/out.log"; fail "MAX_ERRORS did not stop repeated MIN_TURNS failures"; }
-grep -q '"status":"error"' "$TMP/logs/results.jsonl" || fail "health-check iteration not recorded as an error"
-: > "$TMP/logs/results.jsonl"
+grep -q '"status":"error"' "$TMP/logs/latest/results.jsonl" || fail "health-check iteration not recorded as an error"
+: > "$TMP/logs/latest/results.jsonl"
 run_loop 2 env MAX_ITERATIONS=2 MAX_NOOPS=5 MIN_TURNS=0
-grep -q '"status":"noop"' "$TMP/logs/results.jsonl" || { cat "$TMP/out.log"; fail "MIN_TURNS=0 did not disable the health check"; }
+grep -q '"status":"noop"' "$TMP/logs/latest/results.jsonl" || { cat "$TMP/out.log"; fail "MIN_TURNS=0 did not disable the health check"; }
 rm -rf "$TMP"
 echo "PASS: MIN_TURNS catches an agent that does nothing"
 
@@ -793,7 +793,7 @@ printf '"result":"wrote stub.txt. TASK_COMPLETE","total_cost_usd":0.42,"num_turn
 STUB
 chmod +x "$TMP/bin/claude"
 run_loop 0 env MAX_ITERATIONS=1
-summary="$(echo "$TMP"/logs/iter-1-*.summary)"
+summary="$(echo "$TMP"/logs/latest/iter-1-*.summary)"
 [[ -f "$summary" ]] || { ls "$TMP/logs"; fail "no summary file written"; }
 grep -q '^status: kept$' "$summary" || { cat "$summary"; fail "summary missing status"; }
 grep -q '^subtype: success$' "$summary" || { cat "$summary"; fail "summary missing subtype"; }
@@ -825,10 +825,10 @@ STUB
 chmod +x "$TMP/bin/codex"
 run_loop 0 env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=1 TMP_FAIL="$TMP/nope"
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "codex done promise ignored"; }
-grep -q '"subtype":"success"' "$TMP/logs/results.jsonl" || { cat "$TMP/logs/results.jsonl"; fail "codex subtype missing"; }
-grep -q '"turns":2' "$TMP/logs/results.jsonl" || { cat "$TMP/logs/results.jsonl"; fail "codex turns miscounted"; }
-grep -q '"tokens_in":900,"tokens_out":50' "$TMP/logs/results.jsonl" || fail "codex usage missing"
-: > "$TMP/logs/results.jsonl"
+grep -q '"subtype":"success"' "$TMP/logs/latest/results.jsonl" || { cat "$TMP/logs/latest/results.jsonl"; fail "codex subtype missing"; }
+grep -q '"turns":2' "$TMP/logs/latest/results.jsonl" || { cat "$TMP/logs/latest/results.jsonl"; fail "codex turns miscounted"; }
+grep -q '"tokens_in":900,"tokens_out":50' "$TMP/logs/latest/results.jsonl" || fail "codex usage missing"
+: > "$TMP/logs/latest/results.jsonl"
 touch "$TMP/fail"
 run_loop 1 env AGENT=codex OPENAI_API_KEY=test MAX_ERRORS=1 TMP_FAIL="$TMP/fail"
 grep -q "1 consecutive errors" "$TMP/out.log" || { cat "$TMP/out.log"; fail "codex error event ignored"; }
@@ -849,9 +849,9 @@ chmod +x "$TMP/bin/claude"
 run_loop 0 env MAX_ITERATIONS=1
 grep -q 'signaled TASK_COMPLETE' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "Claude structured reply was lost after scalar JSON"; }
-grep -q '"cost_usd":0.2' "$TMP/logs/results.jsonl" \
-    || { cat "$TMP/logs/results.jsonl"; fail "Claude metrics were lost after scalar JSON"; }
-grep -q 'scalar-safe' "$(echo "$TMP"/logs/iter-1-*.summary)" \
+grep -q '"cost_usd":0.2' "$TMP/logs/latest/results.jsonl" \
+    || { cat "$TMP/logs/latest/results.jsonl"; fail "Claude metrics were lost after scalar JSON"; }
+grep -q 'scalar-safe' "$(echo "$TMP"/logs/latest/iter-1-*.summary)" \
     || fail "Claude summary was lost after scalar JSON"
 rm -rf "$TMP"
 
@@ -870,8 +870,8 @@ chmod +x "$TMP/bin/codex"
 run_loop 0 env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=1
 grep -q 'signaled TASK_COMPLETE' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "Codex reply was lost after scalar JSON"; }
-grep -q '"turns":2.*"tokens_in":11,"tokens_out":2' "$TMP/logs/results.jsonl" \
-    || { cat "$TMP/logs/results.jsonl"; fail "Codex metrics were lost after scalar JSON"; }
+grep -q '"turns":2.*"tokens_in":11,"tokens_out":2' "$TMP/logs/latest/results.jsonl" \
+    || { cat "$TMP/logs/latest/results.jsonl"; fail "Codex metrics were lost after scalar JSON"; }
 rm -rf "$TMP"
 echo "PASS: scalar JSON lines cannot poison Claude/Codex event parsers"
 
@@ -889,9 +889,9 @@ STUB
 chmod +x "$TMP/bin/claude"
 run_loop 0 env MAX_ITERATIONS=5
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "done:true did not stop the loop"; }
-grep -q '"agent_claimed_done":true,"blocked":false' "$TMP/logs/results.jsonl" \
-    || { cat "$TMP/logs/results.jsonl"; fail "done/blocked not recorded"; }
-grep -q 'shipped the widget' "$(echo "$TMP"/logs/iter-1-*.summary)" \
+grep -q '"agent_claimed_done":true,"blocked":false' "$TMP/logs/latest/results.jsonl" \
+    || { cat "$TMP/logs/latest/results.jsonl"; fail "done/blocked not recorded"; }
+grep -q 'shipped the widget' "$(echo "$TMP"/logs/latest/iter-1-*.summary)" \
     || fail "summary field did not become the final message"
 rm -rf "$TMP"
 
@@ -910,7 +910,7 @@ chmod +x "$TMP/bin/claude"
 run_loop 2 env MAX_ITERATIONS=2
 grep -q "signaled" "$TMP/out.log" && { cat "$TMP/out.log"; fail "done:false was overridden by the fallback substring"; }
 grep -q "max iterations" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected max-iterations stop"; }
-grep -q '"done":false' "$TMP/logs/results.jsonl" || fail "done:false not recorded"
+grep -q '"done":false' "$TMP/logs/latest/results.jsonl" || fail "done:false not recorded"
 rm -rf "$TMP"
 
 # blocked:true makes no progress, whatever it committed: it counts as a noop.
@@ -928,8 +928,8 @@ chmod +x "$TMP/bin/claude"
 run_loop 3 env MAX_ITERATIONS=10 MAX_NOOPS=2
 grep -q "agent reports blocked" "$TMP/out.log" || { cat "$TMP/out.log"; fail "blocked was not logged"; }
 grep -q "2 consecutive no-progress" "$TMP/out.log" || { cat "$TMP/out.log"; fail "blocked did not count toward MAX_NOOPS"; }
-[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 2 ]] || fail "blocked stop came at the wrong iteration"
-grep -q '"blocked":true' "$TMP/logs/results.jsonl" || fail "blocked not recorded"
+[[ "$(wc -l < "$TMP/logs/latest/results.jsonl")" -eq 2 ]] || fail "blocked stop came at the wrong iteration"
+grep -q '"blocked":true' "$TMP/logs/latest/results.jsonl" || fail "blocked not recorded"
 rm -rf "$TMP"
 echo "PASS: structured done/summary/blocked drive the loop, plain text still works"
 
@@ -1050,7 +1050,7 @@ run_loop 0 env MAX_ITERATIONS=5 EVALUATOR=true EVALUATOR_FILE="$TMP/eval.md" \
 grep -q 'evaluator: NEEDS_WORK' "$TMP/out.log" || { cat "$TMP/out.log"; fail "evaluator verdict not logged"; }
 grep -q 'agent signaled done, evaluator PASS' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "a PASS verdict did not stop the loop"; }
-[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 2 ]] || { cat "$TMP/out.log"; fail "expected exactly two iterations"; }
+[[ "$(wc -l < "$TMP/logs/latest/results.jsonl")" -eq 2 ]] || { cat "$TMP/out.log"; fail "expected exactly two iterations"; }
 grep -q '^## Evaluator findings (iteration 1)$' "$TMP/repo/PROGRESS.md" \
     || { cat "$TMP/repo/PROGRESS.md"; fail "findings not written to PROGRESS.md"; }
 grep -q 'widget.py is a stub' "$TMP/repo/PROGRESS.md" || fail "findings body missing"
@@ -1389,8 +1389,8 @@ chmod +x "$TMP/bin/codex"
 run_loop 0 env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=2 ARGV_LOG="$TMP/argv.log"
 grep -q -- '--ephemeral' "$TMP/argv.log" || { cat "$TMP/argv.log"; fail "--ephemeral not passed to codex"; }
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "codex structured done ignored"; }
-grep -q '"agent_claimed_done":true,"blocked":false' "$TMP/logs/results.jsonl" || fail "codex done/blocked not recorded"
-grep -q 'codex finished the widget' "$(echo "$TMP"/logs/iter-1-*.summary)" \
+grep -q '"agent_claimed_done":true,"blocked":false' "$TMP/logs/latest/results.jsonl" || fail "codex done/blocked not recorded"
+grep -q 'codex finished the widget' "$(echo "$TMP"/logs/latest/iter-1-*.summary)" \
     || fail "codex summary did not become the final message"
 rm -rf "$TMP"
 echo "PASS: codex gets a strict output schema and an ephemeral session"
@@ -1412,7 +1412,7 @@ grep -q 'stop file present — finishing after this iteration' "$TMP/out.log" \
 grep -q 'loop finished after 0 iterations: stop file' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "expected a stop-file stop with no iterations"; }
 [[ ! -e "$TMP/ran" ]] || fail "a session started despite the stop file"
-[[ ! -s "$TMP/logs/results.jsonl" ]] || { cat "$TMP/logs/results.jsonl"; fail "an iteration was recorded"; }
+[[ ! -s "$TMP/logs/latest/results.jsonl" ]] || { cat "$TMP/logs/latest/results.jsonl"; fail "an iteration was recorded"; }
 [[ ! -e "$TMP/repo/.mill/STOP" ]] || fail "the stop file was not consumed on exit"
 [[ -z "$(git -C "$TMP/repo" status --porcelain --untracked-files=all)" ]] \
     || { git -C "$TMP/repo" status --short; fail ".mill/ is visible to git"; }
@@ -1436,9 +1436,9 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"more lat
 STUB
 chmod +x "$TMP/bin/claude"
 run_loop 4 env MAX_ITERATIONS=5
-[[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 1 ]] \
+[[ "$(wc -l < "$TMP/logs/latest/results.jsonl")" -eq 1 ]] \
     || { cat "$TMP/out.log"; fail "a second session started after the stop file"; }
-grep -q '"status":"kept"' "$TMP/logs/results.jsonl" || fail "the braked iteration was not kept"
+grep -q '"status":"kept"' "$TMP/logs/latest/results.jsonl" || fail "the braked iteration was not kept"
 grep -q 'loop finished after 1 iterations: stop file' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "expected a stop-file stop reason"; }
 [[ ! -e "$TMP/repo/.mill/STOP" ]] || fail "the stop file was not consumed on exit"
@@ -1470,9 +1470,9 @@ grep -q 'second line' "$TMP/dump.1" || fail "steer truncated to its first line"
 grep -q 'overrides the mission' "$TMP/dump.1" || { cat "$TMP/dump.1"; fail "steer not framed as an override"; }
 grep -q 'operator-steer' "$TMP/dump.2" && { cat "$TMP/dump.2"; fail "steer was not one-shot"; }
 [[ ! -e "$TMP/repo/.mill/STEER.md" ]] || fail "the steer file was not consumed"
-head -1 "$TMP/logs/results.jsonl" | grep -q '"steered":true' \
-    || { cat "$TMP/logs/results.jsonl"; fail "steered flag not recorded"; }
-tail -1 "$TMP/logs/results.jsonl" | grep -q '"steered":true' \
+head -1 "$TMP/logs/latest/results.jsonl" | grep -q '"steered":true' \
+    || { cat "$TMP/logs/latest/results.jsonl"; fail "steered flag not recorded"; }
+tail -1 "$TMP/logs/latest/results.jsonl" | grep -q '"steered":true' \
     && fail "the second iteration was still marked steered"
 rm -rf "$TMP"
 
@@ -1488,7 +1488,7 @@ chmod +x "$TMP/bin/claude"
 mkdir -p "$TMP/repo/.mill"
 printf 'still pending\n' > "$TMP/repo/.mill/STEER.md.next"
 run_loop 2 env MAX_ITERATIONS=1 MAX_NOOPS=0 CHECK_CMD=false
-grep -q '"status":"reverted"' "$TMP/logs/results.jsonl" || fail "iteration was not reverted"
+grep -q '"status":"reverted"' "$TMP/logs/latest/results.jsonl" || fail "iteration was not reverted"
 [[ -f "$TMP/repo/.mill/STEER.md.next" ]] || fail "the revert deleted the .mill drop-box"
 rm -rf "$TMP"
 echo "PASS: STEER.md is one-shot and .mill/ survives a revert"
@@ -1527,19 +1527,19 @@ grep -q 'iteration 3: kept (metric 0.8 → best 0.9)' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "the third improvement was not kept"; }
 [[ "$(git -C "$TMP/repo" rev-list --count "$head_before..HEAD" 2>/dev/null)" -eq 2 ]] \
     || { git -C "$TMP/repo" log --oneline; fail "expected exactly two surviving iterations"; }
-sed -n 1p "$TMP/logs/results.jsonl" | grep -q '"metric":0.9,"best":0.9' \
-    || { cat "$TMP/logs/results.jsonl"; fail "iteration 1 metric/best not recorded"; }
-sed -n 2p "$TMP/logs/results.jsonl" | grep -q '"status":"reverted".*"metric":0.95,"best":0.9' \
-    || { cat "$TMP/logs/results.jsonl"; fail "the reverted iteration kept the old best"; }
-sed -n 3p "$TMP/logs/results.jsonl" | grep -q '"metric":0.8,"best":0.8' \
-    || { cat "$TMP/logs/results.jsonl"; fail "iteration 3 metric/best not recorded"; }
-[[ "$(head -1 "$TMP/logs/metrics.tsv")" == "$(printf 'iter\tsha\tmetric\tbest\tstatus\tsummary')" ]] \
-    || { head -1 "$TMP/logs/metrics.tsv"; fail "metrics.tsv header malformed"; }
-[[ "$(wc -l < "$TMP/logs/metrics.tsv")" -eq 4 ]] || { cat "$TMP/logs/metrics.tsv"; fail "expected 3 metric rows"; }
-awk -F'\t' 'NR == 3 && ($3 != "0.95" || $4 != "0.9" || $5 != "reverted") { exit 1 }' "$TMP/logs/metrics.tsv" \
-    || { cat "$TMP/logs/metrics.tsv"; fail "reverted row wrong"; }
-awk -F'\t' 'NR == 4 && $6 != "attempt 3of three" { exit 1 }' "$TMP/logs/metrics.tsv" \
-    || { cat "$TMP/logs/metrics.tsv"; fail "summary column not tab-stripped"; }
+sed -n 1p "$TMP/logs/latest/results.jsonl" | grep -q '"metric":0.9,"best":0.9' \
+    || { cat "$TMP/logs/latest/results.jsonl"; fail "iteration 1 metric/best not recorded"; }
+sed -n 2p "$TMP/logs/latest/results.jsonl" | grep -q '"status":"reverted".*"metric":0.95,"best":0.9' \
+    || { cat "$TMP/logs/latest/results.jsonl"; fail "the reverted iteration kept the old best"; }
+sed -n 3p "$TMP/logs/latest/results.jsonl" | grep -q '"metric":0.8,"best":0.8' \
+    || { cat "$TMP/logs/latest/results.jsonl"; fail "iteration 3 metric/best not recorded"; }
+[[ "$(head -1 "$TMP/logs/latest/metrics.tsv")" == "$(printf 'iter\tsha\tmetric\tbest\tstatus\tsummary')" ]] \
+    || { head -1 "$TMP/logs/latest/metrics.tsv"; fail "metrics.tsv header malformed"; }
+[[ "$(wc -l < "$TMP/logs/latest/metrics.tsv")" -eq 4 ]] || { cat "$TMP/logs/latest/metrics.tsv"; fail "expected 3 metric rows"; }
+awk -F'\t' 'NR == 3 && ($3 != "0.95" || $4 != "0.9" || $5 != "reverted") { exit 1 }' "$TMP/logs/latest/metrics.tsv" \
+    || { cat "$TMP/logs/latest/metrics.tsv"; fail "reverted row wrong"; }
+awk -F'\t' 'NR == 4 && $6 != "attempt 3of three" { exit 1 }' "$TMP/logs/latest/metrics.tsv" \
+    || { cat "$TMP/logs/latest/metrics.tsv"; fail "summary column not tab-stripped"; }
 grep -q 'Current best METRIC: 1.0 (min)' "$TMP/dump.1" || { cat "$TMP/dump.1"; fail "baseline missing from the preamble"; }
 grep -q 'Current best METRIC: 0.9 (min)' "$TMP/dump.2" || { cat "$TMP/dump.2"; fail "best missing from the preamble"; }
 grep -q 'Current best METRIC: 0.9 (min)' "$TMP/dump.3" || { cat "$TMP/dump.3"; fail "a reverted iteration moved the best"; }
@@ -1565,7 +1565,7 @@ grep -q 'metric 0.9 not better than 1.0 — reverting' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "max direction kept a lower score"; }
 [[ "$(git -C "$TMP/repo" rev-parse HEAD)" == "$head_before" ]] || fail "the regression was not reverted"
 # ...and the same number is an improvement under min.
-: > "$TMP/logs/results.jsonl"
+: > "$TMP/logs/latest/results.jsonl"
 printf '1.0\n' > "$TMP/score"
 run_loop 2 env MAX_ITERATIONS=1 MAX_NOOPS=0 SCORE="$TMP/score" METRIC_CMD="cat $TMP/score"
 grep -q 'iteration 1: kept (metric 0.9 → best 1.0)' "$TMP/out.log" \
@@ -1590,8 +1590,8 @@ run_loop 2 env MAX_ITERATIONS=1 MAX_NOOPS=0 SCORE="$TMP/score" METRIC_CMD="cat $
 grep -q 'metric unparseable — reverting' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "a non-numeric metric was accepted"; }
 [[ "$(git -C "$TMP/repo" rev-parse HEAD)" == "$head_before" ]] || fail "unparseable metric was not reverted"
-grep -q '"metric":null,"best":1.0' "$TMP/logs/results.jsonl" \
-    || { cat "$TMP/logs/results.jsonl"; fail "unparseable metric not recorded as null"; }
+grep -q '"metric":null,"best":1.0' "$TMP/logs/latest/results.jsonl" \
+    || { cat "$TMP/logs/latest/results.jsonl"; fail "unparseable metric not recorded as null"; }
 # No baseline, no ratchet: refuse to start rather than keep everything.
 if run_loop_raw env MAX_ITERATIONS=1 METRIC_CMD=false; then fail "loop ran without a metric baseline"; fi
 grep -q 'no baseline number' "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected a fatal baseline error"; }
@@ -1676,7 +1676,7 @@ run_loop 2 env MAX_ITERATIONS=3 COUNT="$TMP/count" CHECK_CMD='bash verify.sh' ME
     || { cat "$TMP/out.log"; fail "initializer repeated under metric gate"; }
 [[ -f "$TMP/repo/PROGRESS.md" && -f "$TMP/repo/implementation.txt" ]] \
     || fail "initialization never advanced to implementation"
-python3 - "$TMP/logs/results.jsonl" <<'PY'
+python3 - "$TMP/logs/latest/results.jsonl" <<'PY'
 import json, sys
 with open(sys.argv[1]) as stream:
     rows = [json.loads(line) for line in stream]
@@ -1734,7 +1734,7 @@ printf '{"type":"result","is_error":false,"num_turns":4,"result":"continue"}\n'
 STUB
     chmod +x "$TMP/bin/claude"
     run_loop 2 env MAX_ITERATIONS=1 METRIC_TEXT="$metric_text" METRIC_CMD='cat score'
-    python3 - "$TMP/logs/results.jsonl" "$metric_text" <<'PY'
+    python3 - "$TMP/logs/latest/results.jsonl" "$metric_text" <<'PY'
 from decimal import Decimal
 import json, sys
 with open(sys.argv[1]) as stream:
@@ -1746,7 +1746,7 @@ PY
     # baseline, exercising baseline serialization in the best field as well.
     run_loop 2 env MAX_ITERATIONS=1 METRIC_TEXT="$metric_text" \
         METRIC_CMD='cat score' CHECK_CMD=true MIN_TURNS=0
-    python3 - "$TMP/logs/results.jsonl" "$metric_text" <<'PY'
+    python3 - "$TMP/logs/latest/results.jsonl" "$metric_text" <<'PY'
 from decimal import Decimal
 import json, sys
 with open(sys.argv[1]) as stream:
@@ -1821,7 +1821,7 @@ STUB
                 check|metric)
                     [[ "$(git -C "$TMP/repo" rev-parse HEAD)" == "$head_before" ]] \
                         || fail "$timeout_phase did not revert"
-                    grep -q '"status":"reverted"' "$TMP/logs/results.jsonl" || fail "missing revert"
+                    grep -q '"status":"reverted"' "$TMP/logs/latest/results.jsonl" || fail "missing revert"
                     ;;
                 done|done_check)
                     grep -q 'failed:.*command timed out' "$TMP/repo/PROGRESS.md" \

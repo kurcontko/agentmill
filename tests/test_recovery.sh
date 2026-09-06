@@ -36,15 +36,15 @@ HOME="$TASK_TMP/home" PATH="$TASK_TMP/bin:$PATH" ANTHROPIC_API_KEY=test \
     bash "$ROOT/loop.sh" >"$TASK_TMP/output" 2>&1 || actual=$?
 [[ "$actual" -eq 0 ]] || { cat "$TASK_TMP/output"; echo 'FAIL: repair never completed'; exit 1; }
 jq -e --arg head "$initial_head" '.exit_code == 1 and .checked_commit == $head' \
-    "$TASK_TMP/logs/baseline.json" >/dev/null
-jq -se 'map(.status) == ["kept", "reverted", "kept"]' "$TASK_TMP/logs/results.jsonl" >/dev/null
+    "$TASK_TMP/logs/latest/baseline.json" >/dev/null
+jq -se 'map(.status) == ["kept", "reverted", "kept"]' "$TASK_TMP/logs/latest/results.jsonl" >/dev/null
 grep -q test_behavior_failed "$TASK_TMP/attempts.prompt.3"
 grep -q 'Previous attempt was rejected' "$TASK_TMP/attempts.prompt.3"
 if grep -q failed-memory "$TASK_TMP/repo/PROGRESS.md"; then
     echo 'FAIL: rejected progress file survived rollback'
     exit 1
 fi
-jq -e '.exit_code == 1 and (.patch | length > 0)' "$TASK_TMP/logs/rejection.json" >/dev/null
+jq -e '.exit_code == 1 and (.patch | length > 0)' "$TASK_TMP/logs/latest/rejection.json" >/dev/null
 echo 'PASS: red baseline initialization advances and rollback preserves failure feedback'
 
 # An initializer that changes code does not qualify for the metadata exception.
@@ -58,5 +58,5 @@ HOME="$TASK_TMP/home" PATH="$TASK_TMP/bin:$PATH" ANTHROPIC_API_KEY=test \
 [[ "$actual" -eq 2 ]] || { cat "$TASK_TMP/mixed-output"; exit 1; }
 [[ "$(git -C "$TASK_TMP/repo" rev-parse HEAD)" == "$initial_head" ]]
 [[ ! -e "$TASK_TMP/repo/PROGRESS.md" ]]
-jq -e '.status == "reverted" and (.completion_ok | not)' "$TASK_TMP/mixed-logs/results.jsonl" >/dev/null
+jq -e '.status == "reverted" and (.completion_ok | not)' "$TASK_TMP/mixed-logs/latest/results.jsonl" >/dev/null
 echo 'PASS: mixed planning and implementation cannot bypass a failing check'

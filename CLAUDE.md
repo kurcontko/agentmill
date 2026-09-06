@@ -49,7 +49,8 @@ tests/test_landlock.py # kernel-level reviewer write-confinement test (Linux)
 tests/test_image_evaluator.sh # built-image reviewer isolation/shutdown test
 tests/test_supervisor.sh # built-image RPC/uid/capability/deadline checks
 tests/test_dind.sh # host integration: two private TLS daemons and lifecycle
-logs/<container>/  # per-checkout: results.jsonl, metrics.tsv (metric mode),
+$XDG_STATE_HOME/agentmill/runs/<run-id>/ # manifest, events, outcome, results,
+                   # snapshots in artifacts/, metrics.tsv (metric mode),
                    #   iter-N-<sha>.log / .summary, hidden .eval-N.* review dirs,
                    #   and dot-files for the last parse/schemas
 ```

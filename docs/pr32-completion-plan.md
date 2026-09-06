@@ -5,11 +5,11 @@ first-run packaging follow after this PR; they are not merge requirements here.
 
 ## Required changes and evidence
 
-- [ ] Explicit outcomes: separate agent claims from verified completion; write a
+- [x] Explicit outcomes: separate agent claims from verified completion; write a
   versioned terminal record; propagate documented nonzero outcomes through the
   foreground CLI. Cover rejected claims, absent verification, limits, errors,
   setup failure, and cancellation.
-- [ ] Initialization and rejection recovery: record the verifier baseline;
+- [x] Initialization and rejection recovery: record the verifier baseline;
   preserve strictly metadata-only initialization on a red baseline; support
   direct implementation; retain rejected patches and bounded verifier feedback
   outside rollback. Prove implementation starts and feedback reaches the next
@@ -71,3 +71,18 @@ recovery commit before considering those gates satisfied.
 Accounting follow-up: the TSV parser uses whitespace IFS, which collapses empty
 fields and can shift missing subtype/usage values into the wrong columns.
 Preserve empty fields while implementing unknown-cost semantics.
+
+At `59f73db`, the Linux shell, Docker build, packaged reviewer, supervisor,
+confinement, DinD, and security checks passed. The advisory external model review
+was still running when checked.
+
+Run-identity implementation adds per-run directories under XDG state, an
+exclusive manifest, original mission/policy snapshots, checkpoint events, image
+and packaged CLI metadata, and explicit/latest/legacy CLI log lookup. Local
+identity, recovery, outcome, CLI and loop regressions pass (the alias-path
+fixture was corrected and its remaining suite rerun). Linux packaged checks
+must run on this change before its checklist item is complete.
+
+The Scorecard workflow from merged PR #31 is restored unchanged. The positioning
+document now states the actual implementation and its limits, with no unsupported
+competitor or performance claims.

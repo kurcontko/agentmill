@@ -40,24 +40,24 @@ check_outcome() {
     jq -e --arg completion "$completion" --arg reason "$reason" --argjson code "$expected" \
         '.schema_version == 1 and .completion == $completion and
          .exit_code == $code and .stop_reason == $reason and (.run_id | length > 0)' \
-        "$TASK_TMP/$name/outcome.json" >/dev/null
+        "$TASK_TMP/$name/latest/outcome.json" >/dev/null
 }
 
 check_outcome verified 0 complete verified_completion env CHECK_CMD=true
 jq -e '.agent_claimed_done and .verification.checks == "passed" and
-       (.verification.checked_commit | length == 40)' "$TASK_TMP/verified/outcome.json" >/dev/null
+       (.verification.checked_commit | length == 40)' "$TASK_TMP/verified/latest/outcome.json" >/dev/null
 check_outcome unchecked 2 incomplete iteration_limit env CHECK_CMD= DONE_CMD=
 jq -e '.agent_claimed_done and .verification.checks == "not_run"' \
-    "$TASK_TMP/unchecked/outcome.json" >/dev/null
+    "$TASK_TMP/unchecked/latest/outcome.json" >/dev/null
 check_outcome rejected 2 incomplete iteration_limit env DONE_CMD=false
 jq -e '.agent_claimed_done and (.completion_ok | not) and (.done | not)' \
-    "$TASK_TMP/rejected/results.jsonl" >/dev/null
-jq -e '.verification.checks == "failed"' "$TASK_TMP/rejected/outcome.json" >/dev/null
+    "$TASK_TMP/rejected/latest/results.jsonl" >/dev/null
+jq -e '.verification.checks == "failed"' "$TASK_TMP/rejected/latest/outcome.json" >/dev/null
 check_outcome review 2 incomplete iteration_limit env CHECK_CMD=true EVALUATOR=true
 jq -e '.verification.checks == "passed" and .verification.review == "needs_work"' \
-    "$TASK_TMP/review/outcome.json" >/dev/null
+    "$TASK_TMP/review/latest/outcome.json" >/dev/null
 check_outcome setup 1 failed setup_failed env SETUP_CMD=false
-jq -e '.iterations == 0 and (.agent_claimed_done | not)' "$TASK_TMP/setup/outcome.json" >/dev/null
+jq -e '.iterations == 0 and (.agent_claimed_done | not)' "$TASK_TMP/setup/latest/outcome.json" >/dev/null
 mkdir -p "$TASK_TMP/repo/.mill"
 touch "$TASK_TMP/repo/.mill/STOP"
 check_outcome stopped 4 cancelled stop_requested env CHECK_CMD=true

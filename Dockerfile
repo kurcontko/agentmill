@@ -3,6 +3,7 @@ FROM node:22.23.2-alpine3.24@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166
 # Bump to upgrade the CLIs (cache-busts the npm layer cleanly).
 ARG CLAUDE_CODE_VERSION=2.1.241
 ARG CODEX_VERSION=0.147.0
+ENV AGENTMILL_CLAUDE_VERSION=${CLAUDE_CODE_VERSION} AGENTMILL_CODEX_VERSION=${CODEX_VERSION}
 # Node's bundled npm can lag security fixes in its vendored dependencies.
 ARG NPM_VERSION=11.19.1
 # Client only — `mill --dind` points it at the sidecar daemon; no daemon here.
