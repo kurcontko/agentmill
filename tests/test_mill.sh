@@ -35,6 +35,7 @@ for arg in "$@"; do
     previous="$arg"
 done
 [[ "${DOCKER_FAIL_RUN:-}" == true && "${1:-}" == run ]] && exit 7
+[[ "${1:-}" != run ]] || exit "${DOCKER_RUN_EXIT:-0}"
 exit 0
 STUB
     chmod +x "$TMP/bin/docker"
@@ -746,5 +747,15 @@ assert_client_env_value OPENAI_API_KEY test-openai
 assert_client_env_value CODEX_API_KEY test-codex
 rm -rf "$TMP"
 echo "PASS: Codex authentication keys are forwarded without argv exposure"
+
+make_env
+for outcome_exit in 0 1 2 3 4 130 143; do
+    actual_exit=0
+    DOCKER_RUN_EXIT="$outcome_exit" mill -C "$TMP/a/api" run >/dev/null 2>&1 || actual_exit=$?
+    [[ "$actual_exit" -eq "$outcome_exit" ]] \
+        || fail "foreground run lost outcome exit $outcome_exit (got $actual_exit)"
+done
+rm -rf "$TMP"
+echo "PASS: foreground mill run preserves every terminal outcome exit code"
 
 echo "OK: all mill smoke tests passed"

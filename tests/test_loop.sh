@@ -20,11 +20,15 @@ run_loop_raw() {  # returns loop.sh's exit code; output in $TMP/out.log
     HOME="$TMP/home" PATH="$TMP/bin:$PATH" ANTHROPIC_API_KEY=test \
     REPO_DIR="$TMP/repo" LOG_DIR="$TMP/logs" PROMPT_FILE="$TMP/prompt.md" \
     _AGENTMILL_TEST_UNSANDBOXED_EVALUATOR=true \
-    LOOP_DELAY=0 ERROR_BACKOFF=0 "$@" bash "$ROOT/loop.sh" >"$TMP/out.log" 2>&1
+    CHECK_CMD=true LOOP_DELAY=0 ERROR_BACKOFF=0 "$@" bash "$ROOT/loop.sh" >"$TMP/out.log" 2>&1
 }
 
 run_loop() {
-    run_loop_raw "$@" || { cat "$TMP/out.log"; fail "loop.sh exited nonzero"; }
+    local expected="$1" actual=0
+    shift
+    run_loop_raw "$@" || actual=$?
+    [[ "$actual" -eq "$expected" ]] \
+        || { cat "$TMP/out.log"; fail "expected exit $expected, got $actual"; }
 }
 
 # --- 1: agent commits, signals done promise → loop stops with 'kept' ---
@@ -36,7 +40,7 @@ git add -A && git commit -qm "agent: stub work"
 printf '{"type":"result","is_error":false,"result":"all done. TASK_COMPLETE"}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=5
+run_loop 0 env MAX_ITERATIONS=5
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected done-promise stop"; }
 [[ "$(git -C "$TMP/repo" rev-list --count HEAD)" -eq 2 ]] || fail "expected exactly one agent commit"
 grep -q '"status":"kept"' "$TMP/logs/results.jsonl" || fail "results.jsonl missing kept status"
@@ -53,7 +57,7 @@ printf '{"type":"result","is_error":false,"result":"made changes"}\n'
 STUB
 chmod +x "$TMP/bin/claude"
 head_before="$(git -C "$TMP/repo" rev-parse HEAD)"
-run_loop env MAX_ITERATIONS=10 MAX_NOOPS=2 CHECK_CMD=false
+run_loop 2 env MAX_ITERATIONS=10 MAX_NOOPS=2 CHECK_CMD=false
 grep -q "consecutive no-progress" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected no-progress stop"; }
 [[ "$(git -C "$TMP/repo" rev-parse HEAD)" == "$head_before" ]] || fail "reverted iteration left commits behind"
 grep -q '"status":"reverted"' "$TMP/logs/results.jsonl" || fail "results.jsonl missing reverted status"
@@ -64,7 +68,7 @@ echo "PASS: failing CHECK_CMD reverts the iteration (ratchet)"
 make_env
 printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/claude"
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ERRORS=1
+run_loop 1 env MAX_ERRORS=1
 grep -q "1 consecutive errors" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected error stop"; }
 grep -q '"status":"error"' "$TMP/logs/results.jsonl" || fail "results.jsonl missing error status"
 rm -rf "$TMP"
@@ -79,7 +83,7 @@ exit 1
 STUB
 chmod +x "$TMP/bin/claude"
 head_before="$(git -C "$TMP/repo" rev-parse HEAD)"
-run_loop env MAX_ITERATIONS=1 MAX_ERRORS=5 CHECK_CMD=false
+run_loop 2 env MAX_ITERATIONS=1 MAX_ERRORS=5 CHECK_CMD=false
 [[ "$(git -C "$TMP/repo" rev-parse HEAD)" == "$head_before" ]] || fail "errored iteration was not reverted"
 [[ -e "$TMP/repo/broken.txt" ]] && fail "revert left the agent's file behind"
 grep -q '"status":"reverted"' "$TMP/logs/results.jsonl" || fail "expected reverted status after agent error"
@@ -92,7 +96,7 @@ printf '#!/usr/bin/env bash
 exit 1
 ' > "$TMP/bin/claude"
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ERRORS=0 MAX_NOOPS=0 MAX_ITERATIONS=2
+run_loop 2 env MAX_ERRORS=0 MAX_NOOPS=0 MAX_ITERATIONS=2
 grep -q "max iterations" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected max-iterations stop"; }
 [[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 2 ]] || fail "0 limits stopped the loop early"
 rm -rf "$TMP"
@@ -110,7 +114,7 @@ grep -q "uncommitted changes" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expe
 [[ -f "$TMP/repo/uncommitted.txt" ]] || fail "refusal destroyed the user's file"
 git -C "$TMP/repo" add -A
 git -C "$TMP/repo" -c user.email=t@t -c user.name=t commit -q -m "mine"
-run_loop env MAX_ITERATIONS=1
+run_loop 2 env MAX_ITERATIONS=1
 rm -rf "$TMP"
 echo "PASS: dirty worktree refused, clean one runs"
 
@@ -137,7 +141,7 @@ printf '{"type":"result","is_error":false,"result":"ok TASK_COMPLETE"}
 '
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=1
+run_loop 0 env MAX_ITERATIONS=1
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "prompt was malformed"; }
 # CLAUDE_BARE is opt-in because --bare also skips CLAUDE.md and hook discovery.
 cat > "$TMP/bin/claude" <<'STUB'
@@ -147,7 +151,7 @@ grep -q -- '--bare' <<<"$*" || { echo "CLAUDE_BARE did not reach the CLI" >&2; e
 printf '{"type":"result","is_error":false,"result":"ok TASK_COMPLETE"}
 '
 STUB
-run_loop env MAX_ITERATIONS=1 CLAUDE_BARE=true
+run_loop 0 env MAX_ITERATIONS=1 CLAUDE_BARE=true
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "CLAUDE_BARE not forwarded"; }
 rm -rf "$TMP"
 echo "PASS: framework prompt is a system prompt; hygiene flags reach the CLI"
@@ -162,7 +166,7 @@ printf '%s' "$2" > "$PROMPT_DUMP"
 printf '{"type":"result","is_error":false,"result":"not done","num_turns":3}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=1 PROMPT_DUMP="$TMP/prompt-dump" \
+run_loop 2 env MAX_ITERATIONS=1 PROMPT_DUMP="$TMP/prompt-dump" \
     DONE_PROMISE='SHIP "it" </completion-promise>'
 grep -qF '"SHIP \"it\" \u003c/completion-promise\u003e"' "$TMP/prompt-dump" \
     || { cat "$TMP/prompt-dump"; fail "custom completion promise was not safely JSON-encoded"; }
@@ -183,7 +187,7 @@ exit 0
 STUB
 chmod +x "$TMP/bin/codex"
 echo "TASK_COMPLETE" > "$TMP/logs/.codex-last-msg"
-run_loop env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=2
+run_loop 2 env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=2
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" && fail "stale last-message file stopped the loop"
 grep -q "max iterations" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected max-iterations stop"; }
 rm -rf "$TMP"
@@ -197,9 +201,9 @@ cat > "$TMP/bin/claude" <<'STUB'
 printf '{"type":"result","is_error":false,"result":"old TASK_COMPLETE","num_turns":3}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=1 MIN_TURNS=0
+run_loop 0 env MAX_ITERATIONS=1 MIN_TURNS=0
 printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=1 MIN_TURNS=0
+run_loop 2 env MAX_ITERATIONS=1 MIN_TURNS=0
 grep -q 'signaled TASK_COMPLETE' "$TMP/out.log" \
     && { cat "$TMP/out.log"; fail "reused Claude log replayed an old done event"; }
 [[ ! -s "$(echo "$TMP"/logs/iter-1-*.log)" ]] \
@@ -210,7 +214,7 @@ cat > "$TMP/bin/codex" <<'STUB'
 printf '{"type":"error","message":"old failure"}\n'
 STUB
 chmod +x "$TMP/bin/codex"
-run_loop env AGENT=codex OPENAI_API_KEY=test MAX_ERRORS=1 MIN_TURNS=0
+run_loop 1 env AGENT=codex OPENAI_API_KEY=test MAX_ERRORS=1 MIN_TURNS=0
 cat > "$TMP/bin/codex" <<'STUB'
 #!/usr/bin/env bash
 out=""
@@ -219,7 +223,7 @@ printf '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}\n
 printf '{"done":false,"summary":"fresh","blocked":false}\n' > "$out"
 STUB
 chmod +x "$TMP/bin/codex"
-run_loop env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=1 MIN_TURNS=0
+run_loop 2 env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=1 MIN_TURNS=0
 tail -1 "$TMP/logs/results.jsonl" | grep -q '"subtype":"success"' \
     || { cat "$TMP/logs/results.jsonl"; fail "reused Codex log replayed an old error event"; }
 ! grep -q 'old failure' "$(echo "$TMP"/logs/iter-1-*.log)" \
@@ -237,7 +241,7 @@ printf '{"type":"result","is_error":false,"result":"done TASK_COMPLETE"}\n'
 STUB
 chmod +x "$TMP/bin/claude"
 git -C "$TMP/repo" worktree add -q "$TMP/wt" -b agent-b
-run_loop env MAX_ITERATIONS=1 REPO_DIR="$TMP/wt"
+run_loop 0 env MAX_ITERATIONS=1 REPO_DIR="$TMP/wt"
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "loop failed inside a worktree"; }
 [[ "$(git -C "$TMP/wt" rev-list --count HEAD)" -eq 2 ]] || fail "worktree commit missing"
 rm -rf "$TMP"
@@ -252,7 +256,7 @@ git add -A && git commit -qm "agent: stub work"
 printf '{"type":"result","is_error":false,"result":"done TASK_COMPLETE"}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=1 GIT_USER=looper GIT_EMAIL=looper@x
+run_loop 0 env MAX_ITERATIONS=1 GIT_USER=looper GIT_EMAIL=looper@x
 [[ "$(git -C "$TMP/repo" log -1 --format=%an)" == looper ]] || fail "agent commit not authored by GIT_USER"
 git -C "$TMP/repo" config --local user.name >/dev/null && fail "identity was written to the repo's config"
 rm -rf "$TMP"
@@ -276,7 +280,8 @@ for _ in $(seq 1 50); do [[ -f "$TMP/repo/started" ]] && break; sleep 0.1; done
 [[ -f "$TMP/repo/started" ]] || { cat "$TMP/out.log"; fail "agent never started"; }
 term_started="$(date +%s)"
 kill -TERM "$loop_pid"
-wait "$loop_pid" || { cat "$TMP/out.log"; fail "loop.sh exited nonzero after TERM"; }
+wait_rc=0; wait "$loop_pid" || wait_rc=$?
+[[ "$wait_rc" -eq 143 ]] || { cat "$TMP/out.log"; fail "expected cancellation exit 143, got $wait_rc"; }
 term_elapsed=$(( $(date +%s) - term_started ))
 [[ "$term_elapsed" -lt 5 ]] \
     || { cat "$TMP/out.log"; fail "agent process group took ${term_elapsed}s to stop after TERM"; }
@@ -301,7 +306,8 @@ loop_pid=$!
 for _ in $(seq 1 50); do [[ -f "$TMP/logs/results.jsonl" ]] && break; sleep 0.1; done
 sleep 0.5
 kill -TERM "$loop_pid"
-wait "$loop_pid" || { cat "$TMP/out.log"; fail "loop.sh exited nonzero after TERM in sleep"; }
+wait_rc=0; wait "$loop_pid" || wait_rc=$?
+[[ "$wait_rc" -eq 143 ]] || { cat "$TMP/out.log"; fail "expected cancellation exit 143, got $wait_rc"; }
 [[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 1 ]] || fail "signal during sleep started another session"
 rm -rf "$TMP"
 echo "PASS: a signal during the sleep stops the loop immediately"
@@ -333,7 +339,8 @@ HOME="$TMP/home" PATH="$TMP/bin:$PATH" ANTHROPIC_API_KEY=test \
     bash "$ROOT/loop.sh" >"$TMP/out.log" 2>&1 &
 loop_pid=$!
 printf '%s\n' "$loop_pid" > "$TMP/loop-pid"
-wait "$loop_pid" || { cat "$TMP/out.log"; fail "pre-launch TERM made the loop fail"; }
+wait_rc=0; wait "$loop_pid" || wait_rc=$?
+[[ "$wait_rc" -eq 143 ]] || { cat "$TMP/out.log"; fail "expected cancellation exit 143, got $wait_rc"; }
 [[ ! -e "$TMP/ran" ]] || { cat "$TMP/out.log"; fail "agent launched after pre-launch TERM"; }
 grep -q 'finished after 0 iterations: shutdown signal' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "pre-launch shutdown was recorded as an iteration"; }
@@ -361,7 +368,8 @@ STUB
     [[ -e "$TMP/check-started" ]] || { cat "$TMP/out.log"; fail "CHECK_CMD never started"; }
     shutdown_started="$(date +%s)"
     kill -TERM "$loop_pid"
-    wait "$loop_pid" || { cat "$TMP/out.log"; fail "loop failed while stopping CHECK_CMD"; }
+    wait_rc=0; wait "$loop_pid" || wait_rc=$?
+[[ "$wait_rc" -eq 143 ]] || { cat "$TMP/out.log"; fail "expected cancellation exit 143, got $wait_rc"; }
     shutdown_elapsed=$(( $(date +%s) - shutdown_started ))
     [[ "$shutdown_elapsed" -lt 8 ]] \
         || { cat "$TMP/out.log"; fail "hung CHECK_CMD delayed shutdown ${shutdown_elapsed}s"; }
@@ -393,7 +401,8 @@ STUB
     [[ -e "$TMP/metric-started" ]] || { cat "$TMP/out.log"; fail "METRIC_CMD never started"; }
     shutdown_started="$(date +%s)"
     kill -TERM "$loop_pid"
-    wait "$loop_pid" || { cat "$TMP/out.log"; fail "loop failed while stopping METRIC_CMD"; }
+    wait_rc=0; wait "$loop_pid" || wait_rc=$?
+[[ "$wait_rc" -eq 143 ]] || { cat "$TMP/out.log"; fail "expected cancellation exit 143, got $wait_rc"; }
     shutdown_elapsed=$(( $(date +%s) - shutdown_started ))
     [[ "$shutdown_elapsed" -lt 8 ]] \
         || { cat "$TMP/out.log"; fail "hung METRIC_CMD delayed shutdown ${shutdown_elapsed}s"; }
@@ -425,7 +434,8 @@ STUB
     [[ -e "$TMP/baseline-started" ]] || { cat "$TMP/out.log"; fail "metric baseline never started"; }
     shutdown_started="$(date +%s)"
     kill -TERM "$loop_pid"
-    wait "$loop_pid" || { cat "$TMP/out.log"; fail "loop failed while stopping metric baseline"; }
+    wait_rc=0; wait "$loop_pid" || wait_rc=$?
+[[ "$wait_rc" -eq 143 ]] || { cat "$TMP/out.log"; fail "expected cancellation exit 143, got $wait_rc"; }
     shutdown_elapsed=$(( $(date +%s) - shutdown_started ))
     [[ "$shutdown_elapsed" -lt 8 ]] \
         || { cat "$TMP/out.log"; fail "hung metric baseline delayed shutdown ${shutdown_elapsed}s"; }
@@ -451,7 +461,7 @@ STUB
 chmod +x "$TMP/bin/claude"
 # shellcheck disable=SC2016 # expands inside METRIC_CMD's bash -c
 background_metric='(trap "" TERM; sleep 30) >/dev/null 2>&1 & printf "%s\n" "$!" > "$BACKGROUND_PID_FILE"; echo 1'
-run_loop env MAX_ITERATIONS=1 MAX_NOOPS=0 BACKGROUND_PID_FILE="$TMP/background-pid" \
+run_loop 2 env MAX_ITERATIONS=1 MAX_NOOPS=0 BACKGROUND_PID_FILE="$TMP/background-pid" \
     METRIC_CMD="$background_metric"
 background_pid="$(cat "$TMP/background-pid")"
 if kill -0 "$background_pid" 2>/dev/null; then
@@ -465,7 +475,7 @@ echo "PASS: successful interruptible helpers drain background descendants"
 make_env
 printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/claude"
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ERRORS=0 MAX_ITERATIONS=70 ERROR_BACKOFF=1 MAX_BACKOFF=0
+run_loop 2 env MAX_ERRORS=0 MAX_ITERATIONS=70 ERROR_BACKOFF=1 MAX_BACKOFF=0
 [[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 70 ]] || { cat "$TMP/out.log"; fail "backoff arithmetic broke the loop"; }
 rm -rf "$TMP"
 echo "PASS: error backoff is capped by MAX_BACKOFF"
@@ -475,6 +485,9 @@ make_env
 cat > "$TMP/bin/timeout" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$TIMEOUT_LOG"
+case "${1:-}" in
+    --foreground) shift ;;
+esac
 case "${1:-}" in
     --kill-after=*) shift ;;
     -k) shift 2 ;;
@@ -488,7 +501,7 @@ printf '{"type":"result","is_error":false,"result":"done TASK_COMPLETE"}\n'
 STUB
 chmod +x "$TMP/bin/timeout" "$TMP/bin/claude"
 export TIMEOUT_LOG="$TMP/timeout.log"
-run_loop env MAX_ITERATIONS=1 ITER_TIMEOUT=99 SHUTDOWN_GRACE=7
+run_loop 0 env MAX_ITERATIONS=1 ITER_TIMEOUT=99 SHUTDOWN_GRACE=7
 grep -Fq -- "--kill-after=7 99 $TMP/bin/claude " "$TIMEOUT_LOG" \
     || { cat "$TIMEOUT_LOG"; fail "agent timeout has no hard-kill deadline"; }
 rm -rf "$TMP"
@@ -507,7 +520,7 @@ wait
 STUB
     chmod +x "$TMP/bin/claude"
     timeout_started="$(date +%s)"
-    run_loop env ITER_TIMEOUT=1 SHUTDOWN_GRACE=1 MAX_ITERATIONS=1 MAX_ERRORS=5
+    run_loop 2 env ITER_TIMEOUT=1 SHUTDOWN_GRACE=1 MAX_ITERATIONS=1 MAX_ERRORS=5
     timeout_elapsed=$(( $(date +%s) - timeout_started ))
     [[ "$timeout_elapsed" -lt 5 ]] \
         || { cat "$TMP/out.log"; fail "timeout left a TERM-ignoring descendant alive for ${timeout_elapsed}s"; }
@@ -574,7 +587,7 @@ git commit -qm "agent: bad superproject change"
 printf '{"type":"result","is_error":false,"result":"made changes"}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=1 \
+run_loop 2 env MAX_ITERATIONS=1 \
     CHECK_CMD='echo check-junk > deps/sub/nested/untracked.txt; false'
 [[ "$(git -C "$TMP/repo" rev-parse HEAD)" == "$head_before" ]] \
     || fail "rollback left the superproject at the iteration commit"
@@ -605,7 +618,7 @@ fi
 printf '{"type":"result","is_error":false,"result":"ok"}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env PROMPT_DUMP="$TMP/prompt-dump" MAX_ITERATIONS=2
+run_loop 2 env PROMPT_DUMP="$TMP/prompt-dump" MAX_ITERATIONS=2
 grep -q 'MILL.md changed since the last iteration' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "mission edit was not noticed"; }
 grep -q '<mission>' "$TMP/prompt-dump" || fail "mission block missing from prompt"
@@ -623,7 +636,7 @@ printf '%s' "$2" > "$PROMPT_DUMP"
 printf '{"type":"result","is_error":false,"result":"ok","num_turns":3}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env PROMPT_DUMP="$TMP/prompt-dump" MAX_ITERATIONS=1
+run_loop 2 env PROMPT_DUMP="$TMP/prompt-dump" MAX_ITERATIONS=1
 grep -q '^build the CRLF widget$' "$TMP/prompt-dump" \
     || { cat -v "$TMP/prompt-dump"; fail "CRLF mission body missing"; }
 grep -q 'check_cmd' "$TMP/prompt-dump" && fail "CRLF frontmatter leaked into the mission"
@@ -670,7 +683,7 @@ printf '"result":"crashed but TASK_COMPLETE","total_cost_usd":0.25,"num_turns":4
 printf '"duration_ms":1200,"usage":{"input_tokens":100,"output_tokens":20}}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=1 MAX_ERRORS=5
+run_loop 2 env MAX_ITERATIONS=1 MAX_ERRORS=5
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" && { cat "$TMP/out.log"; fail "done promise honored on an errored session"; }
 grep -q "agent reported an error (error_during_execution" "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "is_error:true with exit 0 was not treated as an error"; }
@@ -692,7 +705,7 @@ git add -A && git commit -qm "agent: ran out of turns"
 printf '{"type":"result","subtype":"error_max_turns","is_error":false,"result":"ran out","num_turns":9}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ERRORS=1
+run_loop 1 env MAX_ERRORS=1
 grep -q "1 consecutive errors" "$TMP/out.log" || { cat "$TMP/out.log"; fail "error_max_turns did not stop the loop"; }
 grep -q '"subtype":"error_max_turns"' "$TMP/logs/results.jsonl" || fail "subtype not recorded"
 rm -rf "$TMP"
@@ -708,7 +721,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"more to 
 printf '"total_cost_usd":0.6,"num_turns":5}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=10 MAX_TOTAL_BUDGET_USD=1
+run_loop 2 env MAX_ITERATIONS=10 MAX_TOTAL_BUDGET_USD=1
 grep -q 'budget exhausted ([$]1.20 of [$]1.00)' "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected a budget stop"; }
 [[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 2 ]] || fail "budget stop came at the wrong iteration"
 grep -q 'total [$]1.20' "$TMP/out.log" || { cat "$TMP/out.log"; fail "cumulative cost missing from the iteration line"; }
@@ -724,7 +737,7 @@ printf '%s\n' "$*" >> "$ARGV_LOG"
 printf '{"type":"result","subtype":"success","is_error":false,"result":"done TASK_COMPLETE","num_turns":3}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=1 MAX_TURNS=7 MAX_BUDGET_USD=2.50 ARGV_LOG="$TMP/argv.log"
+run_loop 0 env MAX_ITERATIONS=1 MAX_TURNS=7 MAX_BUDGET_USD=2.50 ARGV_LOG="$TMP/argv.log"
 grep -q -- '--max-turns 7' "$TMP/argv.log" || { cat "$TMP/argv.log"; fail "MAX_TURNS not forwarded"; }
 grep -q -- '--max-budget-usd 2.50' "$TMP/argv.log" || { cat "$TMP/argv.log"; fail "MAX_BUDGET_USD not forwarded"; }
 rm -rf "$TMP"
@@ -737,14 +750,14 @@ cat > "$TMP/bin/claude" <<'STUB'
 printf '{"type":"result","subtype":"success","is_error":false,"result":"nothing to do","num_turns":1}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ERRORS=3 MAX_NOOPS=5 MAX_ITERATIONS=4
+run_loop 1 env MAX_ERRORS=3 MAX_NOOPS=5 MAX_ITERATIONS=4
 grep -q 'agent produced no work in 1 turns' "$TMP/out.log" || { cat "$TMP/out.log"; fail "health check did not fire"; }
 grep -q "3 consecutive errors" "$TMP/out.log" || { cat "$TMP/out.log"; fail "health errors did not accumulate"; }
 [[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 3 ]] \
     || { cat "$TMP/out.log"; fail "MAX_ERRORS did not stop repeated MIN_TURNS failures"; }
 grep -q '"status":"error"' "$TMP/logs/results.jsonl" || fail "health-check iteration not recorded as an error"
 : > "$TMP/logs/results.jsonl"
-run_loop env MAX_ITERATIONS=2 MAX_NOOPS=5 MIN_TURNS=0
+run_loop 2 env MAX_ITERATIONS=2 MAX_NOOPS=5 MIN_TURNS=0
 grep -q '"status":"noop"' "$TMP/logs/results.jsonl" || { cat "$TMP/out.log"; fail "MIN_TURNS=0 did not disable the health check"; }
 rm -rf "$TMP"
 echo "PASS: MIN_TURNS catches an agent that does nothing"
@@ -761,7 +774,7 @@ cat > "$TMP/bin/sleep" <<'STUB'
 printf '%s\n' "$1" >> "$SLEEP_LOG"
 STUB
 chmod +x "$TMP/bin/claude" "$TMP/bin/sleep"
-run_loop env MAX_ERRORS=0 MAX_ITERATIONS=2 ERROR_BACKOFF=7 MAX_BACKOFF=99 LOOP_DELAY=3 \
+run_loop 2 env MAX_ERRORS=0 MAX_ITERATIONS=2 ERROR_BACKOFF=7 MAX_BACKOFF=99 LOOP_DELAY=3 \
     SLEEP_LOG="$TMP/sleep.log"
 grep -qx '14' "$TMP/sleep.log" \
     || { cat "$TMP/sleep.log"; cat "$TMP/out.log"; fail "classified failure did not use exponential backoff"; }
@@ -779,7 +792,7 @@ printf '{"type":"result","subtype":"success","is_error":false,'
 printf '"result":"wrote stub.txt. TASK_COMPLETE","total_cost_usd":0.42,"num_turns":7}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=1
+run_loop 0 env MAX_ITERATIONS=1
 summary="$(echo "$TMP"/logs/iter-1-*.summary)"
 [[ -f "$summary" ]] || { ls "$TMP/logs"; fail "no summary file written"; }
 grep -q '^status: kept$' "$summary" || { cat "$summary"; fail "summary missing status"; }
@@ -810,14 +823,14 @@ else
 fi
 STUB
 chmod +x "$TMP/bin/codex"
-run_loop env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=1 TMP_FAIL="$TMP/nope"
+run_loop 0 env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=1 TMP_FAIL="$TMP/nope"
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "codex done promise ignored"; }
 grep -q '"subtype":"success"' "$TMP/logs/results.jsonl" || { cat "$TMP/logs/results.jsonl"; fail "codex subtype missing"; }
 grep -q '"turns":2' "$TMP/logs/results.jsonl" || { cat "$TMP/logs/results.jsonl"; fail "codex turns miscounted"; }
 grep -q '"tokens_in":900,"tokens_out":50' "$TMP/logs/results.jsonl" || fail "codex usage missing"
 : > "$TMP/logs/results.jsonl"
 touch "$TMP/fail"
-run_loop env AGENT=codex OPENAI_API_KEY=test MAX_ERRORS=1 TMP_FAIL="$TMP/fail"
+run_loop 1 env AGENT=codex OPENAI_API_KEY=test MAX_ERRORS=1 TMP_FAIL="$TMP/fail"
 grep -q "1 consecutive errors" "$TMP/out.log" || { cat "$TMP/out.log"; fail "codex error event ignored"; }
 rm -rf "$TMP"
 echo "PASS: codex event stream yields turns, tokens, and errors"
@@ -833,7 +846,7 @@ printf '"structured_output":{"done":true,"summary":"scalar-safe","blocked":false
 printf '"total_cost_usd":0.2,"num_turns":3}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=1
+run_loop 0 env MAX_ITERATIONS=1
 grep -q 'signaled TASK_COMPLETE' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "Claude structured reply was lost after scalar JSON"; }
 grep -q '"cost_usd":0.2' "$TMP/logs/results.jsonl" \
@@ -854,7 +867,7 @@ printf '{"type":"turn.completed","usage":{"input_tokens":11,"output_tokens":2}}\
 printf '{"done":true,"summary":"codex scalar-safe","blocked":false}\n' > "$out"
 STUB
 chmod +x "$TMP/bin/codex"
-run_loop env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=1
+run_loop 0 env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=1
 grep -q 'signaled TASK_COMPLETE' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "Codex reply was lost after scalar JSON"; }
 grep -q '"turns":2.*"tokens_in":11,"tokens_out":2' "$TMP/logs/results.jsonl" \
@@ -874,9 +887,9 @@ printf '"structured_output":{"done":true,"summary":"shipped the widget","blocked
 printf '"num_turns":4}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=5
+run_loop 0 env MAX_ITERATIONS=5
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "done:true did not stop the loop"; }
-grep -q '"done":true,"blocked":false' "$TMP/logs/results.jsonl" \
+grep -q '"agent_claimed_done":true,"blocked":false' "$TMP/logs/results.jsonl" \
     || { cat "$TMP/logs/results.jsonl"; fail "done/blocked not recorded"; }
 grep -q 'shipped the widget' "$(echo "$TMP"/logs/iter-1-*.summary)" \
     || fail "summary field did not become the final message"
@@ -894,7 +907,7 @@ printf '"structured_output":{"done":false,"summary":"still going. TASK_COMPLETE"
 printf '"num_turns":4}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=2
+run_loop 2 env MAX_ITERATIONS=2
 grep -q "signaled" "$TMP/out.log" && { cat "$TMP/out.log"; fail "done:false was overridden by the fallback substring"; }
 grep -q "max iterations" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected max-iterations stop"; }
 grep -q '"done":false' "$TMP/logs/results.jsonl" || fail "done:false not recorded"
@@ -912,7 +925,7 @@ printf '"structured_output":{"done":false,"summary":"need credentials","blocked"
 printf '"num_turns":4}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=10 MAX_NOOPS=2
+run_loop 3 env MAX_ITERATIONS=10 MAX_NOOPS=2
 grep -q "agent reports blocked" "$TMP/out.log" || { cat "$TMP/out.log"; fail "blocked was not logged"; }
 grep -q "2 consecutive no-progress" "$TMP/out.log" || { cat "$TMP/out.log"; fail "blocked did not count toward MAX_NOOPS"; }
 [[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 2 ]] || fail "blocked stop came at the wrong iteration"
@@ -931,7 +944,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"raw",'
 printf '"structured_output":{"done":true,"summary":"finished","blocked":false},"num_turns":4}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=2 DONE_CMD='echo two tests still red; false'
+run_loop 2 env MAX_ITERATIONS=2 DONE_CMD='echo two tests still red; false'
 grep -q "agent claimed done but DONE_CMD failed — continuing" "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "DONE_CMD failure did not reject the claim"; }
 grep -q "max iterations" "$TMP/out.log" || { cat "$TMP/out.log"; fail "rejected claim still stopped the loop"; }
@@ -942,7 +955,7 @@ grep -q '^- iteration 1: DONE_CMD failed: two tests still red' "$TMP/repo/PROGRE
 grep -q 'verifier rejected completion claim' < <(git -C "$TMP/repo" log --oneline) \
     || fail "the rejection note was not committed"
 # ...and a green DONE_CMD lets the very same claim through.
-run_loop env MAX_ITERATIONS=2 DONE_CMD=true
+run_loop 0 env MAX_ITERATIONS=2 DONE_CMD=true
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "green DONE_CMD did not honor the claim"; }
 rm -rf "$TMP"
 
@@ -955,7 +968,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"raw",'
 printf '"structured_output":{"done":true,"summary":"nothing left to do","blocked":false},"num_turns":4}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=2 MAX_NOOPS=0 CHECK_CMD=false
+run_loop 2 env MAX_ITERATIONS=2 MAX_NOOPS=0 CHECK_CMD=false
 grep -q "agent claimed done but CHECK_CMD failed — continuing" "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "an unverified done claim was honored"; }
 grep -q "max iterations" "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected max-iterations stop"; }
@@ -1032,7 +1045,7 @@ printf '"structured_output":{"done":true,"summary":"finished","blocked":false},'
 printf '"total_cost_usd":0.10,"num_turns":4}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=5 EVALUATOR=true EVALUATOR_FILE="$TMP/eval.md" \
+run_loop 0 env MAX_ITERATIONS=5 EVALUATOR=true EVALUATOR_FILE="$TMP/eval.md" \
     EVAL_COUNT="$TMP/eval-count" EVAL_PROOF="$TMP/eval-proof" REAL_REPO="$TMP/repo"
 grep -q 'evaluator: NEEDS_WORK' "$TMP/out.log" || { cat "$TMP/out.log"; fail "evaluator verdict not logged"; }
 grep -q 'agent signaled done, evaluator PASS' "$TMP/out.log" \
@@ -1163,7 +1176,7 @@ else
 fi
 STUB
 chmod +x "$TMP/bin/codex"
-run_loop env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=1 EVALUATOR=true \
+run_loop 0 env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=1 EVALUATOR=true \
     EVALUATOR_FILE="$TMP/eval.md" REAL_REPO="$TMP/repo" \
     EXPECTED_CODEX_AUTH="$TMP/expected-codex-auth.json"
 grep -q 'agent signaled done, evaluator PASS' "$TMP/out.log" \
@@ -1192,7 +1205,7 @@ git add -A && git commit -qm 'agent: done before broken reviewer'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"structured_output":{"done":true,"summary":"done","blocked":false},"num_turns":4}'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=5 MAX_ERRORS=2 EVALUATOR=true EVALUATOR_FILE="$TMP/eval.md"
+run_loop 1 env MAX_ITERATIONS=5 MAX_ERRORS=2 EVALUATOR=true EVALUATOR_FILE="$TMP/eval.md"
 grep -q 'evaluator: reviewer session failed — rejecting completion' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "nonzero Claude evaluator was not rejected"; }
 ! grep -q 'agent signaled done, evaluator PASS' "$TMP/out.log" \
@@ -1224,7 +1237,7 @@ else
 fi
 STUB
 chmod +x "$TMP/bin/codex"
-run_loop env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=1 \
+run_loop 2 env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=1 \
     EVALUATOR=true EVALUATOR_FILE="$TMP/eval.md"
 grep -q 'evaluator: reviewer session failed — rejecting completion' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "error-event Codex evaluator was not rejected"; }
@@ -1254,7 +1267,7 @@ git add -A && git commit -qm 'agent: done with aliased logs'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"structured_output":{"done":true,"summary":"done","blocked":false},"num_turns":4}'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env LOG_DIR="$TMP/repo/logs/run" MAX_ITERATIONS=1 \
+run_loop 0 env LOG_DIR="$TMP/repo/logs/run" MAX_ITERATIONS=1 \
     EVALUATOR=true EVALUATOR_FILE="$TMP/eval.md"
 grep -q 'agent signaled done, evaluator PASS' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "log-directory alias invalidated evaluator attestation"; }
@@ -1302,7 +1315,7 @@ chmod +x "$TMP/bin/rm" "$TMP/bin/claude"
 HOME="$TMP/home" PATH="$TMP/bin:$PATH" ANTHROPIC_API_KEY=test \
     REPO_DIR="$TMP/repo" LOG_DIR="$TMP/logs" PROMPT_FILE="$TMP/prompt.md" \
     _AGENTMILL_TEST_UNSANDBOXED_EVALUATOR=true \
-    SHUTDOWN_GRACE=1 EVALUATOR=true EVALUATOR_FILE="$TMP/eval.md" \
+    CHECK_CMD=true SHUTDOWN_GRACE=1 EVALUATOR=true EVALUATOR_FILE="$TMP/eval.md" \
     REAL_RM_BIN="$real_rm_bin" EVAL_RM_MARKER="$TMP/eval-rm-called" \
     EVAL_DIR_FILE="$TMP/eval-dir" EVAL_STARTED="$TMP/eval-started" \
     bash "$ROOT/loop.sh" >"$TMP/out.log" 2>&1 &
@@ -1311,7 +1324,8 @@ for _ in $(seq 1 160); do [[ -e "$TMP/eval-started" ]] && break; sleep 0.05; don
 [[ -e "$TMP/eval-started" ]] || { cat "$TMP/out.log"; fail "evaluator never started"; }
 shutdown_started="$(date +%s)"
 kill -TERM "$loop_pid"
-wait "$loop_pid" || { cat "$TMP/out.log"; fail "loop failed while stopping evaluator"; }
+wait_rc=0; wait "$loop_pid" || wait_rc=$?
+[[ "$wait_rc" -eq 143 ]] || { cat "$TMP/out.log"; fail "expected cancellation exit 143, got $wait_rc"; }
 shutdown_elapsed=$(( $(date +%s) - shutdown_started ))
 [[ "$shutdown_elapsed" -lt 8 ]] \
     || { cat "$TMP/out.log"; fail "evaluator temp deletion stacked onto shutdown (${shutdown_elapsed}s)"; }
@@ -1339,7 +1353,7 @@ git add -A && git commit -qm "agent: work"
 printf '{"type":"result","subtype":"success","is_error":false,"result":"ok","num_turns":4}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=2 PROMPT_DUMP="$TMP/dump"
+run_loop 2 env MAX_ITERATIONS=2 PROMPT_DUMP="$TMP/dump"
 grep -q 'initializer session (no PROGRESS.md)' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "initializer session not logged"; }
 grep -q '^<initializer>$' "$TMP/dump.first" || { cat "$TMP/dump.first"; fail "no initializer block on the first session"; }
@@ -1372,10 +1386,10 @@ printf '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":2}}\
 printf '{"done":true,"summary":"codex finished the widget","blocked":false}\n' > "$out"
 STUB
 chmod +x "$TMP/bin/codex"
-run_loop env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=2 ARGV_LOG="$TMP/argv.log"
+run_loop 0 env AGENT=codex OPENAI_API_KEY=test MAX_ITERATIONS=2 ARGV_LOG="$TMP/argv.log"
 grep -q -- '--ephemeral' "$TMP/argv.log" || { cat "$TMP/argv.log"; fail "--ephemeral not passed to codex"; }
 grep -q "signaled TASK_COMPLETE" "$TMP/out.log" || { cat "$TMP/out.log"; fail "codex structured done ignored"; }
-grep -q '"done":true,"blocked":false' "$TMP/logs/results.jsonl" || fail "codex done/blocked not recorded"
+grep -q '"agent_claimed_done":true,"blocked":false' "$TMP/logs/results.jsonl" || fail "codex done/blocked not recorded"
 grep -q 'codex finished the widget' "$(echo "$TMP"/logs/iter-1-*.summary)" \
     || fail "codex summary did not become the final message"
 rm -rf "$TMP"
@@ -1392,7 +1406,7 @@ STUB
 chmod +x "$TMP/bin/claude"
 mkdir -p "$TMP/repo/.mill"
 : > "$TMP/repo/.mill/STOP"
-run_loop env MAX_ITERATIONS=3 RAN_MARKER="$TMP/ran"
+run_loop 4 env MAX_ITERATIONS=3 RAN_MARKER="$TMP/ran"
 grep -q 'stop file present — finishing after this iteration' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "stop file was not noticed"; }
 grep -q 'loop finished after 0 iterations: stop file' "$TMP/out.log" \
@@ -1404,7 +1418,7 @@ grep -q 'loop finished after 0 iterations: stop file' "$TMP/out.log" \
     || { git -C "$TMP/repo" status --short; fail ".mill/ is visible to git"; }
 grep -qxF '.mill/' "$TMP/repo/.git/info/exclude" || fail ".mill/ was not excluded"
 # The exclude append is idempotent: a second run must not add a second line.
-run_loop env MAX_ITERATIONS=1
+run_loop 2 env MAX_ITERATIONS=1
 [[ "$(grep -cxF '.mill/' "$TMP/repo/.git/info/exclude")" -eq 1 ]] \
     || { cat "$TMP/repo/.git/info/exclude"; fail "exclude entry appended twice"; }
 rm -rf "$TMP"
@@ -1421,7 +1435,7 @@ git add -A && git commit -qm "agent: work then brake"
 printf '{"type":"result","subtype":"success","is_error":false,"result":"more later","num_turns":4}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=5
+run_loop 4 env MAX_ITERATIONS=5
 [[ "$(wc -l < "$TMP/logs/results.jsonl")" -eq 1 ]] \
     || { cat "$TMP/out.log"; fail "a second session started after the stop file"; }
 grep -q '"status":"kept"' "$TMP/logs/results.jsonl" || fail "the braked iteration was not kept"
@@ -1447,7 +1461,7 @@ STUB
 chmod +x "$TMP/bin/claude"
 mkdir -p "$TMP/repo/.mill"
 printf 'drop everything and fix the flaky test\nsecond line\n' > "$TMP/repo/.mill/STEER.md"
-run_loop env MAX_ITERATIONS=2 COUNT="$TMP/count" PROMPT_DUMP="$TMP/dump"
+run_loop 2 env MAX_ITERATIONS=2 COUNT="$TMP/count" PROMPT_DUMP="$TMP/dump"
 grep -q 'steer: drop everything and fix the flaky test' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "steer was not logged"; }
 grep -q '^<operator-steer>$' "$TMP/dump.1" || { cat "$TMP/dump.1"; fail "steer not injected into the prompt"; }
@@ -1473,7 +1487,7 @@ STUB
 chmod +x "$TMP/bin/claude"
 mkdir -p "$TMP/repo/.mill"
 printf 'still pending\n' > "$TMP/repo/.mill/STEER.md.next"
-run_loop env MAX_ITERATIONS=1 MAX_NOOPS=0 CHECK_CMD=false
+run_loop 2 env MAX_ITERATIONS=1 MAX_NOOPS=0 CHECK_CMD=false
 grep -q '"status":"reverted"' "$TMP/logs/results.jsonl" || fail "iteration was not reverted"
 [[ -f "$TMP/repo/.mill/STEER.md.next" ]] || fail "the revert deleted the .mill drop-box"
 rm -rf "$TMP"
@@ -1502,7 +1516,7 @@ STUB
 chmod +x "$TMP/bin/claude"
 printf '1.0\n' > "$TMP/score"
 head_before="$(git -C "$TMP/repo" rev-parse HEAD)"
-run_loop env MAX_ITERATIONS=3 MAX_NOOPS=0 COUNT="$TMP/count" PROMPT_DUMP="$TMP/dump" \
+run_loop 2 env MAX_ITERATIONS=3 MAX_NOOPS=0 COUNT="$TMP/count" PROMPT_DUMP="$TMP/dump" \
     SCORE="$TMP/score" METRIC_CMD="cat $TMP/score"
 grep -q 'baseline metric: 1.0' "$TMP/out.log" || { cat "$TMP/out.log"; fail "no baseline metric"; }
 grep -q 'iteration 1: kept (metric 0.9 → best 1.0)' "$TMP/out.log" \
@@ -1545,7 +1559,7 @@ STUB
 chmod +x "$TMP/bin/claude"
 printf '1.0\n' > "$TMP/score"
 head_before="$(git -C "$TMP/repo" rev-parse HEAD)"
-run_loop env MAX_ITERATIONS=1 MAX_NOOPS=0 SCORE="$TMP/score" \
+run_loop 2 env MAX_ITERATIONS=1 MAX_NOOPS=0 SCORE="$TMP/score" \
     METRIC_CMD="cat $TMP/score" METRIC_DIRECTION=max
 grep -q 'metric 0.9 not better than 1.0 — reverting' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "max direction kept a lower score"; }
@@ -1553,7 +1567,7 @@ grep -q 'metric 0.9 not better than 1.0 — reverting' "$TMP/out.log" \
 # ...and the same number is an improvement under min.
 : > "$TMP/logs/results.jsonl"
 printf '1.0\n' > "$TMP/score"
-run_loop env MAX_ITERATIONS=1 MAX_NOOPS=0 SCORE="$TMP/score" METRIC_CMD="cat $TMP/score"
+run_loop 2 env MAX_ITERATIONS=1 MAX_NOOPS=0 SCORE="$TMP/score" METRIC_CMD="cat $TMP/score"
 grep -q 'iteration 1: kept (metric 0.9 → best 1.0)' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "min direction rejected a lower score"; }
 rm -rf "$TMP"
@@ -1572,7 +1586,7 @@ STUB
 chmod +x "$TMP/bin/claude"
 printf '1.0\n' > "$TMP/score"
 head_before="$(git -C "$TMP/repo" rev-parse HEAD)"
-run_loop env MAX_ITERATIONS=1 MAX_NOOPS=0 SCORE="$TMP/score" METRIC_CMD="cat $TMP/score"
+run_loop 2 env MAX_ITERATIONS=1 MAX_NOOPS=0 SCORE="$TMP/score" METRIC_CMD="cat $TMP/score"
 grep -q 'metric unparseable — reverting' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "a non-numeric metric was accepted"; }
 [[ "$(git -C "$TMP/repo" rev-parse HEAD)" == "$head_before" ]] || fail "unparseable metric was not reverted"
@@ -1622,7 +1636,7 @@ STUB
         native) auth_openai="" auth_codex=test-codex-key ;;
         precedence) auth_openai=other-key auth_codex=test-codex-key ;;
     esac
-    run_loop env AGENT=codex OPENAI_API_KEY="$auth_openai" CODEX_API_KEY="$auth_codex" \
+    run_loop 0 env AGENT=codex OPENAI_API_KEY="$auth_openai" CODEX_API_KEY="$auth_codex" \
         MAX_ITERATIONS=1 EVALUATOR=true EVALUATOR_FILE="$TMP/eval.md"
     grep -q 'agent signaled done, evaluator PASS' "$TMP/out.log" \
         || { cat "$TMP/out.log"; fail "Codex API-key authentication failed ($auth_mode)"; }
@@ -1657,7 +1671,7 @@ git add -A && git commit -qm "agent: step $n"
 printf '{"type":"result","is_error":false,"num_turns":4,"result":"continue"}\n'
 STUB
 chmod +x "$TMP/bin/claude"
-run_loop env MAX_ITERATIONS=3 COUNT="$TMP/count" CHECK_CMD='bash verify.sh' METRIC_CMD='cat score'
+run_loop 2 env MAX_ITERATIONS=3 COUNT="$TMP/count" CHECK_CMD='bash verify.sh' METRIC_CMD='cat score'
 [[ "$(grep -c 'initializer session' "$TMP/out.log")" -eq 1 ]] \
     || { cat "$TMP/out.log"; fail "initializer repeated under metric gate"; }
 [[ -f "$TMP/repo/PROGRESS.md" && -f "$TMP/repo/implementation.txt" ]] \
@@ -1695,7 +1709,7 @@ STUB
     chmod +x "$TMP/bin/claude"
     init_check=true
     [[ "$init_failure" != check ]] || init_check=false
-    run_loop env MAX_ITERATIONS=1 INIT_FAILURE="$init_failure" \
+    run_loop 2 env MAX_ITERATIONS=1 INIT_FAILURE="$init_failure" \
         CHECK_CMD="$init_check" METRIC_CMD='cat score'
     [[ "$(git -C "$TMP/repo" rev-parse HEAD)" == "$head_before" ]] \
         || { cat "$TMP/out.log"; fail "metric initializer accepted $init_failure"; }
@@ -1719,7 +1733,7 @@ git add score metric-attempts.txt && git commit -qm 'agent: measured score'
 printf '{"type":"result","is_error":false,"num_turns":4,"result":"continue"}\n'
 STUB
     chmod +x "$TMP/bin/claude"
-    run_loop env MAX_ITERATIONS=1 METRIC_TEXT="$metric_text" METRIC_CMD='cat score'
+    run_loop 2 env MAX_ITERATIONS=1 METRIC_TEXT="$metric_text" METRIC_CMD='cat score'
     python3 - "$TMP/logs/results.jsonl" "$metric_text" <<'PY'
 from decimal import Decimal
 import json, sys
@@ -1730,7 +1744,7 @@ assert rows[0]["metric"] == rows[0]["best"] == Decimal(sys.argv[2]), rows
 PY
     # A second run records a tied/reverted attempt against the normalized
     # baseline, exercising baseline serialization in the best field as well.
-    run_loop env MAX_ITERATIONS=1 METRIC_TEXT="$metric_text" \
+    run_loop 2 env MAX_ITERATIONS=1 METRIC_TEXT="$metric_text" \
         METRIC_CMD='cat score' CHECK_CMD=true MIN_TURNS=0
     python3 - "$TMP/logs/results.jsonl" "$metric_text" <<'PY'
 from decimal import Decimal
@@ -1798,7 +1812,7 @@ STUB
             [[ "$timeout_rc" -ne 0 && ! -e "$TMP/repo/timed-work.txt" ]] \
                 || fail "timed-out baseline allowed an agent session"
         else
-            [[ "$timeout_rc" -eq 0 ]] || { cat "$TMP/out.log"; fail "$timeout_phase aborted loop"; }
+            [[ "$timeout_rc" -eq 2 ]] || { cat "$TMP/out.log"; fail "$timeout_phase should end incomplete"; }
             ! grep -q 'signaled TASK_COMPLETE' "$TMP/out.log" || fail "$timeout_phase accepted done"
             case "$timeout_phase" in
                 check|metric)

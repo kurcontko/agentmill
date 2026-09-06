@@ -43,6 +43,9 @@ jobs:
       - name: Run mill smoke tests
         run: bash tests/test_mill.sh
 
+      - name: Run outcome contract tests
+        run: bash tests/test_outcomes.sh
+
       - name: Run Landlock confinement tests
         run: python3 tests/test_landlock.py
 

@@ -219,6 +219,7 @@ run_loop() {
         PROMPT_FILE="$TEST_ROOT/prompt.md"
         EVALUATOR_FILE="$TEST_ROOT/evaluator.md"
         EVALUATOR=true
+        CHECK_CMD=true
         MAX_ITERATIONS=1
         ITER_TIMEOUT="${TEST_ITER_TIMEOUT:-7200}"
         SHUTDOWN_GRACE=1
@@ -313,8 +314,9 @@ done
 [[ "$wrapper_pid" =~ ^[1-9][0-9]*$ ]] \
     || { cat "$TEST_ROOT/out.log"; fail "could not locate run_agent wrapper"; }
 kill -KILL "$wrapper_pid"
-wait "$loop_pid" \
-    || { cat "$TEST_ROOT/out.log"; cat "$eval_log"; fail "outer loop failed after wrapper crash"; }
+wait_rc=0; wait "$loop_pid" || wait_rc=$?
+[[ "$wait_rc" -eq 2 ]] \
+    || { cat "$TEST_ROOT/out.log"; cat "$eval_log"; fail "wrapper crash must end incomplete"; }
 [[ ! -e "/proc/$leftover_pid" ]] \
     || { cat "$TEST_ROOT/out.log"; cat "$eval_log"; fail "protected bridge left reviewer PID $leftover_pid alive"; }
 [[ -z "$(git -C "$TEST_ROOT/repo" status --porcelain --untracked-files=all)" ]] \
@@ -338,7 +340,8 @@ if kill -0 "$loop_pid" 2>/dev/null; then
     cat "$TEST_ROOT/out.log"
     fail "reviewer disabled its iteration timeout"
 fi
-wait "$loop_pid" || { cat "$TEST_ROOT/out.log"; fail "deadline evaluator run failed"; }
+wait_rc=0; wait "$loop_pid" || wait_rc=$?
+[[ "$wait_rc" -eq 2 ]] || { cat "$TEST_ROOT/out.log"; fail "review deadline must end incomplete"; }
 elapsed=$(( $(date +%s) - started ))
 eval_log="$(find_eval_log)"
 grep -q 'DEADLINE_STARTED' "$eval_log" \
@@ -402,7 +405,7 @@ set +e
 wait "$loop_pid"
 loop_rc=$?
 set -e
-if [[ "$loop_rc" -ne 0 ]]; then
+if [[ "$loop_rc" -ne 143 ]]; then
     cat "$TEST_ROOT/out.log"
     [[ -z "$eval_log" ]] || cat "$eval_log"
     fail "loop failed during evaluator shutdown (exit $loop_rc)"

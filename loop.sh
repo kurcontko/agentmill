@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Functions are also invoked through traps and the interruptible dispatcher.
+# shellcheck disable=SC2329
 set -euo pipefail
 
 # AgentMill — run an agent CLI against a repo in a respawning loop.
@@ -67,7 +69,30 @@ else
 fi
 
 log() { printf '[%s] %s\n' "$(date -u '+%H:%M:%S')" "$*"; }
-die() { log "FATAL: $*"; exit 1; }
+die() { stop_reason="${phase:-runtime}_failed"; log "FATAL: $*"; exit 1; }
+
+RUN_STATE_HELPER="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/run_state.py"
+RUN_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+verification_checks=not_run verification_review=not_run checked_commit=""
+phase=prepare
+mkdir -p "$LOG_DIR"
+finalize_run() {
+    local exit_status=$?
+    trap - EXIT
+    if [[ "$exit_status" -eq 0 && "${completion_ok:-false}" != true ]]; then
+        exit_status=1
+    fi
+    if [[ "${SHUTDOWN:-false}" == true ]]; then
+        exit_status="${shutdown_exit_code:-143}"
+        stop_reason=signal
+    fi
+    python3 "$RUN_STATE_HELPER" "$LOG_DIR/outcome.json" "$RUN_ID" \
+        "$exit_status" "${stop_reason:-unexpected_exit}" "${agent_done:-false}" \
+        "$verification_checks" "$verification_review" "$checked_commit" "${iter:-0}" \
+        || exit_status=1
+    exit "$exit_status"
+}
+trap finalize_run EXIT
 
 # Job control gives the loop wrapper and its timed CLI session distinct process
 # groups, allowing each layer to enforce a bounded descendant-group shutdown.
@@ -206,7 +231,8 @@ on_signal() {
     { sleep "$((SHUTDOWN_GRACE + 2))"; signal_session_group KILL "$AGENT_PID"; } &
     WATCHDOG_PID=$!
 }
-trap on_signal TERM INT
+trap 'shutdown_exit_code=143; on_signal' TERM
+trap 'shutdown_exit_code=130; on_signal' INT
 
 # Wait for the backgrounded agent. A trap interrupts `wait`, which then
 # returns 128+signal while the agent is still running; keep waiting until it
@@ -459,10 +485,12 @@ require_clean_worktree() {
 require_clean_worktree "$REPO_DIR has uncommitted changes"
 
 if [[ -n "$SETUP_CMD" ]]; then
+    phase=setup
     log "setup: $SETUP_CMD"
     bash -c "$SETUP_CMD" || die "SETUP_CMD failed"
     require_clean_worktree "SETUP_CMD left the checkout dirty"
 fi
+phase=runtime
 
 # Minimal carry-forward between fresh contexts: recent history + the agent's
 # own progress file. Everything else the agent reads from the repo itself.
@@ -1904,6 +1932,14 @@ run_evaluator() {
 # next session knows why its predecessor's claim did not stick.
 verify_done_claim() {
     local out="$LOG_DIR/.done-check" label="" cmd="" ok=true failure_note=""
+    verification_review=not_run
+    checked_commit="$(head_oid)"
+    if [[ -z "$DONE_CMD" && -z "$CHECK_CMD" ]]; then
+        verification_checks=not_run
+        log "agent claimed done but no acceptance command is configured — continuing"
+        return 1
+    fi
+    verification_checks=passed
     if [[ -n "$DONE_CMD" ]]; then
         label=DONE_CMD cmd="$DONE_CMD"
     elif [[ -n "$CHECK_CMD" && "$check_passed" != true ]]; then
@@ -1925,6 +1961,7 @@ verify_done_claim() {
             return 1
         fi
         if [[ "$ok" != true ]]; then
+            verification_checks=failed
             log "agent claimed done but $label failed — continuing"
             failure_note="- iteration $iter: $label failed: $(head -3 "$out" | tr '\n' ' ')"
             if ! run_interruptible record_verifier_failure "$failure_note"; then
@@ -1934,7 +1971,13 @@ verify_done_claim() {
         fi
     fi
     [[ "$EVALUATOR" == true ]] || return 0
-    run_evaluator
+    verification_review=error
+    if run_evaluator; then
+        verification_review=passed
+        return 0
+    fi
+    [[ "$EVALUATOR_SESSION_FAILED" == true ]] || verification_review=needs_work
+    return 1
 }
 
 # Structured final messages. claude takes the schema inline and returns the
@@ -2013,6 +2056,7 @@ while true; do
     log "==== iteration $iter ===="
 
     status=kept rc=0 check_passed=false metric_ran=false metric_value=""
+    verification_checks=not_run verification_review=not_run checked_commit=""
     shutdown_cleanup_done=false
     state_head_file="$LOG_DIR/.iteration-head"
     state_status_file="$LOG_DIR/.iteration-status"
@@ -2243,13 +2287,18 @@ while true; do
     [[ -z "$m_tokens_out" ]] || extra+=",\"tokens_out\":$m_tokens_out"
     result_head="${current_head:0:7}"
     [[ -n "$result_head" ]] || result_head=none
+    {
     printf '{"iter":%d,"agent":"%s","status":"%s","commits":%d,"head":"%s","ts":"%s"' \
         "$iter" "$AGENT" "$status" "$new_commits" \
         "$result_head" \
-        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >>"$results_log"
-    printf ',"subtype":"%s","cost_usd":%s,"duration_s":%d,"done":%s,"blocked":%s%s}\n' \
+        "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf ',"subtype":"%s","cost_usd":%s,"duration_s":%d,"agent_claimed_done":%s,"blocked":%s%s' \
         "$m_subtype" "$(add_cost "$cost" 0)" "$duration_s" \
-        "$agent_done" "$agent_blocked" "$extra" >>"$results_log"
+        "$agent_done" "$agent_blocked" "$extra"
+    printf ',"schema_version":1,"run_id":"%s","completion_ok":%s,"done":%s,"verification":{"checks":"%s","review":"%s","checked_commit":"%s"}}\n' \
+        "$RUN_ID" "$completion_ok" "$completion_ok" "$verification_checks" \
+        "$verification_review" "$checked_commit"
+    } >>"$results_log"
     log "iteration $iter: $status ($new_commits commits, \$$(fmt_cost "$cost"), ${m_turns:-?} turns, ${duration_s}s; total \$$(fmt_cost "$total_cost"))"
     if [[ "$SHUTDOWN" == true ]]; then
         write_summary
@@ -2297,3 +2346,15 @@ rm -f "$STOP_FILE"
 
 log "loop finished after $iter iterations: $stop_reason"
 log "total cost: \$$(fmt_cost "$total_cost") across $iter iterations"
+if [[ "${SHUTDOWN:-false}" == true ]]; then exit "${shutdown_exit_code:-143}"; fi
+if [[ "${completion_ok:-false}" == true ]]; then stop_reason=verified_completion; exit 0; fi
+case "$stop_reason" in
+    'stop file') stop_reason=stop_requested; exit 4 ;;
+    *'consecutive errors') stop_reason=error_limit; exit 1 ;;
+    *'consecutive no-progress iterations')
+        if [[ "${agent_blocked:-false}" == true ]]; then stop_reason=agent_blocked; exit 3; fi
+        stop_reason=no_progress_limit ;;
+    'max iterations') stop_reason=iteration_limit ;;
+    'budget exhausted '*) stop_reason=budget_limit ;;
+esac
+exit 2

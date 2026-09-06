@@ -45,6 +45,7 @@ WORKDIR /workspace
 # created above.
 RUN chown "agent:$(id -gn agent)" /workspace
 COPY loop.sh /loop.sh
+COPY run_state.py /run_state.py
 COPY landlock_exec.py /usr/local/bin/landlock-exec
 COPY reviewer_control.py /usr/local/bin/agentmill-reviewer-control
 COPY reviewer_exec.sh /usr/local/bin/agentmill-reviewer-exec

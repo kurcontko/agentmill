@@ -32,7 +32,8 @@ What the loop adds around the bare `while true; do claude -p ...` idea:
 - **The ratchet** — set `CHECK_CMD` (e.g. your test suite) and any iteration
   that breaks it is reverted, including one the CLI crashed or timed out
   halfway through; `METRIC_CMD` adds a second gate, keeping an iteration only
-  if a benchmark number strictly improves. Kept history is always green. Because
+  if a benchmark number strictly improves. Checks cover accepted iteration
+  endpoints, not every intermediate commit created by the agent. Because
   a revert discards the worktree, the loop refuses to start on a dirty repo.
 - **Verified completion** — configure `DONE_CMD` or `CHECK_CMD` to check a
   "done" claim, and with `EVALUATOR=true` a reviewer in a disposable checkout
@@ -127,9 +128,23 @@ itself).
 
 ## Completion contract
 
+Foreground runs return `0` only for verified completion. Other outcomes return
+`1` (failure), `2` (incomplete at a limit), `3` (blocked), `4` (stop-file
+cancellation), or `130`/`143` (interrupt/termination). A detached launch returning
+success only acknowledges that the container started.
+
+`outcome.json` in the log directory records the versioned terminal outcome,
+stop reason, worker claim, verification and review status, checked commit, and
+exit code. In `results.jsonl`, `agent_claimed_done` records the worker's claim;
+`completion_ok` and the compatibility field `done` record verified completion.
+An abruptly killed process may leave no terminal record; missing evidence does
+not imply success.
+
 The agent's final message is a JSON object; `done: true` is a claim, not a stop.
-When configured, `DONE_CMD` must pass (or, if unset, the configured `CHECK_CMD`
-must have been green on this iteration). With `EVALUATOR=true`, a fresh session
+`DONE_CMD` must pass (or, if unset, the configured `CHECK_CMD`
+must have been green on this iteration). With neither command configured,
+completion remains unverified and cannot produce a success exit.
+With `EVALUATOR=true`, a fresh session
 (`prompts/EVALUATOR.md`) reviews the run's commits and diffstat against the
 mission, re-runs the verifier, and returns `PASS` or `NEEDS_WORK`. The reviewer
 gets a writable disposable snapshot under a Linux Landlock write sandbox. The
