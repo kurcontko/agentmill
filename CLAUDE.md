@@ -113,15 +113,27 @@ $XDG_STATE_HOME/agentmill/runs/<run-id>/ # manifest, events, outcome, results,
   score in `METRIC_DIRECTION` is kept (initializer exception above). Numeric
   text is normalized for JSON without rounding; floats are compared with awk.
   Each CHECK_CMD, DONE_CMD, and METRIC_CMD invocation, including the baseline,
-  is bounded by ITER_TIMEOUT plus SHUTDOWN_GRACE; expiry fails the operation.
+  is bounded by CHECK_TIMEOUT (default ITER_TIMEOUT) plus SHUTDOWN_GRACE;
+  expiry fails the operation.
 - **Cost & health stops**: per-session cost/turns/tokens parsed from the result
   event; `MAX_BUDGET_USD`/`MAX_TURNS` bound a session (claude),
-  `MAX_TOTAL_BUDGET_USD` the run. `MIN_TURNS` turns an idle "successful"
+  remaining `MAX_TOTAL_BUDGET_USD` clamps each subsequent Claude session,
+  reserving REVIEW_RESERVE_USD for review when enabled. Worker/reviewer usage
+  is recorded separately in sessions.jsonl and aggregated in accounting.json.
+  Missing cost is unknown, not zero; unknown usage or unsupported monetary
+  telemetry blocks further sessions under a total dollar cap. These limits
+  depend on provider CLI enforcement, not an independent billing guarantee.
+  `MIN_TURNS` turns an idle "successful"
   session into an error (bad key/model) instead of a slow no-op; a self-reported
   `blocked` counts toward `MAX_NOOPS`.
 - **Stop conditions**: a verified done claim, `.mill/STOP`, `MAX_ITERATIONS`,
   `MAX_NOOPS`, `MAX_ERRORS` (exponential backoff capped by `MAX_BACKOFF`),
-  `MAX_TOTAL_BUDGET_USD`, `ITER_TIMEOUT` per session. TERM/INT is forwarded to the agent's process
+  `MAX_TOTAL_BUDGET_USD`, `AGENT_TIMEOUT` per session (default ITER_TIMEOUT),
+  and MAX_DURATION for the whole run (default 3600; 0 explicitly disables).
+  SETUP_TIMEOUT bounds setup independently (default 900); failed setup records
+  its result without starting a worker. A supervisor deadline backstop allows
+  SHUTDOWN_GRACE + 25 seconds for cleanup before forcibly stopping the loop.
+  TERM/INT is forwarded to the agent's process
   group; both timeout expiry and an
   external shutdown escalate the agent's whole descendant process group to
   SIGKILL after `SHUTDOWN_GRACE`. `mill stop` gives the loop that grace period

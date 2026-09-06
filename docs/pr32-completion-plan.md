@@ -14,15 +14,15 @@ first-run packaging follow after this PR; they are not merge requirements here.
   direct implementation; retain rejected patches and bounded verifier feedback
   outside rollback. Prove implementation starts and feedback reaches the next
   worker after rollback.
-- [ ] Run identity: allocate collision-free run directories before setup, record
+- [x] Run identity: allocate collision-free run directories before setup, record
   original HEAD and sanitized configuration/policy/runtime metadata, retain
   checkpoints, and make CLI log lookup run-aware. Prove repeated invocations
   cannot overwrite or mix evidence. No resume command in this PR.
-- [ ] Limits and accounting: consistent setup/session/check/run deadlines and
+- [x] Limits and accounting: consistent setup/session/check/run deadlines and
   cleanup, role-specific usage, unknown-cost semantics, remaining-budget limits,
   and review reserve. Prove hanging setup cannot start a worker and insufficient
   allowance cannot start another paid session.
-- [ ] Regression and documentation: preserve runtime-safety coverage; update
+- [x] Regression and documentation: preserve runtime-safety coverage; update
   outcome, initialization, accounting, and endpoint-verification guarantees.
   Run ShellCheck, shell suites, Python checks, Docker/runtime integration,
   supervisor, confinement, DinD, and existing security workflows.
@@ -98,3 +98,29 @@ fixture used a foreign worker UID with the new private host-owned run directory.
 The fixture now maps the worker UID as `mill build` does on Linux, keeps state
 inside its disposable directory, and reads the new paths on failure. Separate
 cross-UID reviewer tests are unchanged. This fix needs Docker CI validation.
+
+## Completion audit
+
+At `d06ff4c`, CI run `34042290481` passed every step: ShellCheck, all loop/CLI
+and dedicated contract suites, Linux confinement, Python compilation, Docker
+build, packaged reviewer/ownership and CLI smoke tests, concurrent DinD lifecycle,
+and supervisor RPC/deadline checks. The DinD fixture fix is verified. CodeQL,
+dependency review, secret scanning, Actions analysis, and all Trivy jobs passed.
+
+| Requirement | Acceptance evidence |
+| --- | --- |
+| Truthful completion and terminal exits | `tests/test_outcomes.sh`, loop completion/review cases, CLI exit propagation cases |
+| Red-baseline repair can start | `tests/test_recovery.sh`: retained metadata advances to implementation; mixed code/planning is still rejected |
+| Rejection survives rollback | Recovery test checks retained patch/output and injected next-worker feedback |
+| Collision-free run evidence | `tests/test_run_state.py`: same-HEAD repeated runs preserve every earlier file; reused ID is rejected; CLI explicit/latest/legacy lookup cases |
+| Unknown and role-specific usage | `tests/test_accounting.py` and `tests/test_limits.sh`: reviewer included, missing/estimated amounts distinct, unknown total remains null |
+| Remaining allowance prevents new paid work | Limit fixtures inspect worker/reviewer launch caps, reserve, insufficient allowance, and unknown-cost blocking |
+| Bounded setup and total lifecycle | Linux setup timeout, total deadline during setup/backoff, worker deadline unit cases, packaged supervisor deadline checks |
+| Existing runtime boundaries | Packaged reviewer/ownership, Landlock, supervisor, and concurrent DinD tests unchanged in purpose and passing |
+| Accurate guarantees | README, positioning, and CLAUDE guidance distinguish endpoint verification, CLI-dependent monetary limits, and non-tamper-proof evidence |
+
+PR #32 targets main, is mergeable, and now has a title/body describing the actual
+scope rather than the initial small-loop design. The final documentation-only
+commit still needs its own green CI head before handoff. No real-provider task
+trials or comparative benchmarks were run; report/resume/onboarding and empirical
+product evaluation remain follow-up work. No merge has been performed.
