@@ -242,7 +242,8 @@ ENV_KEYS=(ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY CODEX_API_KEY
           http_proxy https_proxy no_proxy
           AGENT MODEL FALLBACK_MODEL MAX_ITERATIONS MAX_ERRORS MAX_NOOPS
           ITER_TIMEOUT LOOP_DELAY ERROR_BACKOFF MAX_BACKOFF SHUTDOWN_GRACE
-          MAX_TURNS MIN_TURNS MAX_BUDGET_USD MAX_TOTAL_BUDGET_USD
+          SETUP_TIMEOUT AGENT_TIMEOUT CHECK_TIMEOUT MAX_DURATION
+          MAX_TURNS MIN_TURNS MAX_BUDGET_USD MAX_TOTAL_BUDGET_USD REVIEW_RESERVE_USD
           DONE_PROMISE SETUP_CMD CHECK_CMD METRIC_CMD METRIC_DIRECTION
           DONE_CMD EVALUATOR CLAUDE_BARE
           GIT_USER GIT_EMAIL)
@@ -647,7 +648,7 @@ cmd_logs() {
         jq -r 'def pad(n): (. + "          ")[0:n];
                [ ((.iter // 0) | tostring | pad(5)), ((.status // "?") | pad(9)),
                  ((.commits // 0) | tostring | pad(8)),
-                 (("$" + (((.cost_usd // 0) * 100 | round / 100) | tostring)) | pad(9)),
+                 ((if .cost_usd == null then "unknown" else "$" + ((.cost_usd * 100 | round / 100) | tostring) end) | pad(9)),
                  ((.turns // "?") | tostring | pad(6)),
                  (((.duration_s // 0) | tostring) + "s") ] | join(" ")' "$results"
         return 0

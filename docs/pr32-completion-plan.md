@@ -68,9 +68,8 @@ At `9a0807b`, Linux shell tests and all security scans passed; packaged runtime
 was skipped because the older ShellCheck needed that annotation. Rerun on the
 recovery commit before considering those gates satisfied.
 
-Accounting follow-up: the TSV parser uses whitespace IFS, which collapses empty
-fields and can shift missing subtype/usage values into the wrong columns.
-Preserve empty fields while implementing unknown-cost semantics.
+Accounting now preserves empty TSV fields, preventing absent subtype/usage
+values from shifting into other columns.
 
 At `59f73db`, the Linux shell, Docker build, packaged reviewer, supervisor,
 confinement, DinD, and security checks passed. The advisory external model review
@@ -86,3 +85,16 @@ must run on this change before its checklist item is complete.
 The Scorecard workflow from merged PR #31 is restored unchanged. The positioning
 document now states the actual implementation and its limits, with no unsupported
 competitor or performance claims.
+
+Limits/accounting implementation adds role-specific session records, explicit
+unknown and estimated cost states, remaining Claude session allowances with a
+review reserve, and setup/session/check/total deadlines. A fixed supervisor
+backstop bounds the packaged worker without expanding its command interface.
+Local accounting (5 tests), worker-deadline (3 tests), limits, CLI, and full loop
+regressions pass. The GNU-only setup deadline still requires Linux CI.
+
+At `311e6a2`, packaged reviewer checks passed, but DinD failed: its host CLI
+fixture used a foreign worker UID with the new private host-owned run directory.
+The fixture now maps the worker UID as `mill build` does on Linux, keeps state
+inside its disposable directory, and reads the new paths on failure. Separate
+cross-UID reviewer tests are unchanged. This fix needs Docker CI validation.

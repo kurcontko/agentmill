@@ -172,11 +172,27 @@ class ReviewerServer:
             threading.Thread(target=self.handle, args=(connection,), daemon=True).start()
 
 
+def wait_worker(worker: subprocess.Popen, duration: float, grace: int) -> int:
+    """Bound the loop itself, allowing its existing cleanup path to finish."""
+    try:
+        status = worker.wait(timeout=duration if duration else None)
+    except subprocess.TimeoutExpired:
+        worker.send_signal(signal.SIGUSR1)
+        try:
+            worker.wait(timeout=grace + 25)
+        except subprocess.TimeoutExpired:
+            print("run deadline: forcing worker shutdown; terminal evidence may be incomplete", file=sys.stderr)
+            worker.kill()
+            worker.wait()
+        return 2
+    return status if status >= 0 else 128 - status
+
+
 def main() -> int:
     if os.geteuid() != 0:
         raise RuntimeError("container entrypoint must start as root to drop credentials")
     worker_env = dict(os.environ)
-    timeout = int(worker_env.get("ITER_TIMEOUT", "3600"))
+    timeout = int(worker_env.get("AGENT_TIMEOUT") or worker_env.get("ITER_TIMEOUT", "3600"))
     grace = int(worker_env.get("SHUTDOWN_GRACE", "30"))
     if timeout <= 0 or grace < 0:
         raise ValueError("invalid timeout or shutdown grace")
@@ -193,6 +209,9 @@ def main() -> int:
     threading.Thread(target=server.serve, daemon=True).start()
     worker_env.setdefault("HOME", agent.pw_dir)
     command = sys.argv[1:] or ["/loop.sh"]
+    duration = int(worker_env.get("MAX_DURATION", "3600")) if command == ["/loop.sh"] else 0
+    if duration < 0:
+        raise ValueError("invalid total run duration")
     worker = subprocess.Popen(command, user=agent.pw_uid, group=agent.pw_gid,
                               extra_groups=[], env=worker_env)
     def forward(signum: int, _frame: object) -> None:
@@ -200,8 +219,8 @@ def main() -> int:
             worker.send_signal(signum)
     signal.signal(signal.SIGTERM, forward)
     signal.signal(signal.SIGINT, forward)
-    status = worker.wait()
-    return status if status >= 0 else 128 - status
+    # This independent backstop adds no repository-command broker operation.
+    return wait_worker(worker, duration, grace)
 
 
 if __name__ == "__main__":

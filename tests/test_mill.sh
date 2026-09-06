@@ -638,9 +638,16 @@ MAX_TURNS=12
 MIN_TURNS=3
 MAX_BUDGET_USD=1.50
 MAX_TOTAL_BUDGET_USD=20
+REVIEW_RESERVE_USD=0.75
+SETUP_TIMEOUT=30
+AGENT_TIMEOUT=120
+CHECK_TIMEOUT=45
+MAX_DURATION=600
 ENV
 mill -C "$TMP/a/api" run >/dev/null || fail "mill run exited nonzero"
-for kv in 'MAX_TURNS=12' 'MIN_TURNS=3' 'MAX_BUDGET_USD=1.50' 'MAX_TOTAL_BUDGET_USD=20'; do
+for kv in 'MAX_TURNS=12' 'MIN_TURNS=3' 'MAX_BUDGET_USD=1.50' 'MAX_TOTAL_BUDGET_USD=20' \
+    'REVIEW_RESERVE_USD=0.75' 'SETUP_TIMEOUT=30' 'AGENT_TIMEOUT=120' \
+    'CHECK_TIMEOUT=45' 'MAX_DURATION=600'; do
     key="${kv%%=*}" value="${kv#*=}"
     assert_file_key "$key"
     assert_file_env_value "$key" "$value"

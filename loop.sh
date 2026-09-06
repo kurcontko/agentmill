@@ -2,6 +2,7 @@
 # Functions are also invoked through traps and the interruptible dispatcher.
 # shellcheck disable=SC2317,SC2329
 set -euo pipefail
+RUN_STARTED_SECONDS=$SECONDS
 
 # AgentMill — run an agent CLI against a repo in a respawning loop.
 # Fresh context every iteration; the repo (PROGRESS.md + git history) is the memory.
@@ -17,6 +18,10 @@ MAX_ITERATIONS="${MAX_ITERATIONS:-0}"    # 0 = unbounded
 MAX_ERRORS="${MAX_ERRORS:-3}"            # consecutive agent failures before giving up (0 = unbounded)
 MAX_NOOPS="${MAX_NOOPS:-3}"              # consecutive no-progress iterations before stopping (0 = unbounded)
 ITER_TIMEOUT="${ITER_TIMEOUT:-3600}"     # seconds per agent session / verifier / measurement
+SETUP_TIMEOUT="${SETUP_TIMEOUT:-900}"
+AGENT_TIMEOUT="${AGENT_TIMEOUT:-$ITER_TIMEOUT}"
+CHECK_TIMEOUT="${CHECK_TIMEOUT:-$ITER_TIMEOUT}"
+MAX_DURATION="${MAX_DURATION:-3600}"     # total elapsed seconds; 0 explicitly disables the run deadline
 LOOP_DELAY="${LOOP_DELAY:-5}"            # seconds between iterations
 ERROR_BACKOFF="${ERROR_BACKOFF:-30}"     # backoff base after a failure
 MAX_BACKOFF="${MAX_BACKOFF:-900}"        # cap on the error backoff
@@ -24,6 +29,7 @@ SHUTDOWN_GRACE="${SHUTDOWN_GRACE:-30}"   # seconds a signalled agent gets before
 MAX_TURNS="${MAX_TURNS:-0}"              # claude only: --max-turns per session (0 = unbounded)
 MAX_BUDGET_USD="${MAX_BUDGET_USD:-}"     # claude only: --max-budget-usd per session (empty = none)
 MAX_TOTAL_BUDGET_USD="${MAX_TOTAL_BUDGET_USD:-}"  # loop-wide spend cap in USD (empty = none)
+REVIEW_RESERVE_USD="${REVIEW_RESERVE_USD:-0.50}" # reserved from a total cap when review is enabled
 MIN_TURNS="${MIN_TURNS:-2}"              # fewer turns than this with no repo change = broken agent
 DONE_PROMISE="${DONE_PROMISE:-TASK_COMPLETE}"
 SETUP_CMD="${SETUP_CMD:-}"               # runs once before the loop
@@ -41,6 +47,12 @@ GIT_EMAIL="${GIT_EMAIL:-agent@agentmill}"
     || { echo "FATAL: ITER_TIMEOUT must be a positive integer" >&2; exit 1; }
 [[ "$SHUTDOWN_GRACE" =~ ^[0-9]+$ ]] \
     || { echo "FATAL: SHUTDOWN_GRACE must be a non-negative integer" >&2; exit 1; }
+for timeout_key in SETUP_TIMEOUT AGENT_TIMEOUT CHECK_TIMEOUT; do
+    [[ "${!timeout_key}" =~ ^[1-9][0-9]*$ ]] \
+        || { echo "FATAL: $timeout_key must be a positive integer" >&2; exit 1; }
+done
+[[ "$MAX_DURATION" =~ ^[0-9]+$ ]] \
+    || { echo "FATAL: MAX_DURATION must be a non-negative integer" >&2; exit 1; }
 # GNU timeout treats a zero --kill-after duration as disabled. Preserve zero's
 # external-shutdown meaning (kill immediately), but keep timeout escalation on.
 TIMEOUT_KILL_AFTER="$SHUTDOWN_GRACE"
@@ -52,13 +64,13 @@ TIMEOUT_KILL_AFTER="$SHUTDOWN_GRACE"
 # PROBE_CMD bounds the one-off capability probes below: a CLI that hangs on
 # --help must not hang the loop before it has run anything.
 if timeout --kill-after=1 1 true >/dev/null 2>&1; then
-    TIMEOUT_CMD=(timeout "--kill-after=$TIMEOUT_KILL_AFTER" "$ITER_TIMEOUT")
-    COMMAND_TIMEOUT_CMD=(timeout --foreground "--kill-after=$TIMEOUT_KILL_AFTER" "$ITER_TIMEOUT")
+    TIMEOUT_CMD=(timeout "--kill-after=$TIMEOUT_KILL_AFTER" "$AGENT_TIMEOUT")
+    COMMAND_TIMEOUT_CMD=(timeout --foreground "--kill-after=$TIMEOUT_KILL_AFTER" "$CHECK_TIMEOUT")
     PROBE_CMD=(timeout --kill-after=1 10)
     SHUTDOWN_CLEANUP_CMD=(timeout --kill-after=1 20)
 elif timeout -k 1 1 true >/dev/null 2>&1; then
-    TIMEOUT_CMD=(timeout -k "$TIMEOUT_KILL_AFTER" "$ITER_TIMEOUT")
-    COMMAND_TIMEOUT_CMD=(timeout --foreground -k "$TIMEOUT_KILL_AFTER" "$ITER_TIMEOUT")
+    TIMEOUT_CMD=(timeout -k "$TIMEOUT_KILL_AFTER" "$AGENT_TIMEOUT")
+    COMMAND_TIMEOUT_CMD=(timeout --foreground -k "$TIMEOUT_KILL_AFTER" "$CHECK_TIMEOUT")
     PROBE_CMD=(timeout -k 1 10)
     SHUTDOWN_CLEANUP_CMD=(timeout -k 1 20)
 else
@@ -77,6 +89,8 @@ initialize_run_state() (
     export AGENT MODEL FALLBACK_MODEL MAX_ITERATIONS MAX_ERRORS MAX_NOOPS ITER_TIMEOUT
     export LOOP_DELAY ERROR_BACKOFF MAX_BACKOFF SHUTDOWN_GRACE MAX_TURNS MAX_BUDGET_USD
     export MAX_TOTAL_BUDGET_USD MIN_TURNS DONE_PROMISE SETUP_CMD CHECK_CMD METRIC_CMD
+    export REVIEW_RESERVE_USD
+    export SETUP_TIMEOUT AGENT_TIMEOUT CHECK_TIMEOUT MAX_DURATION
     export METRIC_DIRECTION DONE_CMD EVALUATOR CLAUDE_BARE
     local args=("$SOURCE_LOG_ROOT" "$REPO_DIR" "$MISSION_FILE")
     [[ -z "${AGENTMILL_RUN_ID:-}" ]] || args+=(--run-id "$AGENTMILL_RUN_ID")
@@ -90,12 +104,20 @@ mkdir -p "$LOG_DIR"
 finalize_run() {
     local exit_status=$?
     trap - EXIT
+    if [[ -n "${RUN_TIMER_PID:-}" ]]; then
+        /bin/kill -TERM -- "-$RUN_TIMER_PID" 2>/dev/null || true
+        wait "$RUN_TIMER_PID" 2>/dev/null || true
+    fi
     if [[ "$exit_status" -eq 0 && "${completion_ok:-false}" != true ]]; then
         exit_status=1
     fi
     if [[ "${SHUTDOWN:-false}" == true ]]; then
         exit_status="${shutdown_exit_code:-143}"
         stop_reason=signal
+    fi
+    if [[ "${RUN_DEADLINE_REACHED:-false}" == true ]]; then
+        exit_status=2
+        stop_reason=duration_limit
     fi
     python3 "$RUN_STATE_HELPER" "$LOG_DIR/outcome.json" "$RUN_ID" \
         "$exit_status" "${stop_reason:-unexpected_exit}" "${agent_done:-false}" \
@@ -244,6 +266,22 @@ on_signal() {
 }
 trap 'shutdown_exit_code=143; on_signal' TERM
 trap 'shutdown_exit_code=130; on_signal' INT
+trap 'RUN_DEADLINE_REACHED=true; on_signal' USR1
+RUN_TIMER_PID=""
+if [[ "$MAX_DURATION" -gt 0 ]]; then
+    run_remaining=$((MAX_DURATION - SECONDS + RUN_STARTED_SECONDS))
+    if [[ "$run_remaining" -le 0 ]]; then
+        RUN_DEADLINE_REACHED=true
+        on_signal
+    else
+        RUN_PARENT_PID=$$
+        # A separate timer interrupts setup, sessions, checks, and backoff alike.
+        # Cleanup stops its process group before writing the terminal record.
+        python3 -c 'import os, signal, sys, time; time.sleep(int(sys.argv[2])); os.kill(int(sys.argv[1]), signal.SIGUSR1)' \
+            "$RUN_PARENT_PID" "$run_remaining" &
+        RUN_TIMER_PID=$!
+    fi
+fi
 
 # Wait for the backgrounded agent. A trap interrupts `wait`, which then
 # returns 128+signal while the agent is still running; keep waiting until it
@@ -325,12 +363,15 @@ run_interruptible() {
 # Foreground timeout and disabled job control keep descendants in that group:
 # external shutdown and wait_agent's final drain can still reach all of them.
 run_bounded_command() {
-    local command_rc=0
+    local command_rc=0 limit="${2:-$CHECK_TIMEOUT}" timed_command=("${COMMAND_TIMEOUT_CMD[@]}")
+    if [[ "${timed_command[0]}" != env ]]; then
+        timed_command[${#timed_command[@]} - 1]="$limit"
+    fi
     set +m
-    "${COMMAND_TIMEOUT_CMD[@]}" bash -c "$1" || command_rc=$?
+    "${timed_command[@]}" bash -c "$1" || command_rc=$?
     case "$command_rc" in
         124|137) printf 'command timed out after %ss (exit %s)\n' \
-                     "$ITER_TIMEOUT" "$command_rc" >&2 ;;
+                     "$limit" "$command_rc" >&2 ;;
     esac
     return "$command_rc"
 }
@@ -498,7 +539,12 @@ require_clean_worktree "$REPO_DIR has uncommitted changes"
 if [[ -n "$SETUP_CMD" ]]; then
     phase=setup
     log "setup: $SETUP_CMD"
-    bash -c "$SETUP_CMD" || die "SETUP_CMD failed"
+    setup_rc=0
+    run_interruptible run_bounded_command "$SETUP_CMD" "$SETUP_TIMEOUT" >"$LOG_DIR/setup.log" 2>&1 || setup_rc=$?
+    python3 "$RUN_STATE_HELPER" observation "$LOG_DIR/setup.json" \
+        "$SETUP_CMD" "$setup_rc" "$(git rev-parse --verify HEAD 2>/dev/null || true)" "$LOG_DIR/setup.log" \
+        || die "could not record setup result"
+    [[ "$setup_rc" -eq 0 && "$SHUTDOWN" != true ]] || die "SETUP_CMD failed (exit $setup_rc)"
     require_clean_worktree "SETUP_CMD left the checkout dirty"
 fi
 phase=runtime
@@ -757,7 +803,7 @@ CLAUDE_RESULT_JQ='
   ([inputs | fromjson? | select(type == "object") | select(.type == "result")] | last) as $r
   | if $r == null then empty else
       ([ ($r.subtype // ""), (($r.is_error // false) | tostring),
-         (($r.total_cost_usd // 0) | tostring), (($r.num_turns // "") | tostring),
+         (($r.total_cost_usd // "") | tostring), (($r.num_turns // "") | tostring),
          (($r.duration_ms // 0) | tostring),
          (($r.usage.input_tokens // "") | tostring),
          (($r.usage.output_tokens // "") | tostring) ] | @tsv),
@@ -789,7 +835,7 @@ CODEX_RESULT_JQ='
              | length) as $turns
       | ($err or ($done == null)) as $failed
       | [ (if $failed then "error" else "success" end), ($failed | tostring),
-          "0", ($turns | tostring), "0",
+          "", ($turns | tostring), "0",
           (($done.usage.input_tokens // "") | tostring),
           (($done.usage.output_tokens // "") | tostring) ] | @tsv
     end'
@@ -1371,7 +1417,7 @@ run_agent() {
             # This caller deadline complements the root broker's independent
             # deadline. Reviewer code cannot signal either supervisor uid.
             review_exec=(/usr/bin/timeout
-                         "--kill-after=$TIMEOUT_KILL_AFTER" "$ITER_TIMEOUT"
+                         "--kill-after=$TIMEOUT_KILL_AFTER" "$AGENT_TIMEOUT"
                          "$REVIEWER_EXEC"
                          --write-root "$EVAL_ROOT"
                          --environment-file "$EVAL_ROOT/reviewer-env.json"
@@ -1391,7 +1437,7 @@ run_agent() {
             [[ -n "$MODEL" ]] && args=(--model "$MODEL")
             [[ -n "$FALLBACK_MODEL" ]] && args+=(--fallback-model "$FALLBACK_MODEL")
             [[ "$MAX_TURNS" -gt 0 ]] && args+=(--max-turns "$MAX_TURNS")
-            [[ -n "$MAX_BUDGET_USD" ]] && args+=(--max-budget-usd "$MAX_BUDGET_USD")
+            [[ -n "${session_budget:-}" ]] && args+=(--max-budget-usd "$session_budget")
             # No session state on disk; --bare additionally skips CLAUDE.md and
             # hook discovery, which plenty of repos deliberately rely on.
             args+=(--no-session-persistence --json-schema "$claude_schema")
@@ -1532,8 +1578,8 @@ refresh_iteration_state() {
 read_metrics() {
     m_subtype="" m_is_error="" m_cost="" m_turns="" m_duration_ms="" m_tokens_in="" m_tokens_out=""
     [[ -s "$1" ]] || return 0
-    IFS=$'\t' read -r m_subtype m_is_error m_cost m_turns m_duration_ms m_tokens_in m_tokens_out \
-        < "$1" || true
+    IFS=$'\037' read -r m_subtype m_is_error m_cost m_turns m_duration_ms m_tokens_in m_tokens_out \
+        < <(tr '\t' '\037' < "$1") || true
     [[ "$m_turns" =~ ^[0-9]+$ ]] || m_turns=""
     [[ "$m_tokens_in" =~ ^[0-9]+$ ]] || m_tokens_in=""
     [[ "$m_tokens_out" =~ ^[0-9]+$ ]] || m_tokens_out=""
@@ -1542,16 +1588,22 @@ read_metrics() {
 
 # Money is floating point; the shell only does integers, so awk does the sums
 # and comparisons (bc is not installed in the image).
-add_cost() { awk -v a="$1" -v b="$2" 'BEGIN { printf "%.6f", a + b }'; }
-fmt_cost() { awk -v a="$1" 'BEGIN { printf "%.2f", a }'; }
+fmt_cost() {
+    [[ -n "$1" ]] || { printf 'unknown'; return; }
+    awk -v a="$1" 'BEGIN { printf "%.2f", a }'
+}
+cost_label() {
+    [[ -n "$1" ]] || { printf 'unknown'; return; }
+    printf '$%s' "$(fmt_cost "$1")"
+}
 cost_reached() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 >= b + 0) }'; }
 
 # Just the cost column of a metrics line, for a session whose other numbers the
-# loop does not track (the evaluator). Unknown reads as free, never as an error.
+# loop does not track (the evaluator). Missing telemetry remains unknown.
 metrics_cost() {
     local c=""
     [[ ! -s "$1" ]] || c="$(cut -f3 "$1" 2>/dev/null || true)"
-    [[ "$c" =~ ^[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]] || c=0
+    [[ "$c" =~ ^[0-9]+([.][0-9]+)?([eE][-+]?[0-9]+)?$ ]] || c=""
     printf '%s' "$c"
 }
 
@@ -1561,8 +1613,26 @@ metrics_cost() {
 session_metrics_failed() {
     local subtype="" is_error=""
     [[ -s "$1" ]] || return 0
-    IFS=$'\t' read -r subtype is_error _ <"$1" || return 0
+    IFS=$'\037' read -r subtype is_error _ < <(tr '\t' '\037' <"$1") || return 0
     [[ "$is_error" == true || "$subtype" == error* ]]
+}
+
+prepare_paid_session() {
+    local role="$1" reserve=0 allowance
+    [[ "$EVALUATOR" != true ]] || reserve="$REVIEW_RESERVE_USD"
+    allowance="$(python3 "$RUN_STATE_HELPER" allowance "$LOG_DIR" "$MAX_TOTAL_BUDGET_USD" \
+        "$MAX_BUDGET_USD" "$reserve" "$role" "$AGENT")" || die "invalid budget configuration"
+    case "$allowance" in
+        allowed:*) session_budget="${allowance#allowed:}"; return 0 ;;
+        *) budget_stop_reason="$allowance"; log "cannot start $role session: $allowance"; return 1 ;;
+    esac
+}
+
+record_session_usage() {
+    python3 "$RUN_STATE_HELPER" session "$LOG_DIR" "$iter" "$1" "$AGENT" \
+        "$agent_metrics" "$2" "$rc" || die "could not record session usage"
+    total_cost="$(jq -r .reported_cost_usd "$LOG_DIR/accounting.json")"
+    session_cost="$(tail -1 "$LOG_DIR/sessions.jsonl" | jq -r 'if .cost_usd == null then "" else .cost_usd end')"
 }
 
 # One field of a structured reply, empty when the file, the object, or the key
@@ -1859,13 +1929,17 @@ record_evaluator_findings() {
 # Its cost joins the total. PASS lets the claim through; anything else (a
 # NEEDS_WORK verdict, an unparseable reply) is a rejection — default-fail.
 run_evaluator() {
-    local rc=0 verdict findings eval_cost eval_prompt eval_prompt_file
+    local rc=0 verdict findings eval_cost eval_prompt eval_prompt_file eval_started
     local source_head source_tree source_head_after source_tree_after
     local attestation_failed=false
     # Pessimistic until a healthy, parseable verdict and unchanged source have
     # both been established. The outer loop classifies infrastructure failures.
     EVALUATOR_SESSION_FAILED=true
     [[ "$SHUTDOWN" != true ]] || return 1
+    if ! prepare_paid_session reviewer; then
+        EVALUATOR_SESSION_FAILED=false
+        return 1
+    fi
     if ! session_files review; then
         log "evaluator: could not create protected review artifacts"
         return 1
@@ -1901,6 +1975,7 @@ run_evaluator() {
         return 1
     fi
     REVIEWER_CONTROL_FAILED=false
+    eval_started=$SECONDS
     run_agent "$eval_prompt" review >"$agent_msg" &
     AGENT_PID=$!
     # A TERM/INT can land after the pre-launch check but before $! is assigned.
@@ -1911,7 +1986,8 @@ run_evaluator() {
         die "reviewer controller could not confirm process-group cleanup"
     fi
     eval_cost="$(metrics_cost "$agent_metrics")"
-    total_cost="$(add_cost "$total_cost" "$eval_cost")"
+    record_session_usage reviewer "$((SECONDS - eval_started))"
+    eval_cost="$session_cost"
     verdict="$(json_field "$agent_struct" verdict)"
     findings="$(json_field "$agent_struct" findings)"
     [[ -n "$findings" ]] || findings="$(cat "$agent_msg" 2>/dev/null || true)"
@@ -1933,7 +2009,7 @@ run_evaluator() {
         findings="The real checkout changed while the isolated evaluator was running; completion cannot be attested."
         log "evaluator: real checkout changed during review — rejecting completion"
     fi
-    log "evaluator: ${verdict:-unparseable} (\$$(fmt_cost "$eval_cost"); total \$$(fmt_cost "$total_cost"))"
+    log "evaluator: ${verdict:-unparseable} ($(cost_label "$eval_cost"); reported total \$$(fmt_cost "$total_cost"))"
     cleanup_evaluator_checkout
     session_files work
     if [[ "$verdict" == PASS && "$attestation_failed" == false ]]; then
@@ -2006,6 +2082,7 @@ verify_done_claim() {
         verification_review=passed
         return 0
     fi
+    if [[ -n "${budget_stop_reason:-}" ]]; then verification_review=not_run; return 1; fi
     [[ "$EVALUATOR_SESSION_FAILED" == true ]] || verification_review=needs_work
     return 1
 }
@@ -2026,7 +2103,7 @@ log "starting loop: agent=$AGENT model=${MODEL:-<cli default>} max_iterations=$M
 results_log="$LOG_DIR/results.jsonl"
 msg_file="$LOG_DIR/.last-msg"
 parse_file="$LOG_DIR/.last-parse"
-iter=0 errors=0 noops=0 stop_reason="" total_cost=0
+iter=0 errors=0 noops=0 stop_reason="" total_cost=0 budget_stop_reason=""
 RUN_BASE="$(jq -r '.original_commit // ""' "$LOG_DIR/manifest.json")"
 CURRENT_MISSION=""
 
@@ -2090,6 +2167,7 @@ fi
 while true; do
     if [[ "$SHUTDOWN" == true ]]; then stop_reason="shutdown signal"; break; fi
     if stop_file_requested; then stop_reason="stop file"; break; fi
+    if ! prepare_paid_session worker; then stop_reason="$budget_stop_reason"; break; fi
     if ! CURRENT_MISSION="$(mission_body)"; then
         die "$(basename "$MISSION_FILE") has an opening frontmatter fence but no closing ---"
     fi
@@ -2167,8 +2245,9 @@ while true; do
     elif [[ -n "$DONE_PROMISE" && "$last_msg" == *"$DONE_PROMISE"* ]]; then
         agent_done=true
     fi
-    cost="${m_cost:-0}"
-    total_cost="$(add_cost "$total_cost" "$cost")"
+    cost="${m_cost:-}"
+    record_session_usage worker "$duration_s"
+    cost="$session_cost"
     # The CLI can report failure with exit 0 (max turns, an execution error);
     # trust the result event over the exit code.
     agent_error=false classified_failure=false
@@ -2369,7 +2448,7 @@ while true; do
         "$result_head" \
         "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
     printf ',"subtype":"%s","cost_usd":%s,"duration_s":%d,"agent_claimed_done":%s,"blocked":%s%s' \
-        "$m_subtype" "$(add_cost "$cost" 0)" "$duration_s" \
+        "$m_subtype" "${cost:-null}" "$duration_s" \
         "$agent_done" "$agent_blocked" "$extra"
     printf ',"schema_version":1,"run_id":"%s","completion_ok":%s,"done":%s,"verification":{"checks":"%s","review":"%s","checked_commit":"%s"}}\n' \
         "$RUN_ID" "$completion_ok" "$completion_ok" "$verification_checks" \
@@ -2382,7 +2461,7 @@ while true; do
             "$verification_checks" "$checked_commit" \
             || die "could not record accepted checkpoint"
     fi
-    log "iteration $iter: $status ($new_commits commits, \$$(fmt_cost "$cost"), ${m_turns:-?} turns, ${duration_s}s; total \$$(fmt_cost "$total_cost"))"
+    log "iteration $iter: $status ($new_commits commits, $(cost_label "$cost"), ${m_turns:-?} turns, ${duration_s}s; reported total \$$(fmt_cost "$total_cost"))"
     if [[ "$SHUTDOWN" == true ]]; then
         write_summary
         [[ -z "$METRIC_CMD" ]] || write_metric_row
@@ -2404,6 +2483,7 @@ while true; do
         break
     fi
     if stop_file_requested; then stop_reason="stop file"; break; fi
+    if [[ -n "$budget_stop_reason" ]]; then stop_reason="$budget_stop_reason"; break; fi
     if [[ -n "$MAX_TOTAL_BUDGET_USD" ]] && cost_reached "$total_cost" "$MAX_TOTAL_BUDGET_USD"; then
         stop_reason="budget exhausted (\$$(fmt_cost "$total_cost") of \$$(fmt_cost "$MAX_TOTAL_BUDGET_USD"))"
         break
@@ -2428,10 +2508,11 @@ done
 rm -f "$STOP_FILE"
 
 log "loop finished after $iter iterations: $stop_reason"
-log "total cost: \$$(fmt_cost "$total_cost") across $iter iterations"
+log "reported cost: \$$(fmt_cost "$total_cost") across $iter iterations (see accounting.json for unknown usage)"
 if [[ "${SHUTDOWN:-false}" == true ]]; then exit "${shutdown_exit_code:-143}"; fi
 if [[ "${completion_ok:-false}" == true ]]; then stop_reason=verified_completion; exit 0; fi
 case "$stop_reason" in
+    cost_unknown|cost_unsupported) exit 3 ;;
     'stop file') stop_reason=stop_requested; exit 4 ;;
     *'consecutive errors') stop_reason=error_limit; exit 1 ;;
     *'consecutive no-progress iterations')

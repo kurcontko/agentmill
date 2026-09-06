@@ -725,7 +725,7 @@ run_loop 2 env MAX_ITERATIONS=10 MAX_TOTAL_BUDGET_USD=1
 grep -q 'budget exhausted ([$]1.20 of [$]1.00)' "$TMP/out.log" || { cat "$TMP/out.log"; fail "expected a budget stop"; }
 [[ "$(wc -l < "$TMP/logs/latest/results.jsonl")" -eq 2 ]] || fail "budget stop came at the wrong iteration"
 grep -q 'total [$]1.20' "$TMP/out.log" || { cat "$TMP/out.log"; fail "cumulative cost missing from the iteration line"; }
-grep -q 'total cost: [$]1.20 across 2 iterations' "$TMP/out.log" || fail "final cost summary missing"
+grep -q 'reported cost: [$]1.20 across 2 iterations' "$TMP/out.log" || fail "final cost summary missing"
 rm -rf "$TMP"
 echo "PASS: costs accumulate and MAX_TOTAL_BUDGET_USD stops the loop"
 
@@ -1058,7 +1058,7 @@ grep -q 'evaluator: needs work' < <(git -C "$TMP/repo" log --oneline) \
     || fail "findings were not committed"
 eval_log="$(find "$TMP/logs" -type f -name '*.eval.log' -print -quit)"
 [[ -f "$eval_log" ]] || { find "$TMP/logs" -maxdepth 2 -print; fail "no evaluator session log"; }
-grep -q 'total cost: [$]0.30 across 2 iterations' "$TMP/out.log" \
+grep -q 'reported cost: [$]0.30 across 2 iterations' "$TMP/out.log" \
     || { cat "$TMP/out.log"; fail "evaluator cost missing from the total"; }
 [[ "$(wc -l < "$TMP/eval-proof")" -eq 2 ]] || fail "PASS/NEEDS_WORK were not both isolated"
 [[ ! -e "$TMP/repo/evaluator-artifact.txt" && ! -e "$TMP/repo/verifier-output.txt" ]] \

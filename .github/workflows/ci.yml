@@ -52,6 +52,12 @@ jobs:
       - name: Run durable identity tests
         run: python3 tests/test_run_state.py
 
+      - name: Run accounting and limit tests
+        run: |
+          python3 tests/test_accounting.py
+          python3 tests/test_worker_deadline.py
+          bash tests/test_limits.sh
+
       - name: Run Landlock confinement tests
         run: python3 tests/test_landlock.py
 

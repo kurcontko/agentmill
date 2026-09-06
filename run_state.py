@@ -10,6 +10,8 @@ import hashlib
 import re
 import subprocess
 import uuid
+import math
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 
 
@@ -17,7 +19,8 @@ CONFIG_KEYS = (
     "AGENT MODEL FALLBACK_MODEL MAX_ITERATIONS MAX_ERRORS MAX_NOOPS ITER_TIMEOUT "
     "LOOP_DELAY ERROR_BACKOFF MAX_BACKOFF SHUTDOWN_GRACE MAX_TURNS MAX_BUDGET_USD "
     "MAX_TOTAL_BUDGET_USD MIN_TURNS DONE_PROMISE SETUP_CMD CHECK_CMD METRIC_CMD "
-    "METRIC_DIRECTION DONE_CMD EVALUATOR CLAUDE_BARE"
+    "METRIC_DIRECTION DONE_CMD EVALUATOR CLAUDE_BARE SETUP_TIMEOUT AGENT_TIMEOUT "
+    "CHECK_TIMEOUT MAX_DURATION REVIEW_RESERVE_USD"
 ).split()
 
 
@@ -138,6 +141,7 @@ def outcome_main():
                          "checked_commit": args.checked_commit or None},
         "iterations": args.iterations,
         "ended_at": datetime.now(timezone.utc).isoformat(),
+        "accounting": accounting(Path(args.path).parent),
     }
     write_json(args.path, record)
     event(Path(args.path).parent, "run_finished", **record)
@@ -179,9 +183,93 @@ def observation_main(arguments):
     write_json(args.path, record)
 
 
+def decimal_cost(value):
+    try:
+        result = Decimal(value)
+        return result if result.is_finite() and result >= 0 and math.isfinite(float(result)) else None
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
+def sessions(directory):
+    path = Path(directory) / "sessions.jsonl"
+    if not path.exists():
+        return []
+    return [json.loads(line, parse_float=Decimal) for line in path.read_text().splitlines()]
+
+
+def accounting(directory):
+    rows = sessions(directory)
+    roles = {}
+    for role in ("worker", "reviewer"):
+        selected = [row for row in rows if row["role"] == role]
+        known = sum((Decimal(str(row["cost_usd"])) for row in selected if row["cost_state"] == "provider_reported"), Decimal(0))
+        estimated = sum((Decimal(str(row["cost_usd"])) for row in selected if row["cost_state"] == "estimated"), Decimal(0))
+        unknown = sum(row["cost_state"] == "unknown" for row in selected)
+        roles[role] = {"reported_cost_usd": float(known), "unknown_sessions": unknown,
+                       "estimated_cost_usd": float(estimated),
+                       "estimated_sessions": sum(row["cost_state"] == "estimated" for row in selected),
+                       "sessions": len(selected), "duration_s": sum(row["duration_s"] for row in selected)}
+    unknown = sum(role["unknown_sessions"] for role in roles.values())
+    total = sum(role["reported_cost_usd"] for role in roles.values())
+    estimated = sum(role["estimated_sessions"] for role in roles.values())
+    return {"roles": roles, "reported_cost_usd": total,
+            "estimated_cost_usd": sum(role["estimated_cost_usd"] for role in roles.values()),
+            "total_cost_usd": None if unknown or estimated else total,
+            "cost_state": "unknown" if unknown else "estimated" if estimated else "provider_reported",
+            "unknown_sessions": unknown}
+
+
+def session_main(arguments):
+    directory, iteration, role, provider, metrics, duration, exit_code = arguments[:7]
+    source = arguments[7] if len(arguments) > 7 else "provider_reported"
+    if source not in ("provider_reported", "estimated"):
+        raise ValueError("invalid monetary telemetry source")
+    fields = Path(metrics).read_text().splitlines()
+    fields = (fields[0].split("\t") if fields else []) + [""] * 7
+    cost = decimal_cost(fields[2])
+    def integer(value):
+        return int(value) if value.isdigit() else None
+    record = {"schema_version": 1, "session_id": f"{iteration}:{role}",
+              "iteration": int(iteration), "role": role, "provider": provider,
+              "cost_usd": float(cost) if cost is not None else None,
+              "cost_state": source if cost is not None else "unknown",
+              "tokens_in": integer(fields[5]), "tokens_out": integer(fields[6]),
+              "turns": integer(fields[3]), "duration_s": int(duration), "exit_code": int(exit_code)}
+    with open(Path(directory) / "sessions.jsonl", "a") as stream:
+        stream.write(json.dumps(record) + "\n")
+    write_json(Path(directory) / "accounting.json", accounting(directory))
+
+
+def allowance_main(arguments):
+    directory, total_limit, session_limit, reserve, role, provider = arguments
+    limit = decimal_cost(total_limit) if total_limit else None
+    cap = decimal_cost(session_limit) if session_limit else None
+    reserve_value = decimal_cost(reserve)
+    if (total_limit and limit is None) or (session_limit and cap is None) or reserve_value is None:
+        raise ValueError("monetary limits must be finite, non-negative numbers")
+    if limit is not None:
+        if provider != "claude":
+            print("cost_unsupported")
+            return
+        rows = sessions(directory)
+        if any(row["cost_state"] != "provider_reported" for row in rows):
+            print("cost_unknown")
+            return
+        remaining = limit - sum((Decimal(str(row["cost_usd"])) for row in rows), Decimal(0))
+        if role == "worker":
+            remaining -= reserve_value
+        cap = remaining if cap is None else min(cap, remaining)
+    if cap is not None and cap <= 0:
+        print("budget_limit")
+    else:
+        print("allowed:" + (format(cap, "f") if cap is not None else ""))
+
+
 if __name__ == "__main__":
     commands = {"observation": observation_main, "init": initialize_main,
-                "checkpoint": checkpoint_main}
+                "checkpoint": checkpoint_main, "session": session_main,
+                "allowance": allowance_main}
     if len(sys.argv) > 1 and sys.argv[1] in commands:
         commands[sys.argv[1]](sys.argv[2:])
     else:

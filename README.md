@@ -252,17 +252,40 @@ row to the run's `metrics.tsv` (`iter sha metric best status summary`). A
 worse score — or output that is not a number — is reverted.
 
 Each `CHECK_CMD`, `DONE_CMD`, and `METRIC_CMD` invocation (including the initial
-baseline) has its own `ITER_TIMEOUT` deadline and `SHUTDOWN_GRACE` before hard
-termination. Expiration fails the check or measurement; a failed baseline
-stops the run. Accepted numbers are normalized for the JSON ledger, including
+baseline) has its own `CHECK_TIMEOUT` deadline, defaulting to `ITER_TIMEOUT`,
+and `SHUTDOWN_GRACE` before hard termination. Expiration fails the check or
+measurement; an invalid metric baseline stops the run. A red test baseline can
+still establish planning metadata. Accepted numbers are normalized for the JSON ledger, including
 scores such as `+.5`, `1.`, or `001e-3`.
+
+Setup is bounded by `SETUP_TIMEOUT` (15 minutes by default), and each worker or
+reviewer session by `AGENT_TIMEOUT` (default: `ITER_TIMEOUT`). `MAX_DURATION`
+bounds the whole run, including setup and backoff, to one hour by default; set
+it to `0` explicitly to disable that limit. Normal expiry uses the same process
+cleanup as cancellation. The packaged supervisor independently allows a bounded
+cleanup interval (`SHUTDOWN_GRACE + 25` seconds) before forcing a wedged loop to
+stop. Forced shutdown may leave incomplete terminal evidence. `setup.json` and
+`setup.log` retain the setup result; failed setup never starts a worker session.
 
 ## Cost
 
-`MAX_BUDGET_USD` / `MAX_TURNS` bound one session (claude only);
-`MAX_TOTAL_BUDGET_USD` stops the loop once the run's summed spend reaches it.
-All three are claude only — codex reports no cost, so cap a codex run with
-`MAX_ITERATIONS` instead.
+`MAX_BUDGET_USD` / `MAX_TURNS` limit one Claude session. When
+`MAX_TOTAL_BUDGET_USD` is set, every Claude worker and reviewer invocation is
+clamped to the remaining allowance. With review enabled, `REVIEW_RESERVE_USD`
+(default $0.50) is reserved from worker spending. Insufficient allowance prevents
+another session from starting.
+
+`sessions.jsonl` records each role's usage and duration. `accounting.json` and
+the terminal outcome include worker/reviewer totals and explicitly unknown
+usage. Missing cost is `null`, not zero. The schema distinguishes reported,
+estimated, and unknown cost; the current adapters do not estimate charges.
+Unknown or estimated usage blocks subsequent sessions in a dollar-capped run.
+
+Monetary enforcement depends on the provider CLI's supported limit and billing
+telemetry; AgentMill does not guarantee a strict dollar ceiling independently
+of it. Codex does not supply reliable monetary telemetry here, so a configured
+total dollar cap produces a blocked outcome before its first session. Use
+`MAX_ITERATIONS` and `MAX_DURATION` to bound either provider.
 
 ```bash
 MAX_BUDGET_USD=2 MAX_TOTAL_BUDGET_USD=50 MAX_TURNS=80 mill run -d
@@ -300,11 +323,15 @@ its isolation boundary.
 | `MAX_ERRORS` / `MAX_NOOPS` | `3` / `3` | consecutive failures / no-progress iterations before stopping (0 = unbounded) |
 | `ERROR_BACKOFF` / `MAX_BACKOFF` | `30` / `900` | seconds: `ERROR_BACKOFF * 2^n` after n failures, capped |
 | `ITER_TIMEOUT` | `3600` | seconds per agent session and per verifier/metric command |
+| `SETUP_TIMEOUT` | `900` | seconds for setup |
+| `AGENT_TIMEOUT` / `CHECK_TIMEOUT` | `ITER_TIMEOUT` | separate session / verification deadlines |
+| `MAX_DURATION` | `3600` | total run seconds, including setup and backoff; 0 disables |
 | `SHUTDOWN_GRACE` | `30` | seconds before a timed-out or signalled agent is killed |
 | `DIND_READY_TIMEOUT` | `30` | seconds to wait for the `--dind` TCP endpoint |
 | `MIN_TURNS` | `2` | a session ending in fewer turns without touching the repo counts as an error, not a no-op (0 = off) |
 | `MAX_TURNS` / `MAX_BUDGET_USD` | `0` / — | claude only: per-session turn and spend caps (0 / empty = none) |
-| `MAX_TOTAL_BUDGET_USD` | — | claude only: loop-wide spend cap; the loop stops when the summed cost reaches it |
+| `MAX_TOTAL_BUDGET_USD` | — | Claude remaining allowance across worker and reviewer sessions |
+| `REVIEW_RESERVE_USD` | `0.50` | allowance reserved for review when a total cap and evaluator are enabled |
 | `DONE_PROMISE` | `TASK_COMPLETE` | fallback stop signal when the CLI returned no structured reply |
 | `SETUP_CMD` | — | runs once before the loop (`uv sync`, `npm ci`, …) |
 | `CHECK_CMD` | — | the ratchet: failure reverts the iteration |

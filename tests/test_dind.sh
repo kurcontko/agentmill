@@ -40,10 +40,16 @@ chmod 755 "$test_root/image/claude"
 cat >"$test_root/image/Dockerfile" <<'DOCKERFILE'
 ARG BASE
 FROM ${BASE}
+ARG TEST_UID
+# mill build maps the worker to the Linux host UID. Other image tests retain
+# the deliberately foreign UID; this host CLI fixture needs that real mapping
+# to open private (0700) evidence directories without weakening permissions.
+RUN sed -i "s/^agent:x:[0-9]*:/agent:x:${TEST_UID}:/" /etc/passwd
 COPY claude /usr/local/bin/claude
 DOCKERFILE
-docker build -q --build-arg "BASE=$test_image" -t "$fixture_image" "$test_root/image" >/dev/null
+docker build -q --build-arg "BASE=$test_image" --build-arg "TEST_UID=$(id -u)" -t "$fixture_image" "$test_root/image" >/dev/null
 export AGENTMILL_IMAGE="$fixture_image" AGENTMILL_CONFIG="$test_root/config"
+export XDG_STATE_HOME="$test_root/state"
 printf 'ANTHROPIC_API_KEY=test\nCHECK_CMD=true\nSHUTDOWN_GRACE=1\n' >"$AGENTMILL_CONFIG"
 for repo in one two; do
     mkdir -p "$test_root/$repo/.mill"
@@ -67,7 +73,8 @@ for repo in one two; do
     done
     [[ -f "$test_root/$repo/.mill/READY" ]] \
         || { docker logs "$worker" >&2 || true;
-             find "$test_root/logs" -type f -name '*.log' -exec tail -40 {} \; >&2;
+             find "$XDG_STATE_HOME/agentmill/runs" -type f \
+                 \( -name '*.log' -o -name outcome.json \) -exec tail -40 {} \; >&2 || true;
              fail "$repo worker did not reach its TLS daemon"; }
 done
 [[ "$(cat "$test_root/one/.mill/volumes")" == one ]] || fail "first daemon has unexpected volumes"
