@@ -124,3 +124,9 @@ scope rather than the initial small-loop design. The final documentation-only
 commit still needs its own green CI head before handoff. No real-provider task
 trials or comparative benchmarks were run; report/resume/onboarding and empirical
 product evaluation remain follow-up work. No merge has been performed.
+
+The `d5e0877` documentation-head rerun exposed a CLI fixture race: replacing
+the fake Docker executable in place while a completed DinD run's watcher was
+still executing it produced Linux `Text file busy`. Fixture replacement now
+uses a separate executable inode and atomic rename. No runtime behavior or
+assertions were relaxed; the subsequent CI head must validate this test fix.

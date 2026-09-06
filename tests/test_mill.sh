@@ -462,7 +462,9 @@ grep -q "^network rm $first_network$" "$DOCKER_LOG" || fail "foreground run leak
 grep -q '^volume rm agentmill-certs-' "$DOCKER_LOG" || fail "foreground run leaked its client certificates"
 
 : > "$DOCKER_LOG"
-cat > "$TMP/bin/docker" <<'STUB'
+# A completed foreground run's watcher can still be executing this fixture.
+# Replace its inode atomically instead of truncating a running executable.
+cat > "$TMP/bin/docker.next" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DOCKER_LOG"
 case "$*" in
@@ -471,7 +473,8 @@ case "$*" in
 esac
 exit 0
 STUB
-chmod +x "$TMP/bin/docker"
+chmod +x "$TMP/bin/docker.next"
+mv "$TMP/bin/docker.next" "$TMP/bin/docker"
 if DIND_READY_TIMEOUT=0 mill -C "$TMP/a/api" run --dind >"$TMP/out" 2>"$TMP/err"; then
     fail "mill started the agent when dind never became ready"
 fi
@@ -485,12 +488,14 @@ grep -q '^volume rm agentmill-certs-' "$DOCKER_LOG" || fail "failed startup leak
 
 # A sidecar build failure must stop before allocating any run resources.
 : > "$DOCKER_LOG"
-cat > "$TMP/bin/docker" <<'STUB'
+cat > "$TMP/bin/docker.next" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DOCKER_LOG"
 [[ "$1" != build ]] || exit 1
 exit 0
 STUB
+chmod +x "$TMP/bin/docker.next"
+mv "$TMP/bin/docker.next" "$TMP/bin/docker"
 if mill -C "$TMP/a/api" run --dind >"$TMP/out" 2>"$TMP/err"; then
     fail "mill started after a failed sidecar build"
 fi
