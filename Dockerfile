@@ -1,62 +1,70 @@
-FROM node:20-slim@sha256:17281e8d1dc4d671976c6b89a12f47a44c2f390b63a989e2e327631041f544fd
-COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /uvx /usr/local/bin/
+FROM node:22.23.2-alpine3.24@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
 
-# Pin Claude Code CLI version. Floor is v2.1.111 — earlier versions ship with
-# a stale alias table (`opus` resolves to 4.6 instead of 4.7) and stale model-
-# capability metadata, so passing `claude --model claude-opus-4-7` silently
-# downshifts to an older Opus. Bump CLAUDE_CODE_VERSION to upgrade the CLI
-# (cache-busts the npm install layer cleanly).
-# Refs: https://github.com/anthropics/claude-code/issues/50810
-#       https://code.claude.com/docs/en/changelog
-ARG CLAUDE_CODE_VERSION=2.1.119
+# Bump to upgrade the CLIs (cache-busts the npm layer cleanly).
+ARG CLAUDE_CODE_VERSION=2.1.241
+ARG CODEX_VERSION=0.147.0
+ENV AGENTMILL_CLAUDE_VERSION=${CLAUDE_CODE_VERSION} AGENTMILL_CODEX_VERSION=${CODEX_VERSION}
+# Node's bundled npm can lag security fixes in its vendored dependencies.
+ARG NPM_VERSION=11.19.1
+# Client only — `mill --dind` points it at the sidecar daemon; no daemon here.
+ARG DOCKER_CLI_VERSION=29.8.0
+# The container user must be able to write the bind-mounted repo and logs.
+# Docker Desktop maps ownership; on a Linux host the ids must match the
+# caller's — `mill build` passes them. (The base image's `node` user holds
+# uid 1000, so it is removed rather than left to collide.)
+ARG AGENT_UID=1000
+ARG AGENT_GID=1000
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    bash \
-    ca-certificates \
-    curl \
-    expect \
-    git \
-    jq \
-    make \
-    openssh-client \
-    python3 \
-    python3-pip \
-    python3-venv \
-    ripgrep \
-    && rm -rf /var/lib/apt/lists/* \
-    && rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
+# System dependencies belong in this image or an operator-built derived image.
+# Neither worker nor reviewer receives sudo or a runtime package-install API.
+RUN apk upgrade --no-cache \
+    && apk add --no-cache bash ca-certificates coreutils curl findutils git grep \
+        jq openssh-client procps python3 sed shadow tar util-linux \
+    && npm install -g "npm@${NPM_VERSION}" \
     && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-    && useradd -m -s /bin/bash agent
+                      "@openai/codex@${CODEX_VERSION}" \
+    && userdel -r node \
+    && (getent group "${AGENT_GID}" >/dev/null || groupadd -g "${AGENT_GID}" agent) \
+    && useradd -m -u "${AGENT_UID}" -g "${AGENT_GID}" -s /bin/bash agent \
+    && groupadd -r agentmill-reviewer \
+    && useradd -m -r -g agentmill-reviewer -s /bin/bash agentmill-reviewer \
+    && mkdir -p /run/agentmill \
+    && chown "root:$(id -gn agent)" /run/agentmill \
+    && chmod 2750 /run/agentmill
 
-# Belt-and-suspenders: pin per-family aliases at the env layer so any code
-# path that uses bare `opus` / `sonnet` / `haiku` resolves to the right
-# version even if the CLI's internal alias table goes stale again.
-# These are documented overrides:
-# https://code.claude.com/docs/en/model-config
-ENV ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-7 \
-    ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-6 \
-    ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001
+# Keep the evaluator's fixed trusted paths independent of Alpine's /bin layout.
+RUN ln -s /bin/tar /usr/bin/tar && ln -s /bin/chmod /usr/bin/chmod
+
+# The docker CLI, so --dind's DOCKER_HOST is actually usable by the agent.
+RUN curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-${DOCKER_CLI_VERSION}.tgz" \
+        | tar -xzC /usr/local/bin --strip-components=1 docker/docker \
+    && docker --version
+
 WORKDIR /workspace
-RUN chown agent:agent /workspace
-
-# Entrypoints
-COPY entrypoint.sh /entrypoint.sh
-COPY entrypoint-tui.sh /entrypoint-tui.sh
-COPY entrypoint-common.sh /entrypoint-common.sh
-COPY lib/agentmill/sh /lib/agentmill/sh
-COPY setup-claude-config.sh /setup-claude-config.sh
-COPY setup-repo-env.sh /setup-repo-env.sh
-COPY auto-trust.exp /auto-trust.exp
-RUN chmod +x /entrypoint.sh /entrypoint-tui.sh /entrypoint-common.sh /setup-claude-config.sh /setup-repo-env.sh /auto-trust.exp
+# AGENT_GID may already belong to a differently named base-image group. Resolve
+# the user's primary group instead of assuming the fallback `agent` group was
+# created above.
+RUN chown "agent:$(id -gn agent)" /workspace
+COPY loop.sh /loop.sh
+COPY run_state.py /run_state.py
+COPY landlock_exec.py /usr/local/bin/landlock-exec
+COPY reviewer_control.py /usr/local/bin/agentmill-reviewer-control
+COPY reviewer_exec.sh /usr/local/bin/agentmill-reviewer-exec
+COPY reviewer_rpc.py /usr/local/bin/reviewer-rpc
+COPY supervisor.py /usr/local/bin/agentmill-supervisor
+RUN chmod 755 /loop.sh /usr/local/bin/landlock-exec \
+        /usr/local/bin/agentmill-reviewer-control \
+        /usr/local/bin/agentmill-reviewer-exec /usr/local/bin/reviewer-rpc \
+        /usr/local/bin/agentmill-supervisor
 
 USER agent
+# Skip onboarding; bypassPermissions is intentional — the container is the boundary.
+RUN mkdir -p /home/agent/.claude \
+    && echo '{"hasCompletedOnboarding":true}' > /home/agent/.claude.json \
+    && echo '{"permissions":{"defaultMode":"bypassPermissions"}}' > /home/agent/.claude/settings.json
 
-# Pre-configure Claude Code: skip onboarding + trust prompts
-# NOSONAR — bypassPermissions is required for autonomous headless operation inside an isolated container
-RUN mkdir -p /home/agent/.claude && \
-    echo '{"hasCompletedOnboarding":true}' > /home/agent/.claude.json && \
-    echo '{"hasCompletedOnboarding":true,"hasTrustDialogAccepted":true,"hasTrustDialogHooksAccepted":true}' > /home/agent/.claude/claude.json && \
-    echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep"],"defaultMode":"bypassPermissions"}}' > /home/agent/.claude/settings.json
-
-# Default: headless pipe mode. Use entrypoint-tui.sh for watch/interactive modes.
-ENTRYPOINT ["/entrypoint.sh"]
+# Root runs only the fixed supervisor, which drops credentials before any
+# worker/reviewer command. mill grants it only SETUID, SETGID, and KILL.
+USER root
+ENV HOME=/home/agent
+ENTRYPOINT ["/usr/bin/python3", "-I", "/usr/local/bin/agentmill-supervisor"]

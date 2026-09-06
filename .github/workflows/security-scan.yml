@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, "split/**"]
   schedule:
     - cron: "0 3 * * 1" # weekly Monday 03:00 UTC
   workflow_dispatch:
@@ -21,6 +20,28 @@ defaults:
     shell: bash
 
 jobs:
+  trivy-dind:
+    name: Trivy DinD Image Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Build patched DinD image
+        run: docker build -t agentmill-dind:scan dind
+
+      - name: Scan patched sidecar image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: agentmill-dind:scan
+          format: table
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          trivy-config: ""
+
   zizmor:
     name: GitHub Actions Security Analysis
     runs-on: ubuntu-latest
@@ -65,6 +86,7 @@ jobs:
           format: sarif
           output: trivy-fs.sarif
           severity: CRITICAL,HIGH
+          exit-code: "1"
           trivy-config: ""
 
       - name: Upload Trivy results
@@ -98,6 +120,7 @@ jobs:
           format: sarif
           output: trivy-image.sarif
           severity: CRITICAL,HIGH
+          exit-code: "1"
           trivy-config: ""
 
       - name: Upload Trivy results

@@ -5,194 +5,397 @@
 <h1 align="center">AgentMill</h1>
 
 <p align="center">
-  A Docker container that runs Claude Code in a respawning loop.<br>
-  Point it at a repo and a prompt — it works, commits, pushes, and repeats.<br>
+  A Docker container that runs an AI agent CLI in a respawning loop.<br>
+  Drop a MILL.md in a repo — it works, commits, and repeats.<br>
   <strong>Tasks go in, code comes out.</strong>
 </p>
 
 <p align="center">
   <a href="https://github.com/kurcontko/agentmill/actions/workflows/ci.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/kurcontko/agentmill/actions/workflows/security-scan.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/security-scan.yml/badge.svg" alt="Security Scan"></a>
-  <a href="https://github.com/kurcontko/agentmill/actions/workflows/codeql.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/codeql.yml/badge.svg" alt="CodeQL"></a>
-  <a href="https://sonarcloud.io/summary/overall?id=kurcontko_agentmill"><img src="https://sonarcloud.io/api/project_badges/measure?project=kurcontko_agentmill&metric=security_rating" alt="Security Rating"></a>
-  <a href="https://sonarcloud.io/summary/overall?id=kurcontko_agentmill"><img src="https://sonarcloud.io/api/project_badges/measure?project=kurcontko_agentmill&metric=reliability_rating" alt="Reliability Rating"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
 </p>
 
-## Why AgentMill
+The core loop is a shell script. Each iteration runs `claude -p` or
+`codex exec` with fresh context, lets the agent work and commit, then respawns.
+The repo — `PROGRESS.md` plus git history — is the only memory, so long runs never
+degrade as a context window fills.
 
-There are plenty of autonomous loop runners now. AgentMill differs on four things:
+What the loop adds around the bare `while true; do claude -p ...` idea:
 
-- **Container-first, not sandbox-as-a-flag.** The loop is *defined* by `docker-compose.yml` — isolation isn't an opt-in mode bolted onto a host script. Nothing touches your machine's Claude config, `PATH`, or working tree.
-- **Real multi-agent, not multi-window.** `mill multi ~/repo 3` starts three headless agents on the same upstream, each in its own workspace, each pushing to its own branch (`agent-1`, `agent-2`, …), rebasing and retrying on conflict with a hard retry cap. No tmux, no supervision, no worktree juggling.
-- **Shared memory between agents.** Agents read and write `memory/` as flock-guarded append-only markdown, so what agent 2 learns at iteration 40 is available to agent 1 at iteration 41. Inspect it with `mill memory`.
-- **Fresh context every iteration.** Each pass runs Claude from a clean context, commits, and respawns — long runs don't degrade as the window fills.
+- **Structured output** — the agent answers against a schema
+  (`{done, summary, blocked}`), and each session's cost, turns, tokens, and
+  error status are parsed from the event stream, not scraped. Both backends.
+- **Stop conditions** — a verified completion claim, an iteration cap, a spend
+  cap, N no-progress (or `blocked`) iterations, N consecutive failures with
+  exponential backoff, or `mill stop --soft`. A hung CLI gets TERM at the
+  per-iteration timeout and SIGKILL after a bounded grace period.
+- **The ratchet** — set `CHECK_CMD` (e.g. your test suite) and any iteration
+  that breaks it is reverted, including one the CLI crashed or timed out
+  halfway through; `METRIC_CMD` adds a second gate, keeping an iteration only
+  if a benchmark number strictly improves. Checks cover accepted iteration
+  endpoints, not every intermediate commit created by the agent. Because
+  a revert discards the worktree, the loop refuses to start on a dirty repo.
+- **Verified completion** — configure `DONE_CMD` or `CHECK_CMD` to check a
+  "done" claim, and with `EVALUATOR=true` a reviewer in a disposable checkout
+  judges the whole run's diff before the loop ends. Without these settings,
+  completion relies on the agent's own claim.
+- **A paper trail** — per-iteration `.summary` digests beside commit-keyed
+  event logs, one JSON line per iteration in `results.jsonl`, a `metrics.tsv`
+  ledger in metric mode, and `mill logs --results` to tabulate it.
 
-Every iteration appends to `logs/results.tsv` (agent, files changed, commits, status), so a 200-iteration overnight run is auditable after the fact with `mill history`.
-
-**Use something else if** you want to supervise parallel agents from a GUI and review each diff by hand — that's a different job, well served by the worktree-and-dashboard tools. AgentMill is for work you want to leave running.
-
-## Quick Start
-
-1. **Configure** — copy `.env.example` to `.env`, set `REPO_PATH` and auth
-2. **Write your prompt** — edit `prompts/PROMPT.md` with the task
-3. **Run** — pick a mode below
-4. **Stop** — `docker compose down` (finishes current session, commits WIP, exits cleanly)
+## Quick start
 
 ```bash
-cp .env.example .env   # then edit REPO_PATH and auth
-nano prompts/PROMPT.md  # describe the task
+git clone https://github.com/kurcontko/agentmill && cd agentmill
+./mill build                     # build the container image
+ln -s "$PWD/mill" ~/.local/bin/mill   # or any directory on your PATH
+cd ~/path/to/repo
+mill init                        # writes MILL.md here + ~/.config/agentmill/env once
+$EDITOR ~/.config/agentmill/env  # set your auth key
+$EDITOR MILL.md                  # describe the mission
+git add MILL.md && git commit -m "Define agent mission"
+mill run                         # go. Ctrl-C stops cleanly; completed commits stay.
 ```
 
-## Authentication
+Like `git`, `mill` acts on the repository containing the current directory;
+`mill -C DIR …` targets another one.
 
-Set one of these in `.env`:
+Auth in `~/.config/agentmill/env`: `ANTHROPIC_API_KEY` (or
+`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`) for claude;
+`OPENAI_API_KEY` for codex. The loop maps it to Codex's exec authentication
+variable, [`CODEX_API_KEY`](https://developers.openai.com/codex/noninteractive#use-api-key-auth),
+for workers and isolated reviewers. An explicitly
+configured `CODEX_API_KEY` takes precedence.
 
-- **API Key** — set `ANTHROPIC_API_KEY`
-- **OAuth Token** — run `claude setup-token` on the host, set `CLAUDE_CODE_OAUTH_TOKEN`
+## MILL.md
 
-For GitHub Actions PR review with Claude Code and DeepSeek, see [`docs/claude-code-github-actions.md`](docs/claude-code-github-actions.md).
+The mission lives with the code, so it is reviewed, versioned, and branched
+like everything else. The body is handed to the agent verbatim every iteration
+— edit it to steer a running loop. Optional frontmatter carries per-repo
+settings (lowercase env var names; secrets stay out):
 
-## How to Run
-
-Pick the mode that fits your workflow:
-
+```markdown
 ---
+check_cmd: pytest -q
+setup_cmd: uv sync
+max_iterations: 20
+---
+# Mission
 
-### 1. `headless` — fire and forget
+Port the CLI from argparse to click. Behaviour must stay identical;
+the test suite is the spec.
 
-Claude runs in a loop in the background. No UI — output goes to `./logs/`. Restarts automatically on crash. Best for CI, overnight runs, or when you don't need to watch.
+## Definition of done
 
-```bash
-REPO_PATH=/path/to/repo docker compose up headless
-
-# Use REPO_PATH from .env, or pass /path/to/repo to override it
-./mill run --iterations 3
+- [ ] `pytest -q` green, no `argparse` import left.
 ```
 
-Loop: pull → run Claude → commit → push → wait → repeat.
+`prompts/PROMPT.md` is the framework prompt — how to work (one task per
+session, `PROGRESS.md`, the failed-approaches log). It rarely needs editing;
+`--prompt FILE` swaps it.
 
----
+`PROGRESS.md` is the agent's memory across respawns. When it does not exist
+yet, the first session is an initializer: it turns the mission into a checklist,
+makes a handoff plan, records the configured verifier, and commits it. A small,
+well-defined task can start implementation directly. The initial verifier result
+is retained in `baseline.json` and `baseline.log`. On a failing baseline, only a
+regular, bounded `PROGRESS.md` addition qualifies for the planning exception;
+implementation and verifier changes must pass checks.
 
-### 2. `watch` — autonomous TUI, you observe
+Before rollback, the runtime retains the candidate patch and diffstat, verifier
+output, and a bounded `rejection.json` handoff. The next session receives that
+handoff even when the rejected iteration's `PROGRESS.md` changes were reverted.
+These files preserve operational evidence; they are not tamper-proof audit logs.
 
-Full Claude Code TUI in your terminal. Claude works autonomously (all tool calls auto-approved) while you watch file edits, tool calls, and reasoning in real time. You're an observer, not a driver.
+## Usage
 
 ```bash
-# Single autonomous session, then exit
-REPO_PATH=/path/to/repo docker compose run watch
-
-# With Ralph loop — bounded iteration (runs up to N times, then stops)
-REPO_PATH=/path/to/repo AUTO_RALPH=true AUTO_RALPH_MAX_ITERATIONS=10 \
-  docker compose run watch
-
-# With respawn — restart Claude automatically after each session
-REPO_PATH=/path/to/repo RESPAWN=true docker compose run watch
+mill [-C DIR] run   [--agent claude|codex] [--model M] [--iterations N]
+                    [--prompt FILE] [--dind] [-d]
+mill [-C DIR] shell [--dind]   # interactive shell inside the container
+mill [-C DIR] logs             # follow the loop, else the last summaries
+mill [-C DIR] logs --raw       # tail the last iteration's full event log
+mill [-C DIR] logs --results   # results.jsonl as a table
+mill logs --run RUN_ID         # inspect an older run, from any directory
+mill [-C DIR] steer "..."      # one-shot note for the next session
+mill [-C DIR] stop             # stop this checkout's container
+mill [-C DIR] stop --soft      # finish the current iteration, then stop
+mill stop --all                # stop every agentmill container
+mill [-C DIR] init | ps | build
 ```
 
----
-
-### 3. `interactive` — you drive
-
-Plain Claude Code TUI. No prompt injected, no automation. You type, Claude responds. Same as running `claude` locally, but inside the container with the repo and tools already set up.
+Parallel agents need no framework — one worktree per agent:
 
 ```bash
-REPO_PATH=/path/to/repo docker compose run interactive
+git worktree add ../repo-b agent-b
+mill run -d && mill -C ../repo-b run -d
+mill -C ../repo-b stop           # stops only that one
 ```
 
----
+On a Linux host, `mill build` builds the image with your uid/gid so the
+container can write the bind-mounted repo (Docker Desktop maps ownership
+itself).
 
-### 4. `agent-1`, `agent-2`, `agent-3` — parallel workers
+## Completion contract
 
-Multiple headless agents on the same repo. Each pushes to its own branch (`agent-1`, `agent-2`, etc.) and rebases on conflict. Assign different prompts for different roles.
+Foreground runs return `0` only for verified completion. Other outcomes return
+`1` (failure), `2` (incomplete at a limit), `3` (blocked), `4` (stop-file
+cancellation), or `130`/`143` (interrupt/termination). A detached launch returning
+success only acknowledges that the container started.
+
+Each invocation receives a unique run ID and evidence directory under
+`$XDG_STATE_HOME/agentmill/runs/<run-id>/` (default:
+`~/.local/state/agentmill/runs/`). `mill logs` selects the latest run for the
+checkout; `--run RUN_ID` selects one explicitly. Legacy checkout logs remain
+readable when no new run has been recorded for that checkout.
+
+`manifest.json` records the original commit, mission and policy digests,
+effective supported configuration, and available image/CLI version metadata.
+`artifacts/` holds the original mission and acceptance-policy snapshot;
+`events.jsonl` records run boundaries and accepted checkpoints. Authentication
+environment variables are excluded; operator-authored mission and command text
+is retained, so keep credentials in environment variables rather than that text.
+Missing runtime metadata is recorded as unknown. A supplied run ID cannot
+restart existing evidence: durable resume is a separate future feature.
+
+`outcome.json` in that directory records the versioned terminal outcome,
+stop reason, worker claim, verification and review status, checked commit, and
+exit code. In `results.jsonl`, `agent_claimed_done` records the worker's claim;
+`completion_ok` and the compatibility field `done` record verified completion.
+An abruptly killed process may leave no terminal record; missing evidence does
+not imply success.
+
+The agent's final message is a JSON object; `done: true` is a claim, not a stop.
+`DONE_CMD` must pass (or, if unset, the configured `CHECK_CMD`
+must have been green on this iteration). With neither command configured,
+completion remains unverified and cannot produce a success exit.
+With `EVALUATOR=true`, a fresh session
+(`prompts/EVALUATOR.md`) reviews the run's commits and diffstat against the
+mission, re-runs the verifier, and returns `PASS` or `NEEDS_WORK`. The reviewer
+gets a writable disposable snapshot under a Linux Landlock write sandbox. The
+snapshot is copied without worker-controlled Git state, initialized as a fresh
+repository, and tied to source digests captured before and after review. Its
+verifier can create build artifacts in that scratch tree, but writes through
+absolute paths or escaping symlinks cannot alter the checkout being reviewed.
+Reviewer CLI state is generated from fixed settings: Claude runs `--bare` with
+repository skill/slash-command loading disabled,
+while Codex ignores repository instructions, rules, config, hooks, and bundled
+skills. Every discoverable repository skill is explicitly disabled by both its
+logical and canonical path, so explicit skill mentions cannot load it; an
+incomplete skill scan rejects evaluator setup. Within
+that reviewer boundary, a failed CLI session is rejected even if it left a
+schema-valid `PASS` event.
+`EVALUATOR=true` requires Linux Landlock ABI 3 or newer (Linux 6.2+) with the
+relevant sandbox syscalls enabled; it fails closed on older/blocked kernels
+or outside the published `linux/amd64` and `linux/arm64` image targets, without
+affecting ordinary worker sessions. Metadata-changing syscalls such as `chmod`,
+`chown`, timestamp changes, and xattrs are disabled for the reviewer. `ioctl`
+is default-denied except for a small set of harmless descriptor and terminal
+queries required by the agent CLIs; filesystem-specific requests remain
+blocked. Reviewer descendants also cannot use process-injection syscalls.
+Seccomp skips `setpgid` and `setsid` while reporting a compatibility success,
+so verifiers cannot detach from the recorded shutdown group. Codex uses a fixed
+profile that delegates filesystem confinement to this authoritative outer
+boundary while retaining restricted networking for verifier tools. Its direct
+fast path avoids relying on host support for unprivileged user namespaces. A
+reviewer process limit reserves capacity for bounded supervisor cleanup even
+if a verifier forks aggressively. Before reviewer code starts,
+its process group is copied to a protected supervisor record, so an external
+shutdown can still enforce the TERM/KILL deadline if an inner wrapper crashes.
+A fixed root-owned controller validates the reviewer uid, PID/PGID, and Linux
+process start times before signaling; reviewer-owned code cannot kill or spoof
+that cleanup authority. A fixed root supervisor owns reviewer launches and
+shutdown. Its Unix socket accepts requests only from the worker uid and exposes
+two operations: launch the fixed Landlock helper as the reviewer, or invoke the
+identity-validating controller. It never runs a repository command as root.
+Worker and reviewer commands have no capabilities, inherit `no-new-privileges`,
+and have no runtime sudo. The supervisor retains only SETUID, SETGID, and KILL.
+
+A rejection is appended to `PROGRESS.md`, committed, and the loop keeps going,
+so the next session sees why its predecessor's claim did not stick. CLIs that
+return no structured reply fall back to `DONE_PROMISE` in the final message.
+
+## Steering a running loop
+
+`MILL.md` is re-read every iteration: editing the mission steers the loop
+without restarting it. For everything else there is a git-excluded drop-box in
+the checkout's `.mill/`.
 
 ```bash
-# Two agents, different tasks
-PROMPT_FILE_1=/prompts/features.md PROMPT_FILE_2=/prompts/tests.md \
-  REPO_PATH=/path/to/repo docker compose up agent-1 agent-2
+mill steer "stop refactoring, get the failing e2e test green first"
+mill steer               # print the pending note
+mill stop --soft         # finish the current iteration, then stop
+```
 
-# Three agents, same branch (rebase on conflict)
-AGENT_BRANCH=main REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agent-3
+A steer is one-shot: the next session gets it in an `<operator-steer>` block and
+the loop deletes the file as it reads it. `mill stop --soft` is the polite
+brake — no session is cut off mid-work.
+
+## Metric mode
+
+`METRIC_CMD` turns the loop into a benchmark optimizer: its last stdout line is
+the score, measured once on the clean tree for a baseline and again after every
+iteration. Only a strict improvement is kept, except that a successful
+initializer creating `PROGRESS.md` may keep an unchanged score. Initialization
+still passes `CHECK_CMD`, and a worse or unreadable score is reverted.
+
+```markdown
+---
+check_cmd: pytest -q
+metric_cmd: python3 bench.py     # last line: 0.8123
+metric_direction: max            # min for loss/latency, max for accuracy
+---
+```
+
+The current best rides in every session's preamble, and each iteration appends a
+row to the run's `metrics.tsv` (`iter sha metric best status summary`). A
+worse score — or output that is not a number — is reverted.
+
+Each `CHECK_CMD`, `DONE_CMD`, and `METRIC_CMD` invocation (including the initial
+baseline) has its own `CHECK_TIMEOUT` deadline, defaulting to `ITER_TIMEOUT`,
+and `SHUTDOWN_GRACE` before hard termination. Expiration fails the check or
+measurement; an invalid metric baseline stops the run. A red test baseline can
+still establish planning metadata. Accepted numbers are normalized for the JSON ledger, including
+scores such as `+.5`, `1.`, or `001e-3`.
+
+Setup is bounded by `SETUP_TIMEOUT` (15 minutes by default), and each worker or
+reviewer session by `AGENT_TIMEOUT` (default: `ITER_TIMEOUT`). `MAX_DURATION`
+bounds the whole run, including setup and backoff, to one hour by default; set
+it to `0` explicitly to disable that limit. Normal expiry uses the same process
+cleanup as cancellation. The packaged supervisor independently allows a bounded
+cleanup interval (`SHUTDOWN_GRACE + 25` seconds) before forcing a wedged loop to
+stop. Forced shutdown may leave incomplete terminal evidence. `setup.json` and
+`setup.log` retain the setup result; failed setup never starts a worker session.
+
+## Cost
+
+`MAX_BUDGET_USD` / `MAX_TURNS` limit one Claude session. When
+`MAX_TOTAL_BUDGET_USD` is set, every Claude worker and reviewer invocation is
+clamped to the remaining allowance. With review enabled, `REVIEW_RESERVE_USD`
+(default $0.50) is reserved from worker spending. Insufficient allowance prevents
+another session from starting.
+
+`sessions.jsonl` records each role's usage and duration. `accounting.json` and
+the terminal outcome include worker/reviewer totals and explicitly unknown
+usage. Missing cost is `null`, not zero. The schema distinguishes reported,
+estimated, and unknown cost; the current adapters do not estimate charges.
+Unknown or estimated usage blocks subsequent sessions in a dollar-capped run.
+
+Monetary enforcement depends on the provider CLI's supported limit and billing
+telemetry; AgentMill does not guarantee a strict dollar ceiling independently
+of it. Codex does not supply reliable monetary telemetry here, so a configured
+total dollar cap produces a blocked outcome before its first session. Use
+`MAX_ITERATIONS` and `MAX_DURATION` to bound either provider.
+
+```bash
+MAX_BUDGET_USD=2 MAX_TOTAL_BUDGET_USD=50 MAX_TURNS=80 mill run -d
+mill logs --results
+# ITER  STATUS    COMMITS  COST      TURNS  TIME
+# 1     kept      2        $1.24     37     412s
 ```
 
 ## Configuration
 
-**All modes:**
+Precedence: flags > environment > `MILL.md` frontmatter >
+`~/.config/agentmill/env` (`KEY=value`, see `.env.example`; override the
+path with `AGENTMILL_CONFIG`). Values may be quoted; an unquoted value ends
+at an inline ` # comment`. Every key below works in either file.
+Caller-exported values use Docker's bare `-e KEY` form. Values resolved from
+the config file or frontmatter use a private, mode-0600 temporary `--env-file`.
+Their secrets therefore do not appear in the long-lived `docker run` command
+line or in the host Docker client's environment. Repository frontmatter cannot
+select an unrelated caller secret by naming its environment variable; caller
+precedence applies only to supported keys and names explicitly trusted in the
+user config file.
+`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `NODE_EXTRA_CA_CERTS`, and lowercase
+proxy variants are inherited when set.
+Interpreter/loader startup controls (`BASH_ENV`, `ENV`, `LD_*`, `DYLD_*`,
+`GCONV_PATH`, `LOCPATH`, `NLSPATH`, and `TAR_OPTIONS`) are refused when they
+come from config/frontmatter because they can execute before `loop.sh` creates
+its isolation boundary.
 
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `REPO_PATH` | *(required unless passed)* | Absolute path to the repo on your host; `mill run/watch/multi/shell [repo]` can override it |
-| `ANTHROPIC_API_KEY` | — | API key auth |
-| `CLAUDE_CODE_OAUTH_TOKEN` | — | OAuth token auth (alternative to API key) |
-| `MODEL` | `sonnet` | Claude model (`sonnet`, `opus`, etc.) |
-| `PROMPT_FILE` | `/prompts/PROMPT.md` | Prompt file path inside the container |
-| `GIT_USER` | `agentmill` | Git commit author name |
-| `GIT_EMAIL` | `agent@agentmill` | Git commit author email |
-| `AUTO_SETUP` | `true` | Auto-detect and install repo dependencies on start |
-| `REPO_SETUP_COMMAND` | — | Custom bootstrap command (overrides auto-detect) |
-| `EXTRA_PYTHON_TOOLS` | — | Additional pip packages to install (e.g. `ruff pytest`) |
+| Var | Default | Meaning |
+|-----|---------|---------|
+| `AGENT` | `claude` | `claude` or `codex` |
+| `MODEL` | — | passed through to the CLI; empty = the CLI's own default |
+| `FALLBACK_MODEL` | — | claude only: `--fallback-model` when `MODEL` is overloaded |
+| `MAX_ITERATIONS` | `0` | 0 = unbounded |
+| `MAX_ERRORS` / `MAX_NOOPS` | `3` / `3` | consecutive failures / no-progress iterations before stopping (0 = unbounded) |
+| `ERROR_BACKOFF` / `MAX_BACKOFF` | `30` / `900` | seconds: `ERROR_BACKOFF * 2^n` after n failures, capped |
+| `ITER_TIMEOUT` | `3600` | seconds per agent session and per verifier/metric command |
+| `SETUP_TIMEOUT` | `900` | seconds for setup |
+| `AGENT_TIMEOUT` / `CHECK_TIMEOUT` | `ITER_TIMEOUT` | separate session / verification deadlines |
+| `MAX_DURATION` | `3600` | total run seconds, including setup and backoff; 0 disables |
+| `SHUTDOWN_GRACE` | `30` | seconds before a timed-out or signalled agent is killed |
+| `DIND_READY_TIMEOUT` | `30` | seconds to wait for the `--dind` TCP endpoint |
+| `MIN_TURNS` | `2` | a session ending in fewer turns without touching the repo counts as an error, not a no-op (0 = off) |
+| `MAX_TURNS` / `MAX_BUDGET_USD` | `0` / — | claude only: per-session turn and spend caps (0 / empty = none) |
+| `MAX_TOTAL_BUDGET_USD` | — | Claude remaining allowance across worker and reviewer sessions |
+| `REVIEW_RESERVE_USD` | `0.50` | allowance reserved for review when a total cap and evaluator are enabled |
+| `DONE_PROMISE` | `TASK_COMPLETE` | fallback stop signal when the CLI returned no structured reply |
+| `SETUP_CMD` | — | runs once before the loop (`uv sync`, `npm ci`, …) |
+| `CHECK_CMD` | — | the ratchet: failure reverts the iteration |
+| `DONE_CMD` | — | completion verifier; empty = require `CHECK_CMD` green instead |
+| `EVALUATOR` | `false` | run a reviewer in a disposable checkout before honouring a done claim; incompatible with `--dind` |
+| `METRIC_CMD` / `METRIC_DIRECTION` | — / `min` | metric ratchet: last stdout line is the score; `min` or `max` is better |
+| `CLAUDE_BARE` | `false` | claude only: `--bare`, skipping `CLAUDE.md` and hook discovery |
 
-**Headless / multi-agent only:**
+## How the agent installs things
 
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `MAX_ITERATIONS` | `0` (infinite) | Stop after N loop iterations |
-| `LOOP_DELAY` | `5` | Seconds between iterations |
-| `AUTO_COMMIT` | `wip` | `wip` = commit uncommitted changes as safety net, `on` = always commit, `off` = never |
-| `AGENT_BRANCH` | auto | Branch name for multi-agent (default: `agent-$ID`) |
-| `PROMPT_FILE_1/2/3` | `PROMPT_FILE` | Per-agent prompt overrides (multi-agent only) |
+The image is deliberately generic — node (for the CLIs), git, jq, python3, and
+a docker client for `--dind`. Install system dependencies in an operator-built
+derived image, then select it with `AGENTMILL_IMAGE`. For example:
 
-**Watch / interactive only:**
-
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `RESPAWN` | `false` | Restart Claude automatically after each session |
-| `LOOP_DELAY` | `5` | Seconds between respawns |
-| `SKIP_PROMPT` | `false` | Skip prompt injection (set automatically for `interactive`) |
-| `AUTO_RALPH` | `false` | Auto-start Ralph loop for bounded autonomous iteration |
-| `AUTO_RALPH_MAX_ITERATIONS` | `10` | Max Ralph loop iterations |
-| `AUTO_RALPH_COMPLETION_PROMISE` | `TASK_COMPLETE` | Token that signals task completion to Ralph |
-
-## Auto-Setup
-
-When `AUTO_SETUP=true` (default), AgentMill bootstraps the repo's dev environment:
-
-1. `REPO_SETUP_COMMAND` if set, otherwise:
-2. `pyproject.toml` + `uv.lock` → `uv sync --frozen`
-3. `pyproject.toml` alone → `pip install .`
-4. `requirements.txt` → `pip install -r requirements.txt`
-
-The `.venv/bin` is prepended to `PATH`, so tools like `pytest` and `ruff` are available to Claude.
-
-**Recommendation:** Add a `Makefile` to your upstream repo with an `install` target that sets up the full dev environment. Then point AgentMill at it:
-
-```bash
-REPO_SETUP_COMMAND='make install' docker compose up headless
+```dockerfile
+FROM ghcr.io/kurcontko/agentmill:<your-pinned-version>
+USER root
+RUN apk add --no-cache build-base
+# Keep the inherited supervisor entrypoint; it drops privileges before work.
 ```
 
-This keeps build logic in the repo where it belongs, and any setup — system deps, virtual envs, code generation — just works.
+`SETUP_CMD` runs as the unprivileged worker and can prepare user-local tools.
+Missing system packages should be reported as blocked, not installed with sudo.
 
-## Volumes
+For repos whose work itself needs Docker, `--dind` creates a unique sidecar,
+network, and TLS client certificate volume for each run. The client volume is
+read-only in the worker; the daemon requires mutual TLS on port 2376. No daemon
+port is published and the host Docker socket is never mounted. The image digest
+in `dind/Dockerfile` receives Dependabot update PRs. Before starting a sidecar,
+`mill` builds that Dockerfile with patched Alpine runtime packages and runs
+the resulting immutable image ID; unchanged build layers are cached.
+A host watcher removes the sidecar, network, and certificates when the worker
+exits, including detached runs. Failed launches and `mill stop` also clean up
+their own resources. If the host daemon is temporarily unavailable, the watcher
+waits until it can establish that the worker has stopped. After a host restart,
+`mill stop --all` can remove orphaned resources using their labels.
+Because that API controls a privileged daemon, `mill` refuses to combine
+`--dind` with `EVALUATOR=true`.
 
-| Host | Container | Purpose |
-|------|-----------|---------|
-| `./prompts` | `/prompts` | Agent prompt files |
-| `./logs` | `/workspace/logs` | Session logs |
-| `$REPO_PATH` | `/workspace/repo` or `/workspace/upstream` | Target repository |
-| `~/.claude.json` | `/home/agent/.host-claude.json` | Host Claude config (read-only) |
-| `~/.claude/settings.json` | `/home/agent/.claude/settings.host.json` | Host settings (read-only) |
-
-## Apple Silicon
-
-If a dependency lacks a Linux `arm64` wheel, build or force x86 emulation:
-
-```bash
-DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose build
-```
+Privileged DinD still has host-level authority. TLS prevents other clients from
+using its API; pinning prevents an unnoticed tag replacement. Neither provides
+host isolation for the worker that holds the client certificate. Per-run TLS
+networks are not an isolation boundary between hostile tenants. Use a separate
+disposable VM for each untrusted Docker run.
 
 ## Security
 
-Claude runs with `--dangerously-skip-permissions` inside the container. That is intentional — the container *is* the boundary, which is why AgentMill is container-first. Do not run the entrypoints directly on your host.
+The agent CLI runs with permission checks bypassed **inside the container**.
+The worker is a non-root process with no capabilities or privilege escalation;
+the fixed supervisor is the only root application process. It receives the repository,
+the bundled prompts, API credentials, and explicitly forwarded runtime settings
+such as proxy/TLS variables. Caller-exported values use Docker's bare `-e KEY`;
+values parsed from config/frontmatter travel in a private mode-0600 `--env-file`,
+so they are absent from both `docker run` arguments and the Docker client's own
+environment. The evaluator adds a narrower write boundary around its disposable
+snapshot. That boundary contains reviewer and verifier effects; it is not an
+isolation boundary from the primary worker, which already owns and is expected
+to modify the real checkout inside the container. Linked-worktree metadata
+mounts are accepted only after their canonical `.git` and
+`worktrees/<name>` references round-trip to one another; pointer files are then
+copied to private read-only bind sources. The common Git directory is pinned as
+a separate mount, including for a main checkout, so a parallel worker cannot
+replace that validated path while Docker resolves it. Don't run `loop.sh` on
+your host.
 
 To report a vulnerability, see [SECURITY.md](SECURITY.md).
 

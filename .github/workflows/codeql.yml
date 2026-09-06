@@ -4,7 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, "split/**"]
   schedule:
     - cron: "27 2 * * 1"
   workflow_dispatch:
