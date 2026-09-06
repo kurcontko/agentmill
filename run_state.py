@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import sys
 from datetime import datetime, timezone
 
 
@@ -23,7 +24,7 @@ def write_json(path, record):
             os.unlink(temporary)
 
 
-def main():
+def outcome_main():
     parser = argparse.ArgumentParser()
     parser.add_argument("path")
     parser.add_argument("run_id")
@@ -57,5 +58,37 @@ def main():
     })
 
 
+def observation_main(arguments):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("path")
+    parser.add_argument("command")
+    parser.add_argument("exit_code", type=int)
+    parser.add_argument("checked_commit")
+    parser.add_argument("output")
+    parser.add_argument("--patch")
+    parser.add_argument("--summary")
+    parser.add_argument("--accepted-commit")
+    args = parser.parse_args(arguments)
+    with open(args.output, "rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        stream.seek(max(0, stream.tell() - 8192))
+        excerpt = stream.read(8192).decode("utf-8", errors="replace")
+    record = {
+        "schema_version": 1, "command": args.command,
+        "exit_code": args.exit_code, "checked_commit": args.checked_commit or None,
+        "output": args.output, "excerpt": excerpt,
+    }
+    if args.patch:
+        record["patch"] = args.patch
+        record["accepted_commit"] = args.accepted_commit or None
+    if args.summary:
+        with open(args.summary, "rb") as stream:
+            record["attempted_change"] = stream.read(4096).decode("utf-8", errors="replace")
+    write_json(args.path, record)
+
+
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1 and sys.argv[1] == "observation":
+        observation_main(sys.argv[2:])
+    else:
+        outcome_main()

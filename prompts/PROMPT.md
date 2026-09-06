@@ -29,7 +29,10 @@ Then run the fast verifier (redirect to file, read only the summary/tail).
 Now you know: what's done, what's actually broken, and what to do next.
 Skip README unless you need it for the area you're about to touch.
 
-Before picking, also scan PROGRESS.md for **failed approaches** logged by prior sessions — do not re-attempt anything you find there without a new hypothesis.
+Before picking, also scan PROGRESS.md for **failed approaches** and the retained
+rejection evidence in the loop context. Rollback can erase the previous worker's
+notes, so use that evidence and its candidate patch to understand the last
+failure. Do not re-attempt it without a new hypothesis.
 
 ### Pick
 
@@ -71,7 +74,7 @@ Before exit:
 
 #### Failed approaches log — long-term memory across sessions
 
-Maintain a `## Failed approaches` subsection in `PROGRESS.md`. If you ruled out an approach this session, add a one-line entry: **what you tried, why it failed (one sentence)**. Future sessions read this before retrying anything broad — that is the *only* mechanism keeping a respawning loop from re-attempting the same dead end forever.
+Maintain a `## Failed approaches` subsection in `PROGRESS.md`. If you ruled out an approach this session, add a one-line entry: **what you tried, why it failed (one sentence)**. Future sessions read this alongside the runtime's retained rejection evidence before retrying.
 
 Example: *"Tried `Tsit5` for the perturbation ODE — diverges at high k (system too stiff). Switched to `Kvaerno5`."*
 

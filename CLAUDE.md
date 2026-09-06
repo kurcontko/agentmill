@@ -2,7 +2,7 @@
 
 A Docker container that runs an AI agent CLI (`claude -p` or `codex exec`) in
 a respawning loop. Fresh context each iteration; the target repo (PROGRESS.md +
-git history) is the only memory.
+git history), plus retained verification and rejection evidence, is the memory.
 
 ## Commands
 
@@ -25,7 +25,8 @@ shellcheck loop.sh mill reviewer_exec.sh dind_watch.sh tests/*.sh
 ## Architecture
 
 ```
-loop.sh            # the whole framework: agent loop, stop conditions, ratchet
+loop.sh            # execution flow, stop conditions, ratchet
+run_state.py       # deterministic terminal and verification record serialization
 mill               # CLI wrapper — plain docker run (no compose)
 Dockerfile         # node:22 Alpine + GNU tools + claude/codex/git/jq/python3; no sudo
 landlock_exec.py   # Linux Landlock write boundary for reviewer processes
@@ -57,8 +58,10 @@ logs/<container>/  # per-checkout: results.jsonl, metrics.tsv (metric mode),
 
 - **Respawning loop**: fresh context per iteration; carry-forward is only a
   preamble (recent commits + head of PROGRESS.md + current METRIC best).
-- **Initializer**: no PROGRESS.md = first session; the preamble tells it to turn
-  the mission into a checklist, ensure a verifier, commit, and exit.
+- **Initializer**: no PROGRESS.md = first session; focused tasks may implement
+  directly. A planning session records the mission checklist and configured
+  verifier. Only a bounded, regular PROGRESS.md addition can bypass a recorded
+  red baseline; code and verifier changes still require passing checks.
   In metric mode, successful initialization creating PROGRESS.md may keep an
   unchanged score; checks and the rejection of worse/unreadable scores still apply.
 - **Structured reply**: `--json-schema` (claude) / `--output-schema` (codex)

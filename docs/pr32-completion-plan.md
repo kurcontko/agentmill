@@ -47,3 +47,27 @@ Keep execution in the existing shell flow and extract new record serialization
 incrementally into Python. Preserve the narrowly scoped reviewer supervisor.
 No TUI, swarm coordination, vector memory, automatic merging, or generalized
 provider framework.
+
+## Implementation checkpoints
+
+- `f86ac02`: outcome contract, terminal serialization, explicit expected exit
+  codes in existing tests, dedicated outcome tests, CLI propagation tests.
+- `9a0807b`: include the Python helper in Docker's allowlisted build context.
+- PR #32 now targets `main`. Its old base has the same tree as main's #31 merge;
+  no source changes needed reconciliation for the retarget.
+- Recovery work adds baseline observations, a strictly metadata-only planning
+  exception, direct-task instructions, candidate patches, and durable rejection
+  feedback. The full loop suite and dedicated recovery/outcome tests pass
+  locally, as does ShellCheck. CLI tests pass, including every outcome exit.
+
+Remaining validation includes Linux-only deadlines, confinement, supervisor,
+packaged runtime, and DinD in CI: this macOS host has no Docker daemon or GNU
+timeout. The older CI ShellCheck reports SC2317 for callbacks invoked through
+traps/dispatchers; this is now annotated without disabling the lint job.
+At `9a0807b`, Linux shell tests and all security scans passed; packaged runtime
+was skipped because the older ShellCheck needed that annotation. Rerun on the
+recovery commit before considering those gates satisfied.
+
+Accounting follow-up: the TSV parser uses whitespace IFS, which collapses empty
+fields and can shift missing subtype/usage values into the wrong columns.
+Preserve empty fields while implementing unknown-cost semantics.

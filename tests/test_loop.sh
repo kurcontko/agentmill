@@ -361,7 +361,7 @@ STUB
     HOME="$TMP/home" PATH="$TMP/bin:$PATH" ANTHROPIC_API_KEY=test \
         REPO_DIR="$TMP/repo" LOG_DIR="$TMP/logs" PROMPT_FILE="$TMP/prompt.md" \
         LOOP_DELAY=0 SHUTDOWN_GRACE=1 CHECK_MARKER="$TMP/check-started" \
-        CHECK_CMD='printf junk > check-artifact.txt; touch "$CHECK_MARKER"; trap "" TERM; (trap "" TERM; sleep 30) & wait' \
+        CHECK_CMD='[[ -f committed-on-term.txt ]] || exit 0; printf junk > check-artifact.txt; touch "$CHECK_MARKER"; trap "" TERM; (trap "" TERM; sleep 30) & wait' \
         bash "$ROOT/loop.sh" >"$TMP/out.log" 2>&1 &
     loop_pid=$!
     for _ in $(seq 1 100); do [[ -e "$TMP/check-started" ]] && break; sleep 0.05; done
@@ -1769,6 +1769,7 @@ if [[ "$TIMEOUT_PHASE" != done_check ]]; then
     echo work > timed-work.txt
     git add -A && git commit -qm 'agent: timed verification'
 fi
+touch "$WORKER_STARTED"
 printf '{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0,"num_turns":4,"result":"TASK_COMPLETE"}\n'
 STUB
         cat > "$TMP/hang.sh" <<'STUB'
@@ -1783,8 +1784,9 @@ STUB
         chmod +x "$TMP/bin/claude"
         head_before="$(git -C "$TMP/repo" rev-parse HEAD)"
         timeout_args=()
+        # shellcheck disable=SC2016 # evaluated by the verification shell
         case "$timeout_phase" in
-            check|done_check) timeout_args+=(CHECK_CMD="bash $TMP/hang.sh") ;;
+            check|done_check) timeout_args+=('CHECK_CMD=[[ ! -f "$WORKER_STARTED" ]] || bash "$HANG_SCRIPT"') ;;
             done) timeout_args+=(DONE_CMD="bash $TMP/hang.sh") ;;
             metric)
                 # shellcheck disable=SC2016 # expanded by the metric shell
@@ -1795,6 +1797,7 @@ STUB
         timeout_rc=0
         run_loop_raw env ITER_TIMEOUT=1 SHUTDOWN_GRACE=1 MAX_ITERATIONS=1 \
             TIMEOUT_PHASE="$timeout_phase" HANG_SCRIPT="$TMP/hang.sh" \
+            WORKER_STARTED="$TMP/worker-started" \
             CHILD_PID_FILE="$TMP/child-pid" "${timeout_args[@]}" || timeout_rc=$?
         timeout_elapsed=$(( $(date +%s) - timeout_started ))
         [[ "$timeout_elapsed" -lt 10 ]] \

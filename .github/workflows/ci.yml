@@ -46,6 +46,9 @@ jobs:
       - name: Run outcome contract tests
         run: bash tests/test_outcomes.sh
 
+      - name: Run initialization and recovery tests
+        run: bash tests/test_recovery.sh
+
       - name: Run Landlock confinement tests
         run: python3 tests/test_landlock.py
 

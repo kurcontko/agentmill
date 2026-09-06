@@ -96,7 +96,16 @@ session, `PROGRESS.md`, the failed-approaches log). It rarely needs editing;
 
 `PROGRESS.md` is the agent's memory across respawns. When it does not exist
 yet, the first session is an initializer: it turns the mission into a checklist,
-makes sure a verifier exists, commits, and exits without doing feature work.
+makes a handoff plan, records the configured verifier, and commits it. A small,
+well-defined task can start implementation directly. The initial verifier result
+is retained in `baseline.json` and `baseline.log`. On a failing baseline, only a
+regular, bounded `PROGRESS.md` addition qualifies for the planning exception;
+implementation and verifier changes must pass checks.
+
+Before rollback, the runtime retains the candidate patch and diffstat, verifier
+output, and a bounded `rejection.json` handoff. The next session receives that
+handoff even when the rejected iteration's `PROGRESS.md` changes were reverted.
+These files preserve operational evidence; they are not tamper-proof audit logs.
 
 ## Usage
 
