@@ -417,6 +417,7 @@ cat > "$TMP/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DOCKER_LOG"
 case "$*" in
+    build\ -q\ *) printf 'sha256:%064d\n' 1; exit 0 ;;
     exec\ agentmill-dind-*\ info)
         count=0
         [[ -f "$DIND_COUNT" ]] && count="$(cat "$DIND_COUNT")"
@@ -444,7 +445,8 @@ case "$(grep '^run --rm --name agentmill-api-' "$DOCKER_LOG")" in
     *--env-file*'-e DOCKER_HOST=tcp://docker:2376 -e DOCKER_TLS_VERIFY=1 -e DOCKER_CERT_PATH=/certs/client'*) ;;
     *) cat "$DOCKER_LOG"; fail "DinD DOCKER_HOST did not follow the lower-precedence env file" ;;
 esac
-grep -q 'docker:27.5.1-dind@sha256:[a-f0-9]\{64\}' "$DOCKER_LOG" || fail "DinD image is not pinned"
+grep -Fqx "build -q $TMP/dind" "$DOCKER_LOG" || fail "DinD Dockerfile was not built"
+grep -Eq '^run -d .*sha256:0{63}1$' "$DOCKER_LOG" || fail "DinD did not use the built image ID"
 grep -q -- '--security-opt no-new-privileges --cap-drop ALL' "$DOCKER_LOG" || fail "worker hardening missing"
 grep -q -- '-e DOCKER_TLS_CERTDIR=/certs' "$DOCKER_LOG" || fail "DinD TLS is disabled"
 grep -q -- ':/certs/client:ro' "$DOCKER_LOG" || fail "worker client certificates are not read-only"
@@ -461,6 +463,7 @@ cat > "$TMP/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DOCKER_LOG"
 case "$*" in
+    build\ -q\ *) printf 'sha256:%064d\n' 1; exit 0 ;;
     exec\ agentmill-dind-*\ info) exit 1 ;;
 esac
 exit 0
@@ -476,6 +479,21 @@ grep -q '^run --rm --name agentmill-api-' "$DOCKER_LOG" \
 grep -q '^rm -f agentmill-dind-' "$DOCKER_LOG" || fail "failed startup leaked its daemon"
 grep -q '^network rm agentmill-net-' "$DOCKER_LOG" || fail "failed startup leaked its network"
 grep -q '^volume rm agentmill-certs-' "$DOCKER_LOG" || fail "failed startup leaked its certificates"
+
+# A sidecar build failure must stop before allocating any run resources.
+: > "$DOCKER_LOG"
+cat > "$TMP/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DOCKER_LOG"
+[[ "$1" != build ]] || exit 1
+exit 0
+STUB
+if mill -C "$TMP/a/api" run --dind >"$TMP/out" 2>"$TMP/err"; then
+    fail "mill started after a failed sidecar build"
+fi
+grep -q 'could not build the DinD image' "$TMP/err" || fail "missing sidecar build error"
+grep -Eq '^(network create|volume create|run )' "$DOCKER_LOG" \
+    && fail "failed sidecar build allocated run resources"
 rm -rf "$TMP"
 echo "PASS: dind readiness is bounded and precedes the agent"
 

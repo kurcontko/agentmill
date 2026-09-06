@@ -572,28 +572,44 @@ for _ in $(seq 1 100); do
 done
 [[ -s "$claude_root/port" ]] || fail "Claude mock API did not start"
 mock_server_port="$(cat "$claude_root/port")"
+run_real_claude() {
+    /usr/bin/timeout --kill-after=1 10 \
+        /usr/local/bin/agentmill-reviewer-exec \
+        --write-root "$claude_root" --allow-device /dev/null --max-processes 448 \
+        -- \
+        /usr/bin/env -i -C "$claude_root/repo" \
+        HOME="$claude_root/home" TMPDIR="$claude_root/tmp" TMP="$claude_root/tmp" \
+        TEMP="$claude_root/tmp" PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
+        LC_ALL=C.UTF-8 XDG_CACHE_HOME="$claude_root/cache" \
+        XDG_CONFIG_HOME="$claude_root/config" XDG_DATA_HOME="$claude_root/data" \
+        XDG_STATE_HOME="$claude_root/state" \
+        CLAUDE_CONFIG_DIR="$claude_root/home/.claude" \
+        ANTHROPIC_API_KEY=agentmill-test \
+        ANTHROPIC_BASE_URL="http://127.0.0.1:$mock_server_port" \
+        /usr/local/bin/claude -p \
+        "$1" \
+        --bare --disable-slash-commands --no-session-persistence \
+        --allowedTools Bash --permission-mode dontAsk \
+        --output-format stream-json --verbose \
+        >"$2" 2>&1 </dev/null
+}
 set +e
-/usr/bin/timeout --kill-after=1 10 \
-    /usr/local/bin/agentmill-reviewer-exec \
-    --write-root "$claude_root" --allow-device /dev/null --max-processes 448 \
-    -- \
-    /usr/bin/env -i -C "$claude_root/repo" \
-    HOME="$claude_root/home" TMPDIR="$claude_root/tmp" TMP="$claude_root/tmp" \
-    TEMP="$claude_root/tmp" PATH=/usr/local/bin:/usr/bin:/bin LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8 XDG_CACHE_HOME="$claude_root/cache" \
-    XDG_CONFIG_HOME="$claude_root/config" XDG_DATA_HOME="$claude_root/data" \
-    XDG_STATE_HOME="$claude_root/state" \
-    CLAUDE_CONFIG_DIR="$claude_root/home/.claude" \
-    ANTHROPIC_API_KEY=agentmill-test \
-    ANTHROPIC_BASE_URL="http://127.0.0.1:$mock_server_port" \
-    /usr/local/bin/claude -p \
-    '/agentmill-claude-poison review this checkout' \
-    --bare --disable-slash-commands --no-session-persistence \
-    --allowedTools Bash --permission-mode dontAsk \
-    --output-format stream-json --verbose \
-    >"$claude_root/log" 2>&1 </dev/null
+run_real_claude '/agentmill-claude-poison review this checkout' "$claude_root/log"
 claude_rc=$?
 set -e
+# Some native CLI builds reject the disabled slash command before making an
+# API request. Require that exact successful rejection, then independently
+# exercise a normal turn against the mock API. Neither turn may load the skill.
+if [[ ! -s "$claude_root/request" && "$claude_rc" -eq 0 ]] \
+    && jq -se 'any(.[]; .type == "result" and .is_error == false
+        and .result == "Unknown command: /agentmill-claude-poison")' \
+        "$claude_root/log" >/dev/null 2>&1; then
+    run_real_claude 'Review this checkout.' "$claude_root/api-log" \
+        || { cat "$claude_root/api-log"; fail "real Claude mock API turn failed"; }
+    jq -se 'any(.[]; .type == "result" and .is_error == false
+        and .result == "review complete")' "$claude_root/api-log" >/dev/null \
+        || fail "real Claude did not complete its mock API turn"
+fi
 kill -TERM "$mock_server_pid" 2>/dev/null || true
 wait "$mock_server_pid" 2>/dev/null || true
 [[ -s "$claude_root/request" ]] \

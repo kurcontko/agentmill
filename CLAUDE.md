@@ -27,13 +27,13 @@ shellcheck loop.sh mill reviewer_exec.sh dind_watch.sh tests/*.sh
 ```
 loop.sh            # the whole framework: agent loop, stop conditions, ratchet
 mill               # CLI wrapper — plain docker run (no compose)
-Dockerfile         # node:22-slim + claude + codex + git/jq/python3; no sudo
+Dockerfile         # node:22 Alpine + GNU tools + claude/codex/git/jq/python3; no sudo
 landlock_exec.py   # Linux Landlock write boundary for reviewer processes
 supervisor.py      # trusted root entrypoint, drops uid/caps before any repo command
 reviewer_rpc.py    # unprivileged, bounded Unix-socket client
 reviewer_exec.sh   # adapter for the supervisor's fixed confined reviewer launch
 reviewer_control.py # root-owned, identity-checked reviewer group TERM/KILL
-dind/Dockerfile    # digest-pinned sidecar reference, updated through Dependabot
+dind/Dockerfile    # pinned Docker base + patched Alpine runtime packages
 dind_watch.sh      # host-only per-run resource cleanup, survives detached launch
 prompts/PROMPT.md  # framework prompt (claude: --append-system-prompt-file):
                    #   one task per session, PROGRESS.md, failed-approaches log,

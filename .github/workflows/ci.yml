@@ -70,7 +70,7 @@ jobs:
           push: false
           load: true
           tags: agentmill:ci
-          # GID 20 is `dialout` in node:22-slim. Building with it exercises the
+          # GID 20 is `dialout` in node:22 Alpine. Building with it exercises the
           # Linux path where the requested host GID already has another name.
           build-args: |
             AGENT_UID=12345

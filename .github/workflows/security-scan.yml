@@ -30,17 +30,13 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Resolve pinned DinD image
-        id: dind
-        run: |
-          image="$(sed -n 's/^FROM //p' dind/Dockerfile)"
-          [[ "$image" =~ ^docker:[a-zA-Z0-9_.-]+@sha256:[a-f0-9]{64}$ ]]
-          printf 'image=%s\n' "$image" >> "$GITHUB_OUTPUT"
+      - name: Build patched DinD image
+        run: docker build -t agentmill-dind:scan dind
 
-      - name: Scan pinned sidecar image
+      - name: Scan patched sidecar image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ steps.dind.outputs.image }}
+          image-ref: agentmill-dind:scan
           format: table
           severity: CRITICAL,HIGH
           exit-code: "1"

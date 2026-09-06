@@ -1,22 +1,25 @@
-FROM node:22-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
+FROM node:22.23.2-alpine3.24@sha256:c610fcdfb1d5b4740dd70c284ed3cb16bb857e0f7166196e36a5501df7a3aa32
 
 # Bump to upgrade the CLIs (cache-busts the npm layer cleanly).
 ARG CLAUDE_CODE_VERSION=2.1.241
 ARG CODEX_VERSION=0.147.0
+# Node's bundled npm can lag security fixes in its vendored dependencies.
+ARG NPM_VERSION=11.19.1
 # Client only — `mill --dind` points it at the sidecar daemon; no daemon here.
-ARG DOCKER_CLI_VERSION=27.5.1
+ARG DOCKER_CLI_VERSION=29.8.0
 # The container user must be able to write the bind-mounted repo and logs.
 # Docker Desktop maps ownership; on a Linux host the ids must match the
-# caller's — `mill build` passes them. (node:22-slim's `node` user holds
+# caller's — `mill build` passes them. (The base image's `node` user holds
 # uid 1000, so it is removed rather than left to collide.)
 ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 
 # System dependencies belong in this image or an operator-built derived image.
 # Neither worker nor reviewer receives sudo or a runtime package-install API.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl git jq openssh-client python3 \
-    && rm -rf /var/lib/apt/lists/* \
+RUN apk upgrade --no-cache \
+    && apk add --no-cache bash ca-certificates coreutils curl findutils git grep \
+        jq openssh-client procps python3 sed shadow tar util-linux \
+    && npm install -g "npm@${NPM_VERSION}" \
     && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
                       "@openai/codex@${CODEX_VERSION}" \
     && userdel -r node \
@@ -27,6 +30,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && mkdir -p /run/agentmill \
     && chown "root:$(id -gn agent)" /run/agentmill \
     && chmod 2750 /run/agentmill
+
+# Keep the evaluator's fixed trusted paths independent of Alpine's /bin layout.
+RUN ln -s /bin/tar /usr/bin/tar && ln -s /bin/chmod /usr/bin/chmod
 
 # The docker CLI, so --dind's DOCKER_HOST is actually usable by the agent.
 RUN curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-${DOCKER_CLI_VERSION}.tgz" \

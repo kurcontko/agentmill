@@ -15,7 +15,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
 </p>
 
-The whole framework is one shell script. Each iteration runs `claude -p` or
+The core loop is a shell script. Each iteration runs `claude -p` or
 `codex exec` with fresh context, lets the agent work and commit, then respawns.
 The repo — `PROGRESS.md` plus git history — is the only memory, so long runs never
 degrade as a context window fills.
@@ -34,9 +34,10 @@ What the loop adds around the bare `while true; do claude -p ...` idea:
   halfway through; `METRIC_CMD` adds a second gate, keeping an iteration only
   if a benchmark number strictly improves. Kept history is always green. Because
   a revert discards the worktree, the loop refuses to start on a dirty repo.
-- **Verified completion** — "done" is a claim, not a stop: `DONE_CMD` (or a
-  green `CHECK_CMD`) must pass, and with `EVALUATOR=true` a reviewer in a
-  disposable checkout judges the whole run's diff before the loop ends.
+- **Verified completion** — configure `DONE_CMD` or `CHECK_CMD` to check a
+  "done" claim, and with `EVALUATOR=true` a reviewer in a disposable checkout
+  judges the whole run's diff before the loop ends. Without these settings,
+  completion relies on the agent's own claim.
 - **A paper trail** — per-iteration `.summary` digests beside commit-keyed
   event logs, one JSON line per iteration in `results.jsonl`, a `metrics.tsv`
   ledger in metric mode, and `mill logs --results` to tabulate it.
@@ -51,6 +52,7 @@ cd ~/path/to/repo
 mill init                        # writes MILL.md here + ~/.config/agentmill/env once
 $EDITOR ~/.config/agentmill/env  # set your auth key
 $EDITOR MILL.md                  # describe the mission
+git add MILL.md && git commit -m "Define agent mission"
 mill run                         # go. Ctrl-C stops cleanly; completed commits stay.
 ```
 
@@ -126,8 +128,8 @@ itself).
 ## Completion contract
 
 The agent's final message is a JSON object; `done: true` is a claim, not a stop.
-Before the loop honours it, `DONE_CMD` must pass (or, if unset, `CHECK_CMD` must
-have been green on this iteration), and with `EVALUATOR=true` a fresh session
+When configured, `DONE_CMD` must pass (or, if unset, the configured `CHECK_CMD`
+must have been green on this iteration). With `EVALUATOR=true`, a fresh session
 (`prompts/EVALUATOR.md`) reviews the run's commits and diffstat against the
 mission, re-runs the verifier, and returns `PASS` or `NEEDS_WORK`. The reviewer
 gets a writable disposable snapshot under a Linux Landlock write sandbox. The
@@ -280,8 +282,7 @@ derived image, then select it with `AGENTMILL_IMAGE`. For example:
 ```dockerfile
 FROM ghcr.io/kurcontko/agentmill:<your-pinned-version>
 USER root
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential \
-    && rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache build-base
 # Keep the inherited supervisor entrypoint; it drops privileges before work.
 ```
 
@@ -292,7 +293,9 @@ For repos whose work itself needs Docker, `--dind` creates a unique sidecar,
 network, and TLS client certificate volume for each run. The client volume is
 read-only in the worker; the daemon requires mutual TLS on port 2376. No daemon
 port is published and the host Docker socket is never mounted. The image digest
-in `dind/Dockerfile` is the source of truth and receives Dependabot update PRs.
+in `dind/Dockerfile` receives Dependabot update PRs. Before starting a sidecar,
+`mill` builds that Dockerfile with patched Alpine runtime packages and runs
+the resulting immutable image ID; unchanged build layers are cached.
 A host watcher removes the sidecar, network, and certificates when the worker
 exits, including detached runs. Failed launches and `mill stop` also clean up
 their own resources. If the host daemon is temporarily unavailable, the watcher

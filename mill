@@ -367,14 +367,20 @@ load_env() {
 # still requires a privileged container: use a disposable VM for untrusted
 # Docker workloads. Neither TLS nor digest pinning changes that host boundary.
 ensure_dind() {
-    local ready_timeout elapsed=0 image run_id docker_bin
+    local ready_timeout elapsed=0 image base_image run_id docker_bin
     ready_timeout="$(cfg DIND_READY_TIMEOUT)"
     ready_timeout="${ready_timeout:-30}"
     [[ "$ready_timeout" =~ ^[0-9]+$ ]] \
         || { echo "Error: DIND_READY_TIMEOUT must be a non-negative integer" >&2; exit 1; }
-    image="$(sed -n 's/^FROM //p' "$MILL_DIR/dind/Dockerfile")"
-    [[ "$image" =~ ^docker:[a-zA-Z0-9_.-]+@sha256:[a-f0-9]{64}$ ]] \
+    base_image="$(sed -n 's/^FROM //p' "$MILL_DIR/dind/Dockerfile")"
+    [[ "$base_image" =~ ^docker:[a-zA-Z0-9_.-]+@sha256:[a-f0-9]{64}$ ]] \
         || { echo "Error: DinD image must be pinned by digest in dind/Dockerfile" >&2; exit 1; }
+    # Build the patched sidecar on demand; Docker caches unchanged layers.
+    # Run its immutable image ID so concurrent launches cannot race a tag.
+    image="$(docker build -q "$MILL_DIR/dind")" \
+        || { echo "Error: could not build the DinD image" >&2; exit 1; }
+    [[ "$image" =~ ^sha256:[a-f0-9]{64}$ ]] \
+        || { echo "Error: Docker returned an invalid DinD image ID" >&2; exit 1; }
     DIND_STATE="$(mktemp -d "${TMPDIR:-/tmp}/agentmill-dind.XXXXXXXXXXXX")"
     run_id="${DIND_STATE##*.}"
     DIND="agentmill-dind-$run_id" NET="agentmill-net-$run_id" DIND_CERTS="agentmill-certs-$run_id"
@@ -468,9 +474,9 @@ docker_with_env_file() {
         # explicit across implementations. EXIT cleanup covers success, Docker
         # failure, interactive exit, detach completion, and signals.
         env_file="$(mktemp "${TMPDIR:-/tmp}/agentmill-env.XXXXXX")"
-        # shellcheck disable=SC2329 # invoked through EXIT below
+        # shellcheck disable=SC2317,SC2329 # invoked through EXIT below
         cleanup_env_file() { rm -f -- "$env_file"; }
-        # shellcheck disable=SC2329 # invoked through HUP/INT/TERM traps below
+        # shellcheck disable=SC2317,SC2329 # invoked through HUP/INT/TERM traps below
         forward_docker_signal() {
             local signal="$1" status="$2"
             signal_name="$signal" signal_rc="$status"

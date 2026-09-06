@@ -71,6 +71,8 @@ die() { log "FATAL: $*"; exit 1; }
 
 # Job control gives the loop wrapper and its timed CLI session distinct process
 # groups, allowing each layer to enforce a bounded descendant-group shutdown.
+# Group signals below use /bin/kill: Bash's builtin can resolve a reaped child
+# through its job table and target the wrapper's group instead of the given PGID.
 set -m
 SHUTDOWN=false
 AGENT_PID=""
@@ -144,7 +146,7 @@ reviewer_session_alive() {
 
 session_group_alive() {
     local pid="$1" reviewer_rc=0
-    kill -0 -- "-$pid" 2>/dev/null && return 0
+    /bin/kill -0 -- "-$pid" 2>/dev/null && return 0
     kill -0 "$pid" 2>/dev/null && return 0
     reviewer_session_alive || reviewer_rc=$?
     case "$reviewer_rc" in
@@ -156,7 +158,7 @@ session_group_alive() {
 signal_session_group() {
     local signal="$1" pid="$2" state reviewer_pid reviewer_pgid
     local reviewer_pid_start reviewer_pg_start state_rc=0 control_rc=0 alive_rc=0
-    kill "-$signal" -- "-$pid" 2>/dev/null || kill "-$signal" "$pid" 2>/dev/null || true
+    /bin/kill "-$signal" -- "-$pid" 2>/dev/null || kill "-$signal" "$pid" 2>/dev/null || true
     # The supervisor runs the production evaluator under a distinct uid. A same-uid
     # verifier could kill a reviewer-owned signal helper, so only the fixed
     # root-owned controller enforces this second process-group boundary.
@@ -226,17 +228,17 @@ wait_agent() {
     # background child. Drain the wrapper's direct process group before
     # accepting a baseline/check/metric result or canceling an outer watchdog.
     # The evaluator also has a supervisor-owned group, handled below.
-    if kill -0 -- "-$finished_agent_pid" 2>/dev/null; then
-        kill -KILL -- "-$finished_agent_pid" 2>/dev/null || true
+    if /bin/kill -0 -- "-$finished_agent_pid" 2>/dev/null; then
+        /bin/kill -KILL -- "-$finished_agent_pid" 2>/dev/null || true
         for ((attempt = 0; attempt < 100; attempt++)); do
-            kill -0 -- "-$finished_agent_pid" 2>/dev/null || break
+            /bin/kill -0 -- "-$finished_agent_pid" 2>/dev/null || break
             sleep 0.01
         done
     fi
     if [[ -n "$WATCHDOG_PID" ]]; then
         reviewer_session_alive || reviewer_rc=$?
         if [[ "$reviewer_rc" -eq 1 ]]; then
-            kill -- "-$WATCHDOG_PID" 2>/dev/null \
+            /bin/kill -- "-$WATCHDOG_PID" 2>/dev/null \
                 || kill "$WATCHDOG_PID" 2>/dev/null || true
             wait "$WATCHDOG_PID" 2>/dev/null || true
         else
@@ -668,7 +670,7 @@ wait_session() {
             wait "$SESSION_WATCHDOG_PID" 2>/dev/null || watchdog_rc=$?
             [[ "$watchdog_rc" -eq 0 ]] || SESSION_SETUP_FAILED=true
         else
-            kill -- "-$SESSION_WATCHDOG_PID" 2>/dev/null \
+            /bin/kill -- "-$SESSION_WATCHDOG_PID" 2>/dev/null \
                 || kill "$SESSION_WATCHDOG_PID" 2>/dev/null || true
             wait "$SESSION_WATCHDOG_PID" 2>/dev/null || true
         fi
@@ -677,10 +679,10 @@ wait_session() {
     # A CLI can exit while ordinary background jobs in its process group keep
     # running. Drain that group before checks or evaluator preparation; a
     # later session must never overlap residue from the one just reaped.
-    if kill -0 -- "-$finished_session_pid" 2>/dev/null; then
-        kill -KILL -- "-$finished_session_pid" 2>/dev/null || true
+    if /bin/kill -0 -- "-$finished_session_pid" 2>/dev/null; then
+        /bin/kill -KILL -- "-$finished_session_pid" 2>/dev/null || true
         for ((attempt = 0; attempt < 100; attempt++)); do
-            kill -0 -- "-$finished_session_pid" 2>/dev/null || break
+            /bin/kill -0 -- "-$finished_session_pid" 2>/dev/null || break
             sleep 0.01
         done
     fi
