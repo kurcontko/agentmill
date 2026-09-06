@@ -46,14 +46,17 @@ docker build -q --build-arg "BASE=$test_image" -t "$fixture_image" "$test_root/i
 export AGENTMILL_IMAGE="$fixture_image" AGENTMILL_CONFIG="$test_root/config"
 printf 'ANTHROPIC_API_KEY=test\nCHECK_CMD=true\nSHUTDOWN_GRACE=1\n' >"$AGENTMILL_CONFIG"
 for repo in one two; do
-    mkdir -p "$test_root/$repo"
+    mkdir -p "$test_root/$repo/.mill"
     git -C "$test_root/$repo" init -q
     printf -- '---\ntest_volume: %s\n---\nexercise the private daemon\n' "$repo" >"$test_root/$repo/MILL.md"
     git -C "$test_root/$repo" add MILL.md
     git -C "$test_root/$repo" -c user.name=test -c user.email=test@example.com commit -qm init
-    # Match the uid/gid used by CI's Linux ownership test image. The copied
-    # CLI installation and logs must be writable by the container worker too.
-    chmod -R a+rwX "$test_root"
+done
+# Prepare both fixtures before handing either to the image's different uid.
+# The host runner cannot chmod files created by an already-running worker.
+# Precreate .mill so both the worker and host can write steering files.
+chmod -R a+rwX "$test_root"
+for repo in one two; do
     bash "$test_root/mill" -C "$test_root/$repo" run --dind -d --iterations 1 >"$test_root/$repo.out"
     worker="$(tail -1 "$test_root/$repo.out")"
     [[ "$worker" =~ ^[a-f0-9]{64}$ ]] || fail "no worker id: $(cat "$test_root/$repo.out")"
