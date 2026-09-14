@@ -206,11 +206,16 @@ class BasicLoopTests(unittest.TestCase):
         harness = self.root / "harness"
         harness.mkdir()
         shutil.copy(ROOT / "mill", harness / "mill")
+        (harness / ".env").write_text("AGENTMILL_IMAGE=agentmill:symlink-test\n")
+        installed = self.bin / "mill"
+        installed.symlink_to("../harness/mill")
         captured = self.root / "docker.json"
         env = {**self.env, "DOCKER_ARGS": str(captured), "XDG_STATE_HOME": str(self.root / "state")}
+        env.pop("AGENTMILL_IMAGE", None)
         command = ["bash", str(harness / "mill"), "run", "--basic", str(self.repo),
                    "--check", "test ! -f fail", "--iterations", "2"]
-        for _ in range(2):
+        for executable in (harness / "mill", installed):
+            command[1] = str(executable)
             result = subprocess.run(command, env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 2, result.stderr)
         args = json.loads(captured.read_text())
@@ -218,12 +223,17 @@ class BasicLoopTests(unittest.TestCase):
         self.assertIn("no-new-privileges", args)
         self.assertIn("ANTHROPIC_API_KEY", args)
         self.assertIn("/basic_loop.py", args)
+        self.assertIn("agentmill:symlink-test", args)
         self.assertNotIn("--privileged", args)
         self.assertEqual(len(list((self.root / "state/agentmill/runs").iterdir())), 2)
         captured.unlink()
         result = subprocess.run(command + ["--iterations", "0"], env=env, capture_output=True)
         self.assertEqual(result.returncode, 1)
         self.assertFalse(captured.exists())
+        result = subprocess.run(["bash", str(installed), "build"], env=env, capture_output=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(Path(json.loads(captured.read_text())[-1]).resolve(), harness.resolve())
+        captured.unlink()
         result = subprocess.run(["bash", str(harness / "mill"), "run", str(self.repo), "--basic"],
                                 env=env, capture_output=True)
         self.assertEqual(result.returncode, 1)

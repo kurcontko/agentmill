@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MILL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Find the installation even when mill is symlinked into a directory on PATH.
+self="${BASH_SOURCE[0]}"
+while [[ -L "$self" ]]; do
+    link="$(readlink "$self")"
+    [[ "$link" == /* ]] || link="$(dirname "$self")/$link"
+    self="$link"
+done
+MILL_DIR="$(cd "$(dirname "$self")" && pwd)"
+unset self link
 
 usage() {
     cat <<'EOF'
