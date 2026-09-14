@@ -141,14 +141,13 @@ def positive(value):
     return number
 
 
-def main():
+def main(repo=Path("/workspace"), logs=Path("/logs")):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", type=Path, default=Path("/workspace"))
-    parser.add_argument("--logs", type=Path, default=Path("/logs"))
     parser.add_argument("--iterations", type=positive, default=5)
     parser.add_argument("--timeout", type=positive, default=1800)
     parser.add_argument("--model", default="")
     args = parser.parse_args()
+    args.repo, args.logs = repo, logs
     args.check = os.environ.get("CHECK_CMD", "")
     if not args.check.strip():
         parser.error("CHECK_CMD is required")

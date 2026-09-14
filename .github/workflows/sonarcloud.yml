@@ -27,6 +27,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Measure basic-loop coverage
+        env:
+          AGENTMILL_TEST_COVERAGE: "1"
+        run: |
+          python3 -m pip install coverage==7.16.1
+          python3 -m unittest discover -s tests -p 'test_basic_loop.py'
+          python3 -m coverage combine
+          python3 -m coverage xml --fail-under=80
+
       - name: SonarCloud Scan
         if: env.SONAR_TOKEN != ''
         uses: SonarSource/sonarqube-scan-action@7006c4492b2e0ee0f816d36501671557c97f5995 # v8.1.0

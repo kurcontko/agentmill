@@ -71,13 +71,21 @@ class BasicLoopTests(unittest.TestCase):
         self.git("add", ".")
         self.git("commit", "-qm", "mission")
         self.initial = self.git("rev-parse", "HEAD")
+        self.runner = self.root / "runner.py"
+        self.runner.write_text(
+            f"import sys\nsys.path.insert(0, {str(ROOT)!r})\n"
+            "from pathlib import Path\nimport basic_loop\n"
+            f"raise SystemExit(basic_loop.main(Path({str(self.repo)!r}), Path({str(self.logs)!r})))\n"
+        )
 
     def git(self, *args):
         return subprocess.check_output(["git", *args], cwd=self.repo, env=self.env, text=True).strip()
 
     def argv(self, timeout=10):
-        return [sys.executable, "-I", str(ROOT / "basic_loop.py"), "--repo", str(self.repo),
-                "--logs", str(self.logs), "--iterations", "2", "--timeout", str(timeout)]
+        command = [sys.executable, "-I"]
+        if os.environ.get("AGENTMILL_TEST_COVERAGE") == "1":
+            command += ["-m", "coverage", "run"]
+        return [*command, str(self.runner), "--iterations", "2", "--timeout", str(timeout)]
 
     def run_loop(self, mode="done", check=None, timeout=10):
         self.env["FAKE_MODE"] = mode
