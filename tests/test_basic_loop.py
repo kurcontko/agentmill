@@ -206,11 +206,12 @@ class BasicLoopTests(unittest.TestCase):
         harness = self.root / "harness"
         harness.mkdir()
         shutil.copy(ROOT / "mill", harness / "mill")
-        (harness / ".env").write_text("AGENTMILL_IMAGE=agentmill:symlink-test\n")
+        (harness / ".env").write_text("AGENTMILL_IMAGE=agentmill:symlink-test\nMODEL=config-model\n")
         installed = self.bin / "mill"
         installed.symlink_to("../harness/mill")
         captured = self.root / "docker.json"
         env = {**self.env, "DOCKER_ARGS": str(captured), "XDG_STATE_HOME": str(self.root / "state")}
+        env["MODEL"] = "shell-model"
         env.pop("AGENTMILL_IMAGE", None)
         command = ["bash", str(harness / "mill"), "run", "--basic", str(self.repo),
                    "--check", "test ! -f fail", "--iterations", "2"]
@@ -224,6 +225,7 @@ class BasicLoopTests(unittest.TestCase):
         self.assertIn("ANTHROPIC_API_KEY", args)
         self.assertIn("/basic_loop.py", args)
         self.assertIn("agentmill:symlink-test", args)
+        self.assertEqual(args[-1], "shell-model")
         self.assertNotIn("--privileged", args)
         self.assertEqual(len(list((self.root / "state/agentmill/runs").iterdir())), 2)
         captured.unlink()

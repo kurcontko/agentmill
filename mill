@@ -59,6 +59,7 @@ load_env() {
         val="${val%"${val##*[! ]}"}"                 # trim trailing spaces
         [[ -z "${!key:-}" ]] && export "$key=$val"
     done < "$MILL_DIR/.env"
+    return 0
 }
 
 compose() {
