@@ -34,6 +34,56 @@ Every iteration appends to `logs/results.tsv` (agent, files changed, commits, st
 
 ## Quick Start
 
+### Try the basic native loop (experimental)
+
+The first usable slice of #32 is available as an opt-in foreground command:
+
+```bash
+./mill build
+# In a separate, clean git checkout, create and commit MILL.md describing the task.
+export ANTHROPIC_API_KEY=your-key  # or CLAUDE_CODE_OAUTH_TOKEN
+./mill run --basic /path/to/repo --check 'python3 -m unittest discover' --iterations 5
+```
+
+Each iteration starts a fresh `claude -p` session. Claude reads `MILL.md`, uses
+`PROGRESS.md` and commits as its handoff, and returns a structured completion
+claim. The runner checks the baseline before starting Claude and runs the same
+check after every session. It succeeds only when Claude claims completion and
+the check passes on a clean, unchanged commit. This verifies the configured
+check, not an independent review of the mission or protection against an agent
+weakening tests.
+
+`--check CMD` (or `CHECK_CMD`) is required. `--iterations` defaults to 5;
+`--timeout` defaults to 1800 seconds **per session and per check**. Both must be
+positive. `--model` selects the Claude model. Authentication can also come from
+AgentMill's existing `.env` file. Dependencies must already be available in the
+image, or use an image derived from it via `AGENTMILL_IMAGE`.
+
+The command prints its run directory under
+`${XDG_STATE_HOME:-$HOME/.local/state}/agentmill/runs/`. It contains session
+JSON, check output, separate stderr logs, and `outcome.json` with the stop reason,
+completion claim, checked commit, and exit code. Each invocation gets a separate
+directory. Exit codes are `0` for checked completion, `2` for the iteration limit,
+`1` for runtime/check failure, and `130`/`143` for interrupt/termination.
+Docker startup errors retain Docker's exit status; an abrupt kill can leave no
+outcome record. Missing evidence never indicates success.
+
+Failed checks, malformed replies, CLI failures, and timeouts stop immediately.
+Commits and uncommitted work remain for inspection; there is no automatic reset,
+retry, or push. Ctrl-C stops the foreground run. To stop it from another terminal,
+use `docker stop agentmill-<run-id>` with the printed run ID. The container is
+removed on exit, while the checkout and logs remain.
+
+Use one basic run per regular checkout, as a non-root host user. Linked worktrees
+are not supported in this first slice. Commit or stash changes before starting,
+and ignore generated test/build artifacts so checks leave a clean checkout.
+The agent runs with automatic tool approval inside the container, with write
+access to the selected checkout and run logs. These are operational logs, not
+tamper-proof audit records. Basic mode does not mount host CLI configuration or
+a Docker socket. Existing run/watch/multi commands keep their current behavior.
+
+### Existing runtime
+
 1. **Configure** — copy `.env.example` to `.env`, set `REPO_PATH` and auth
 2. **Write your prompt** — edit `prompts/PROMPT.md` with the task
 3. **Run** — pick a mode below

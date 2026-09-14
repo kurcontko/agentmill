@@ -8,6 +8,7 @@ usage() {
 mill — AgentMill CLI
 
 Usage:
+  mill run --basic [repo] --check CMD [--iterations N] [--timeout S] [--model M]
   mill run   [repo] [--model M] [--iterations N] [--prompt FILE] [--delay S] [--auto-commit MODE] [-d]
   mill watch [repo] [--model M] [--prompt FILE] [--ralph] [--respawn]
   mill multi [repo] [N] [-d] [--model M] [--iterations N]
@@ -69,11 +70,13 @@ require_repo() {
 }
 
 cmd_run() {
+    if [[ "${1:-}" == --basic ]]; then shift; cmd_basic "$@"; return; fi
     local repo="" model="" iterations="" prompt="" delay="" auto_commit="" detach=false
     [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -h|--help)    usage 0 ;;
+            --basic) echo "Place --basic immediately after run: mill run --basic [repo] --check CMD" >&2; return 1 ;;
             --model)       model="$2"; shift 2 ;;
             --iterations)  iterations="$2"; shift 2 ;;
             --prompt)      prompt="$2"; shift 2 ;;
@@ -94,6 +97,61 @@ cmd_run() {
     [[ "$detach" == true ]] && up_args+=(-d)
     up_args+=(headless)
     compose "${up_args[@]}"
+}
+
+cmd_basic() {
+    local repo="${REPO_PATH:-$PWD}" iterations=5 timeout=1800 model="${MODEL:-}"
+    local check="${CHECK_CMD:-}" run_dir state_root status
+    [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -h|--help) usage 0 ;;
+            --check|--iterations|--timeout|--model)
+                [[ $# -ge 2 && -n "$2" ]] || { echo "Missing value for $1" >&2; return 1; }
+                case "$1" in
+                    --check) check="$2" ;;
+                    --iterations) iterations="$2" ;;
+                    --timeout) timeout="$2" ;;
+                    --model) model="$2" ;;
+                esac
+                shift 2 ;;
+            *) echo "Unknown basic-run argument: $1" >&2; return 1 ;;
+        esac
+    done
+    [[ "$iterations" =~ ^[1-9][0-9]{0,5}$ && "$timeout" =~ ^[1-9][0-9]{0,5}$ ]] || {
+        echo "Iterations and timeout must be positive integers (at most six digits)." >&2; return 1;
+    }
+    [[ -n "$check" ]] || { echo "Basic runs require --check CMD or CHECK_CMD." >&2; return 1; }
+    repo="$(cd "$repo" && pwd -P)" || return 1
+    [[ -d "$repo/.git" && ! -L "$repo/.git" && -f "$repo/MILL.md" ]] || {
+        echo "Basic runs need a regular git checkout containing MILL.md (no linked worktrees)." >&2; return 1;
+    }
+    status="$(git -C "$repo" status --porcelain --untracked-files=all)" || return 1
+    [[ -z "$status" ]] || {
+        echo "Commit or stash your changes before starting a basic run." >&2; return 1;
+    }
+    [[ "$(id -u)" != 0 ]] || { echo "Run mill as a non-root user." >&2; return 1; }
+    state_root="${XDG_STATE_HOME:-$HOME/.local/state}/agentmill/runs"
+    mkdir -p "$state_root"
+    state_root="$(cd "$state_root" && pwd -P)"
+    [[ "$state_root" != "$repo" && "$state_root" != "$repo/"* ]] || {
+        echo "XDG_STATE_HOME must put run logs outside the checkout." >&2; return 1;
+    }
+    # Docker --mount uses commas as delimiters; reject ambiguous source paths.
+    [[ "$repo$state_root" != *,* ]] || { echo "Basic-run paths cannot contain commas." >&2; return 1; }
+    run_dir="$(mktemp -d "$state_root/basic-XXXXXXXX")"
+    printf 'Run: %s\nLogs: %s\n' "${run_dir##*/}" "$run_dir"
+    export CHECK_CMD="$check"
+    exec docker run --rm --init --name "agentmill-${run_dir##*/}" --stop-timeout 5 \
+        --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
+        --mount "type=bind,src=$repo,dst=/workspace" \
+        --mount "type=bind,src=$run_dir,dst=/logs" \
+        --workdir /workspace --env HOME=/tmp/agentmill-home \
+        --env ANTHROPIC_API_KEY --env CLAUDE_CODE_OAUTH_TOKEN --env CHECK_CMD \
+        --env GIT_AUTHOR_NAME=AgentMill --env GIT_AUTHOR_EMAIL=agentmill@localhost \
+        --env GIT_COMMITTER_NAME=AgentMill --env GIT_COMMITTER_EMAIL=agentmill@localhost \
+        --entrypoint python3 "${AGENTMILL_IMAGE:-agentmill}" -I /basic_loop.py \
+        --iterations "$iterations" --timeout "$timeout" --model "$model"
 }
 
 cmd_watch() {

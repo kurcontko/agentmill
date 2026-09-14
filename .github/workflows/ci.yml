@@ -111,6 +111,10 @@ jobs:
         with:
           context: .
           push: false
+          load: true
           tags: agentmill:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Smoke test the packaged basic loop
+        run: python3 tests/smoke_basic_image.py

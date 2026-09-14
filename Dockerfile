@@ -47,6 +47,7 @@ COPY lib/agentmill/sh /lib/agentmill/sh
 COPY setup-claude-config.sh /setup-claude-config.sh
 COPY setup-repo-env.sh /setup-repo-env.sh
 COPY auto-trust.exp /auto-trust.exp
+COPY basic_loop.py /basic_loop.py
 RUN chmod +x /entrypoint.sh /entrypoint-tui.sh /entrypoint-common.sh /setup-claude-config.sh /setup-repo-env.sh /auto-trust.exp
 
 USER agent
