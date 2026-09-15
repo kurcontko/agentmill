@@ -23,7 +23,7 @@
 
 There are plenty of autonomous loop runners now. AgentMill differs on four things:
 
-- **Container-first, not sandbox-as-a-flag.** The loop is *defined* by `docker-compose.yml` — isolation isn't an opt-in mode bolted onto a host script. Nothing touches your machine's Claude config, `PATH`, or working tree.
+- **Container execution.** The container's mounts define what it can access. Direct-mount runs can change the selected checkout, including artifacts created during dependency setup.
 - **Real multi-agent, not multi-window.** `mill multi ~/repo 3` starts three headless agents on the same upstream, each in its own workspace, each pushing to its own branch (`agent-1`, `agent-2`, …), rebasing and retrying on conflict with a hard retry cap. No tmux, no supervision, no worktree juggling.
 - **Shared memory between agents.** Agents read and write `memory/` as flock-guarded append-only markdown, so what agent 2 learns at iteration 40 is available to agent 1 at iteration 41. Inspect it with `mill memory`.
 - **Fresh context every iteration.** Each pass runs Claude from a clean context, commits, and respawns — long runs don't degrade as the window fills.
@@ -40,10 +40,15 @@ The first usable slice of #32 is available as an opt-in foreground command:
 
 ```bash
 ./mill build
-# In a separate, clean git checkout, create and commit MILL.md describing the task.
+./mill init --basic /path/to/repo
+# Edit /path/to/repo/MILL.md to describe the task, then commit it.
 export ANTHROPIC_API_KEY=your-key  # or CLAUDE_CODE_OAUTH_TOKEN
 ./mill run --basic /path/to/repo --check 'python3 -m unittest discover' --iterations 5
 ```
+
+Use `--basic` on both `init` and `run`. Plain `mill init` and `mill run` select
+the legacy Compose runtime. Basic init preserves an existing `MILL.md` and
+prints the next command; it does not install dependencies or start an agent.
 
 Each iteration starts a fresh `claude -p` session. Claude reads `MILL.md`, uses
 `PROGRESS.md` and commits as its handoff, and returns a structured completion
@@ -58,6 +63,10 @@ weakening tests.
 positive. `--model` selects the Claude model. Authentication can also come from
 AgentMill's existing `.env` file. Dependencies must already be available in the
 image, or use an image derived from it via `AGENTMILL_IMAGE`.
+The image sets `UV_PROJECT_ENVIRONMENT=/tmp/agentmill-venv`, so `uv` commands
+use a container-local environment instead of replacing the checkout's host
+`.venv`. A check such as `uv run --frozen --extra dev pytest` can prepare that
+environment as part of verification, within the check timeout.
 
 The command prints its run directory under
 `${XDG_STATE_HOME:-$HOME/.local/state}/agentmill/runs/`. It contains session

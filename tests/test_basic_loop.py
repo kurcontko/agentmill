@@ -222,6 +222,7 @@ class BasicLoopTests(unittest.TestCase):
         args = json.loads(captured.read_text())
         self.assertIn(f"type=bind,src={self.repo.resolve()},dst=/workspace", args)
         self.assertIn("no-new-privileges", args)
+        self.assertIn("GIT_CONFIG_VALUE_0=/workspace", args)
         self.assertIn("ANTHROPIC_API_KEY", args)
         self.assertIn("/basic_loop.py", args)
         self.assertIn("agentmill:symlink-test", args)
@@ -240,6 +241,24 @@ class BasicLoopTests(unittest.TestCase):
                                 env=env, capture_output=True)
         self.assertEqual(result.returncode, 1)
         self.assertFalse(captured.exists())
+
+    def test_basic_init_creates_mission_and_preserves_existing_work(self):
+        harness = self.root / "harness"
+        harness.mkdir()
+        shutil.copy(ROOT / "mill", harness / "mill")
+        mission = self.repo / "MILL.md"
+        mission.unlink()
+        command = ["bash", str(harness / "mill"), "init", "--basic", str(self.repo)]
+        result = subprocess.run(command, env=self.env, capture_output=True, text=True, check=True)
+        self.assertIn("Acceptance criteria", mission.read_text())
+        self.assertIn("Next: mill run --basic", result.stdout)
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
+        self.assertFalse((harness / ".env").exists())
+        self.assertFalse((harness / "prompts").exists())
+        mission.write_text("My existing mission\n")
+        result = subprocess.run(command, env=self.env, capture_output=True, text=True, check=True)
+        self.assertIn("Keeping existing mission", result.stdout)
+        self.assertEqual(mission.read_text(), "My existing mission\n")
 
 
 if __name__ == "__main__":

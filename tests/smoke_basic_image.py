@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -16,15 +17,35 @@ def main():
     image = f"agentmill-basic-test:{uuid.uuid4().hex}"
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
+        # Exercise the launcher without loading the developer's real .env.
+        shutil.copy(ROOT / "mill", root / "mill")
         fake = FAKE_CLAUDE.replace('os.environ.get("FAKE_MODE", "done")',
                                   'pathlib.Path("mode").read_text().strip()')
         fake = fake.replace('os.environ["FAKE_STARTED"]', '"/logs/started"')
         fake = fake.replace('os.environ["FAKE_CHILD"]', '"/logs/child"')
         (root / "claude").write_text(fake)
         (root / "claude").chmod(0o755)
-        (root / "Dockerfile").write_text("FROM agentmill:ci\nCOPY claude /usr/local/bin/claude\n")
+        base_image = os.environ.get("AGENTMILL_SMOKE_IMAGE", "agentmill:ci")
+        (root / "Dockerfile").write_text(f"FROM {base_image}\nCOPY claude /usr/local/bin/claude\n")
         subprocess.run(["docker", "build", "-t", image, str(root)], check=True)
         try:
+            setup_repo = root / "setup-checkout"
+            (setup_repo / ".venv").mkdir(parents=True)
+            marker = setup_repo / ".venv/host-marker"
+            marker.write_text("keep host environment")
+            (setup_repo / "pyproject.toml").write_text(
+                '[project]\nname="fixture"\nversion="0.1.0"\nrequires-python=">=3.11"\n'
+                '[project.optional-dependencies]\ndev=[]\n[dependency-groups]\nci=[]\n'
+            )
+            subprocess.run([
+                "docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
+                "--mount", f"type=bind,src={setup_repo},dst=/workspace",
+                "--env", "HOME=/tmp/setup-home", "--workdir", "/workspace",
+                "--entrypoint", "bash", image, "-ec",
+                'uv lock --offline; . /setup-repo-env.sh "$PWD"; '
+                'test "$(command -v python)" = "$UV_PROJECT_ENVIRONMENT/bin/python"',
+            ], check=True)
+            assert marker.read_text() == "keep host environment"
             repo = root / "checkout"
             repo.mkdir()
             for args in (("init", "-q", "-b", "main"), ("config", "user.name", "Test"),
@@ -37,7 +58,7 @@ def main():
                 (repo / "mode").write_text(mode)
                 subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
                 subprocess.run(["git", "-C", str(repo), "commit", "-qm", mode], check=True)
-                command = ["bash", str(ROOT / "mill"), "run", "--basic", str(repo),
+                command = ["bash", str(root / "mill"), "run", "--basic", str(repo),
                            "--check", "test ! -f fail", "--iterations", "2", "--timeout", "15"]
                 process = subprocess.Popen(command, env=env)
                 try:

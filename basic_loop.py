@@ -79,7 +79,9 @@ class BasicLoop:
         ).strip()
 
     def require_clean(self):
-        if self.git("status", "--porcelain", "--untracked-files=all"):
+        status = self.git("status", "--porcelain", "--untracked-files=all")
+        if status:
+            print(f"Uncommitted changes:\n{status}", flush=True)
             raise RunStopped("dirty_checkout")
 
     def verify(self, label):

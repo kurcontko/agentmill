@@ -30,7 +30,8 @@ Usage:
   mill history [--tail N]           Show iteration results log
   mill diff    [N]                  Show last N commits + uncommitted changes
   mill clean                        Remove log and status files
-  mill init                         Create .env and starter prompt
+  mill init --basic [repo]           Create a MILL.md mission for the basic loop
+  mill init                         Create legacy Compose config and prompt
 
 Environment:
   ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN must be set (or in .env).
@@ -105,6 +106,7 @@ cmd_run() {
     local up_args=(up)
     [[ "$detach" == true ]] && up_args+=(-d)
     up_args+=(headless)
+    echo "Starting the legacy Compose runtime. For the basic loop, use: mill run --basic [repo] --check CMD" >&2
     compose "${up_args[@]}"
 }
 
@@ -132,8 +134,11 @@ cmd_basic() {
     }
     [[ -n "$check" ]] || { echo "Basic runs require --check CMD or CHECK_CMD." >&2; return 1; }
     repo="$(cd "$repo" && pwd -P)" || return 1
-    [[ -d "$repo/.git" && ! -L "$repo/.git" && -f "$repo/MILL.md" ]] || {
-        echo "Basic runs need a regular git checkout containing MILL.md (no linked worktrees)." >&2; return 1;
+    [[ -d "$repo/.git" && ! -L "$repo/.git" ]] || {
+        echo "Basic runs need a regular git checkout (no linked worktrees)." >&2; return 1;
+    }
+    [[ -f "$repo/MILL.md" ]] || {
+        printf 'Missing MILL.md. Create a mission with: mill init --basic %q\n' "$repo" >&2; return 1;
     }
     status="$(git -C "$repo" status --porcelain --untracked-files=all)" || return 1
     [[ -z "$status" ]] || {
@@ -157,6 +162,8 @@ cmd_basic() {
         --mount "type=bind,src=$run_dir,dst=/logs" \
         --workdir /workspace --env HOME=/tmp/agentmill-home \
         --env ANTHROPIC_API_KEY --env CLAUDE_CODE_OAUTH_TOKEN --env CHECK_CMD \
+        --env GIT_CONFIG_COUNT=1 --env GIT_CONFIG_KEY_0=safe.directory \
+        --env GIT_CONFIG_VALUE_0=/workspace \
         --env GIT_AUTHOR_NAME=AgentMill --env GIT_AUTHOR_EMAIL=agentmill@localhost \
         --env GIT_COMMITTER_NAME=AgentMill --env GIT_COMMITTER_EMAIL=agentmill@localhost \
         --entrypoint python3 "${AGENTMILL_IMAGE:-agentmill}" -I /basic_loop.py \
@@ -307,6 +314,10 @@ cmd_build() {
 cmd_stop() { compose down; }
 
 cmd_init() {
+    if [[ "${1:-}" == --basic ]]; then shift; cmd_init_basic "$@"; return; fi
+    [[ "${1:-}" != --help && "${1:-}" != -h ]] || usage 0
+    [[ $# == 0 ]] || { echo "Usage: mill init [--basic [repo]]" >&2; return 1; }
+    echo "Initializing the legacy Compose runtime. For the basic loop, use: mill init --basic [repo]"
     if [[ ! -f "$MILL_DIR/.env" ]]; then
         cp "$MILL_DIR/.env.example" "$MILL_DIR/.env"
         echo "Created .env from .env.example — edit it to set your auth key and REPO_PATH."
@@ -326,6 +337,35 @@ PROMPT
     else
         echo "prompts/PROMPT.md already exists."
     fi
+}
+
+cmd_init_basic() {
+    [[ "${1:-}" != --help && "${1:-}" != -h ]] || usage 0
+    [[ $# -le 1 ]] || { echo "Usage: mill init --basic [repo]" >&2; return 1; }
+    local repo="${1:-${REPO_PATH:-$PWD}}"
+    repo="$(cd "$repo" && pwd -P)" || return 1
+    [[ -d "$repo/.git" && ! -L "$repo/.git" ]] || {
+        echo "Basic runs need a regular git checkout (no linked worktrees)." >&2; return 1;
+    }
+    if [[ -e "$repo/MILL.md" || -L "$repo/MILL.md" ]]; then
+        printf 'Keeping existing mission: %s/MILL.md\n' "$repo"
+    else
+        (set -o noclobber; cat > "$repo/MILL.md" <<'MISSION'
+# Mission
+
+Replace this paragraph with one concrete change you want the agent to make.
+
+## Acceptance criteria
+
+- Describe the behavior that must work when the task is complete.
+- Name the tests or other checks that demonstrate it.
+MISSION
+        ) || return 1
+        printf 'Created %s/MILL.md\n' "$repo"
+    fi
+    echo "Edit MILL.md, then commit it and any other checkout changes before running."
+    echo "Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in your environment or AgentMill's .env."
+    printf "Next: mill run --basic %q --check 'your test command'\n" "$repo"
 }
 
 cmd_memory() {
