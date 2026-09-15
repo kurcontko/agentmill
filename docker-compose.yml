@@ -19,6 +19,7 @@ x-common-env: &common-env
 
 x-agent-base: &agent-base
   build: .
+  entrypoint: ["/entrypoint.sh"]
   restart: unless-stopped
   security_opt: [no-new-privileges:true]
   cap_drop: [ALL]

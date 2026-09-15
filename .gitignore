@@ -6,6 +6,10 @@ logs/
 .docs/
 .DS_Store
 worktrees/
+__pycache__/
+.coverage
+.coverage.*
+coverage.xml
 
 # Secrets & credentials
 *.pem

@@ -11,6 +11,8 @@ explicit_repo="$TMPDIR/explicit-repo"
 docker_log="$TMPDIR/docker.log"
 mkdir -p "$harness/logs" "$TMPDIR/bin"
 cp "$REPO_ROOT/mill" "$REPO_ROOT/docker-compose.yml" "$harness/"
+mkdir -p "$harness/legacy"
+cp "$REPO_ROOT/legacy/mill" "$harness/legacy/mill"
 chmod +x "$harness/mill"
 
 make_repo() {
@@ -46,11 +48,11 @@ SH
 chmod +x "$TMPDIR/bin/docker"
 
 run_mill() {
-    DOCKER_LOG="$docker_log" PATH="$TMPDIR/bin:$PATH" "$harness/mill" "$@"
+    DOCKER_LOG="$docker_log" PATH="$TMPDIR/bin:$PATH" "$harness/mill" legacy "$@"
 }
 
 help_output="$(run_mill run --help)"
-[[ "$help_output" == *"mill run   [repo]"* ]] || {
+[[ "$help_output" == *"mill legacy run   [repo]"* ]] || {
     echo "expected run help to show optional repo" >&2
     exit 1
 }

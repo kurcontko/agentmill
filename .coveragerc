@@ -1,0 +1,4 @@
+[run]
+source = basic_loop
+relative_files = True
+parallel = True
