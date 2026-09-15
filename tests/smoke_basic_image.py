@@ -48,18 +48,26 @@ def main():
             assert marker.read_text() == "keep host environment"
             repo = root / "checkout"
             repo.mkdir()
+            for name in ("pyproject.toml", "uv.lock"):
+                shutil.copy(setup_repo / name, repo / name)
+            (repo / ".gitignore").write_text(".venv/\n")
+            (repo / ".venv").mkdir()
+            host_marker = repo / ".venv/host-marker"
+            host_marker.write_text("keep host environment")
             for args in (("init", "-q", "-b", "main"), ("config", "user.name", "Test"),
                          ("config", "user.email", "test@example.com")):
                 subprocess.run(["git", "-C", str(repo), *args], check=True)
             (repo / "MILL.md").write_text("Test mission: update the handoff and commit.\n")
             env = {**os.environ, "AGENTMILL_IMAGE": image, "XDG_STATE_HOME": str(root / "state"),
+                   "AUTO_SETUP": "true", "REPO_SETUP_COMMAND": "", "EXTRA_PYTHON_TOOLS": "",
                    "ANTHROPIC_API_KEY": "", "CLAUDE_CODE_OAUTH_TOKEN": ""}
             for mode, expected in (("done", 0), ("hang", 143), ("bad_check", 1)):
                 (repo / "mode").write_text(mode)
                 subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
                 subprocess.run(["git", "-C", str(repo), "commit", "-qm", mode], check=True)
-                command = ["bash", str(root / "mill"), "run", "--basic", str(repo),
-                           "--check", "test ! -f fail", "--iterations", "2", "--timeout", "15"]
+                command = ["bash", str(root / "mill"), "run", str(repo),
+                           "--check", 'test "$(command -v python)" = "$UV_PROJECT_ENVIRONMENT/bin/python" && test ! -f fail',
+                           "--iterations", "2", "--timeout", "15"]
                 process = subprocess.Popen(command, env=env)
                 try:
                     if mode == "hang":
@@ -78,6 +86,8 @@ def main():
                 latest = max(outcomes, key=lambda path: path.stat().st_mtime_ns)
                 outcome = json.loads(latest.read_text())
                 assert outcome["exit_code"] == expected, outcome
+                assert host_marker.read_text() == "keep host environment"
+                assert "uv sync --frozen --extra dev" in (latest.parent / "setup.log").read_text()
                 if mode == "done":
                     head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
                     assert outcome["checked_commit"] == head, outcome

@@ -60,6 +60,7 @@ class BasicLoopTests(unittest.TestCase):
         claude.write_text(FAKE_CLAUDE)
         claude.chmod(0o755)
         self.env = {**os.environ, "HOME": str(self.root / "home"),
+                    "AUTO_SETUP": "true", "REPO_SETUP_COMMAND": "", "EXTRA_PYTHON_TOOLS": "",
                     "PATH": f"{self.bin}:{os.environ['PATH']}", "CHECK_CMD": "test ! -f fail",
                     "FAKE_STARTED": str(self.root / "started"), "FAKE_CHILD": str(self.root / "child")}
         for key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
@@ -75,7 +76,8 @@ class BasicLoopTests(unittest.TestCase):
         self.runner.write_text(
             f"import sys\nsys.path.insert(0, {str(ROOT)!r})\n"
             "from pathlib import Path\nimport basic_loop\n"
-            f"raise SystemExit(basic_loop.main(Path({str(self.repo)!r}), Path({str(self.logs)!r})))\n"
+            f"raise SystemExit(basic_loop.main(Path({str(self.repo)!r}), Path({str(self.logs)!r}), "
+            f"Path({str(ROOT / 'setup-repo-env.sh')!r})))\n"
         )
 
     def git(self, *args):
@@ -103,6 +105,37 @@ class BasicLoopTests(unittest.TestCase):
         self.assertEqual(outcome["checked_commit"], self.git("rev-parse", "HEAD"))
         self.assertNotEqual(outcome["checked_commit"], self.initial)
         self.assertTrue((self.logs / "baseline.log").exists())
+
+    def test_setup_activates_tools_for_checks_and_agent(self):
+        tools = self.root / "installed-tools"
+        tools.mkdir()
+        tool = tools / "fixture-check"
+        tool.write_text('#!/bin/sh\nexit 0\n')
+        tool.chmod(0o755)
+        self.env["TOOLS_DIR"] = str(tools)
+        self.env["REPO_SETUP_COMMAND"] = 'export PATH="$TOOLS_DIR:$PATH"'
+        outcome = self.run_loop(check="fixture-check")
+        self.assertEqual(outcome["exit_code"], 0)
+        self.assertTrue((self.logs / "setup.log").exists())
+
+    def test_setup_failure_stops_before_baseline_or_agent(self):
+        self.env["REPO_SETUP_COMMAND"] = "exit 7"
+        outcome = self.run_loop()
+        self.assertEqual(outcome["reason"], "setup_failed")
+        self.assertFalse((self.logs / "baseline.log").exists())
+        self.assertFalse((self.root / "started").exists())
+
+    def test_setup_timeout_is_bounded(self):
+        self.env["REPO_SETUP_COMMAND"] = "sleep 60"
+        outcome = self.run_loop(timeout=1)
+        self.assertEqual(outcome["reason"], "setup_timeout")
+        self.assertFalse((self.root / "started").exists())
+
+    def test_setup_cannot_silently_dirty_the_checkout(self):
+        self.env["REPO_SETUP_COMMAND"] = "touch unexpected"
+        outcome = self.run_loop()
+        self.assertEqual(outcome["reason"], "dirty_checkout")
+        self.assertFalse((self.root / "started").exists())
 
     def test_fresh_sessions_use_committed_handoff(self):
         outcome = self.run_loop("two_sessions")
@@ -213,7 +246,7 @@ class BasicLoopTests(unittest.TestCase):
         env = {**self.env, "DOCKER_ARGS": str(captured), "XDG_STATE_HOME": str(self.root / "state")}
         env["MODEL"] = "shell-model"
         env.pop("AGENTMILL_IMAGE", None)
-        command = ["bash", str(harness / "mill"), "run", "--basic", str(self.repo),
+        command = ["bash", str(harness / "mill"), "run", str(self.repo),
                    "--check", "test ! -f fail", "--iterations", "2"]
         for executable in (harness / "mill", installed):
             command[1] = str(executable)
@@ -248,10 +281,10 @@ class BasicLoopTests(unittest.TestCase):
         shutil.copy(ROOT / "mill", harness / "mill")
         mission = self.repo / "MILL.md"
         mission.unlink()
-        command = ["bash", str(harness / "mill"), "init", "--basic", str(self.repo)]
+        command = ["bash", str(harness / "mill"), "init", str(self.repo)]
         result = subprocess.run(command, env=self.env, capture_output=True, text=True, check=True)
         self.assertIn("Acceptance criteria", mission.read_text())
-        self.assertIn("Next: mill run --basic", result.stdout)
+        self.assertIn("Next: mill run", result.stdout)
         self.assertEqual(self.git("rev-parse", "HEAD"), self.initial)
         self.assertFalse((harness / ".env").exists())
         self.assertFalse((harness / "prompts").exists())

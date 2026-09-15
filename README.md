@@ -1,260 +1,62 @@
-<p align="center">
-  <img src="assets/agentmill.png" alt="AgentMill" width="200">
-</p>
+# AgentMill
 
-<h1 align="center">AgentMill</h1>
+Give Claude a mission and a check command. AgentMill runs fresh sessions in Docker until Claude claims completion and the check passes.
 
-<p align="center">
-  A Docker container that runs Claude Code in a respawning loop.<br>
-  Point it at a repo and a prompt — it works, commits, pushes, and repeats.<br>
-  <strong>Tasks go in, code comes out.</strong>
-</p>
+## Quick start
 
-<p align="center">
-  <a href="https://github.com/kurcontko/agentmill/actions/workflows/ci.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/kurcontko/agentmill/actions/workflows/security-scan.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/security-scan.yml/badge.svg" alt="Security Scan"></a>
-  <a href="https://github.com/kurcontko/agentmill/actions/workflows/codeql.yml"><img src="https://github.com/kurcontko/agentmill/actions/workflows/codeql.yml/badge.svg" alt="CodeQL"></a>
-  <a href="https://sonarcloud.io/summary/overall?id=kurcontko_agentmill"><img src="https://sonarcloud.io/api/project_badges/measure?project=kurcontko_agentmill&metric=security_rating" alt="Security Rating"></a>
-  <a href="https://sonarcloud.io/summary/overall?id=kurcontko_agentmill"><img src="https://sonarcloud.io/api/project_badges/measure?project=kurcontko_agentmill&metric=reliability_rating" alt="Reliability Rating"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License"></a>
-</p>
-
-## Why AgentMill
-
-There are plenty of autonomous loop runners now. AgentMill differs on four things:
-
-- **Container execution.** The container's mounts define what it can access. Direct-mount runs can change the selected checkout, including artifacts created during dependency setup.
-- **Real multi-agent, not multi-window.** `mill multi ~/repo 3` starts three headless agents on the same upstream, each in its own workspace, each pushing to its own branch (`agent-1`, `agent-2`, …), rebasing and retrying on conflict with a hard retry cap. No tmux, no supervision, no worktree juggling.
-- **Shared memory between agents.** Agents read and write `memory/` as flock-guarded append-only markdown, so what agent 2 learns at iteration 40 is available to agent 1 at iteration 41. Inspect it with `mill memory`.
-- **Fresh context every iteration.** Each pass runs Claude from a clean context, commits, and respawns — long runs don't degrade as the window fills.
-
-Every iteration appends to `logs/results.tsv` (agent, files changed, commits, status), so a 200-iteration overnight run is auditable after the fact with `mill history`.
-
-**Use something else if** you want to supervise parallel agents from a GUI and review each diff by hand — that's a different job, well served by the worktree-and-dashboard tools. AgentMill is for work you want to leave running.
-
-## Quick Start
-
-### Try the basic native loop (experimental)
-
-The first usable slice of #32 is available as an opt-in foreground command:
+Requires Git, a running Docker daemon, and `ANTHROPIC_API_KEY` or
+`CLAUDE_CODE_OAUTH_TOKEN` in your environment (or the AgentMill installation's
+`.env`). Run these commands from the AgentMill checkout:
 
 ```bash
 ./mill build
-./mill init --basic /path/to/repo
-# Edit /path/to/repo/MILL.md to describe the task, then commit it.
-export ANTHROPIC_API_KEY=your-key  # or CLAUDE_CODE_OAUTH_TOKEN
-./mill run --basic /path/to/repo --check 'python3 -m unittest discover' --iterations 5
+./mill init /path/to/repo
+${EDITOR:-vi} /path/to/repo/MILL.md && git -C /path/to/repo add MILL.md && git -C /path/to/repo commit -m "Describe mission"
+./mill run /path/to/repo --check 'pytest'
 ```
 
-Use `--basic` on both `init` and `run`. Plain `mill init` and `mill run` select
-the legacy Compose runtime. Basic init preserves an existing `MILL.md` and
-prints the next command; it does not install dependencies or start an agent.
+Use a check appropriate to your project. Python dependency setup runs automatically
+before the baseline check, including declared `dev` dependencies. uv projects use a
+container-local virtualenv, leaving the host's `.venv` alone. For other stacks,
+set `REPO_SETUP_COMMAND` (for example, `npm ci`). Set `AUTO_SETUP=false` to skip setup.
+Setup output is saved in the printed run directory.
 
-Each iteration starts a fresh `claude -p` session. Claude reads `MILL.md`, uses
-`PROGRESS.md` and commits as its handoff, and returns a structured completion
-claim. The runner checks the baseline before starting Claude and runs the same
-check after every session. It succeeds only when Claude claims completion and
-the check passes on a clean, unchanged commit. This verifies the configured
-check, not an independent review of the mission or protection against an agent
-weakening tests.
+## How it decides success
 
-`--check CMD` (or `CHECK_CMD`) is required. `--iterations` defaults to 5;
-`--timeout` defaults to 1800 seconds **per session and per check**. Both must be
-positive. `--model` selects the Claude model. Authentication can also come from
-AgentMill's existing `.env` file. Dependencies must already be available in the
-image, or use an image derived from it via `AGENTMILL_IMAGE`.
-The image sets `UV_PROJECT_ENVIRONMENT=/tmp/agentmill-venv`, so `uv` commands
-use a container-local environment instead of replacing the checkout's host
-`.venv`. A check such as `uv run --frozen --extra dev pytest` can prepare that
-environment as part of verification, within the check timeout.
+The baseline must pass before Claude starts. Each fresh `claude -p` session reads
+`MILL.md` and uses committed `PROGRESS.md` and Git history as its handoff. It must
+commit its work and return a structured completion claim. The same check runs
+after every session; success means a completion claim plus a passing check on a
+clean, unchanged commit. This verifies your check, not an independent review of
+the mission. Review the resulting diff.
 
-The command prints its run directory under
-`${XDG_STATE_HOME:-$HOME/.local/state}/agentmill/runs/`. It contains session
-JSON, check output, separate stderr logs, and `outcome.json` with the stop reason,
-completion claim, checked commit, and exit code. Each invocation gets a separate
-directory. Exit codes are `0` for checked completion, `2` for the iteration limit,
-`1` for runtime/check failure, and `130`/`143` for interrupt/termination.
-Docker startup errors retain Docker's exit status; an abrupt kill can leave no
-outcome record. Missing evidence never indicates success.
+`--iterations` defaults to 5 and `--timeout` to 1800 seconds per setup, session, or
+check. Use `--model` to select a model. The repo defaults to `REPO_PATH`, then the
+current directory; `CHECK_CMD` can supply the check instead of `--check`.
 
-Failed checks, malformed replies, CLI failures, and timeouts stop immediately.
-Commits and uncommitted work remain for inspection; there is no automatic reset,
-retry, or push. Ctrl-C stops the foreground run. To stop it from another terminal,
-use `docker stop agentmill-<run-id>` with the printed run ID. The container is
-removed on exit, while the checkout and logs remain.
+## Stopping and inspecting a run
 
-Use one basic run per regular checkout, as a non-root host user. Linked worktrees
-are not supported in this first slice. Commit or stash changes before starting,
-and ignore generated test/build artifacts so checks leave a clean checkout.
-The agent runs with automatic tool approval inside the container, with write
-access to the selected checkout and run logs. These are operational logs, not
-tamper-proof audit records. Basic mode does not mount host CLI configuration or
-a Docker socket. Existing run/watch/multi commands keep their current behavior.
+Ctrl-C stops the foreground run. Failures and timeouts stop immediately; there
+is no automatic restart, reset, WIP commit, or push. Commits and unfinished work
+remain in your checkout for inspection.
 
-### Existing runtime
+Each invocation prints its directory under
+`${XDG_STATE_HOME:-$HOME/.local/state}/agentmill/runs/`. It contains setup/check
+output, session JSON, separate stderr logs, and `outcome.json` with the stop reason
+and checked commit. Exit codes: `0` checked completion, `2` iteration limit,
+`1` failure, `130`/`143` interrupted/terminated. Docker startup failures retain
+Docker's status; an abrupt kill may leave no outcome.
 
-1. **Configure** — copy `.env.example` to `.env`, set `REPO_PATH` and auth
-2. **Write your prompt** — edit `prompts/PROMPT.md` with the task
-3. **Run** — pick a mode below
-4. **Stop** — `docker compose down` (finishes current session, commits WIP, exits cleanly)
+Use one run per regular checkout, as a non-root user. Commit or stash changes
+first and ignore generated artifacts. Linked worktrees are not supported yet.
+Claude runs with automatic tool approval and can modify the checkout and logs;
+logs are not tamper-proof evidence. Only the checkout and run directory are
+mounted—no host Claude configuration or Docker socket. Authentication is supplied
+to the container, which has network access.
 
-```bash
-cp .env.example .env   # then edit REPO_PATH and auth
-nano prompts/PROMPT.md  # describe the task
-```
+## Legacy users
 
-## Authentication
-
-Set one of these in `.env`:
-
-- **API Key** — set `ANTHROPIC_API_KEY`
-- **OAuth Token** — run `claude setup-token` on the host, set `CLAUDE_CODE_OAUTH_TOKEN`
-
-For GitHub Actions PR review with Claude Code and DeepSeek, see [`docs/claude-code-github-actions.md`](docs/claude-code-github-actions.md).
-
-## How to Run
-
-Pick the mode that fits your workflow:
-
----
-
-### 1. `headless` — fire and forget
-
-Claude runs in a loop in the background. No UI — output goes to `./logs/`. Restarts automatically on crash. Best for CI, overnight runs, or when you don't need to watch.
-
-```bash
-REPO_PATH=/path/to/repo docker compose up headless
-
-# Use REPO_PATH from .env, or pass /path/to/repo to override it
-./mill run --iterations 3
-```
-
-Loop: pull → run Claude → commit → push → wait → repeat.
-
----
-
-### 2. `watch` — autonomous TUI, you observe
-
-Full Claude Code TUI in your terminal. Claude works autonomously (all tool calls auto-approved) while you watch file edits, tool calls, and reasoning in real time. You're an observer, not a driver.
-
-```bash
-# Single autonomous session, then exit
-REPO_PATH=/path/to/repo docker compose run watch
-
-# With Ralph loop — bounded iteration (runs up to N times, then stops)
-REPO_PATH=/path/to/repo AUTO_RALPH=true AUTO_RALPH_MAX_ITERATIONS=10 \
-  docker compose run watch
-
-# With respawn — restart Claude automatically after each session
-REPO_PATH=/path/to/repo RESPAWN=true docker compose run watch
-```
-
----
-
-### 3. `interactive` — you drive
-
-Plain Claude Code TUI. No prompt injected, no automation. You type, Claude responds. Same as running `claude` locally, but inside the container with the repo and tools already set up.
-
-```bash
-REPO_PATH=/path/to/repo docker compose run interactive
-```
-
----
-
-### 4. `agent-1`, `agent-2`, `agent-3` — parallel workers
-
-Multiple headless agents on the same repo. Each pushes to its own branch (`agent-1`, `agent-2`, etc.) and rebases on conflict. Assign different prompts for different roles.
-
-```bash
-# Two agents, different tasks
-PROMPT_FILE_1=/prompts/features.md PROMPT_FILE_2=/prompts/tests.md \
-  REPO_PATH=/path/to/repo docker compose up agent-1 agent-2
-
-# Three agents, same branch (rebase on conflict)
-AGENT_BRANCH=main REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agent-3
-```
-
-## Configuration
-
-**All modes:**
-
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `REPO_PATH` | *(required unless passed)* | Absolute path to the repo on your host; `mill run/watch/multi/shell [repo]` can override it |
-| `ANTHROPIC_API_KEY` | — | API key auth |
-| `CLAUDE_CODE_OAUTH_TOKEN` | — | OAuth token auth (alternative to API key) |
-| `MODEL` | `sonnet` | Claude model (`sonnet`, `opus`, etc.) |
-| `PROMPT_FILE` | `/prompts/PROMPT.md` | Prompt file path inside the container |
-| `GIT_USER` | `agentmill` | Git commit author name |
-| `GIT_EMAIL` | `agent@agentmill` | Git commit author email |
-| `AUTO_SETUP` | `true` | Auto-detect and install repo dependencies on start |
-| `REPO_SETUP_COMMAND` | — | Custom bootstrap command (overrides auto-detect) |
-| `EXTRA_PYTHON_TOOLS` | — | Additional pip packages to install (e.g. `ruff pytest`) |
-
-**Headless / multi-agent only:**
-
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `MAX_ITERATIONS` | `0` (infinite) | Stop after N loop iterations |
-| `LOOP_DELAY` | `5` | Seconds between iterations |
-| `AUTO_COMMIT` | `wip` | `wip` = commit uncommitted changes as safety net, `on` = always commit, `off` = never |
-| `AGENT_BRANCH` | auto | Branch name for multi-agent (default: `agent-$ID`) |
-| `PROMPT_FILE_1/2/3` | `PROMPT_FILE` | Per-agent prompt overrides (multi-agent only) |
-
-**Watch / interactive only:**
-
-| Env Var | Default | Description |
-|---------|---------|-------------|
-| `RESPAWN` | `false` | Restart Claude automatically after each session |
-| `LOOP_DELAY` | `5` | Seconds between respawns |
-| `SKIP_PROMPT` | `false` | Skip prompt injection (set automatically for `interactive`) |
-| `AUTO_RALPH` | `false` | Auto-start Ralph loop for bounded autonomous iteration |
-| `AUTO_RALPH_MAX_ITERATIONS` | `10` | Max Ralph loop iterations |
-| `AUTO_RALPH_COMPLETION_PROMISE` | `TASK_COMPLETE` | Token that signals task completion to Ralph |
-
-## Auto-Setup
-
-When `AUTO_SETUP=true` (default), AgentMill bootstraps the repo's dev environment:
-
-1. `REPO_SETUP_COMMAND` if set, otherwise:
-2. `pyproject.toml` + `uv.lock` → `uv sync --frozen`
-3. `pyproject.toml` alone → `pip install .`
-4. `requirements.txt` → `pip install -r requirements.txt`
-
-The `.venv/bin` is prepended to `PATH`, so tools like `pytest` and `ruff` are available to Claude.
-
-**Recommendation:** Add a `Makefile` to your upstream repo with an `install` target that sets up the full dev environment. Then point AgentMill at it:
-
-```bash
-REPO_SETUP_COMMAND='make install' docker compose up headless
-```
-
-This keeps build logic in the repo where it belongs, and any setup — system deps, virtual envs, code generation — just works.
-
-## Volumes
-
-| Host | Container | Purpose |
-|------|-----------|---------|
-| `./prompts` | `/prompts` | Agent prompt files |
-| `./logs` | `/workspace/logs` | Session logs |
-| `$REPO_PATH` | `/workspace/repo` or `/workspace/upstream` | Target repository |
-| `~/.claude.json` | `/home/agent/.host-claude.json` | Host Claude config (read-only) |
-| `~/.claude/settings.json` | `/home/agent/.claude/settings.host.json` | Host settings (read-only) |
-
-## Apple Silicon
-
-If a dependency lacks a Linux `arm64` wheel, build or force x86 emulation:
-
-```bash
-DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose build
-```
-
-## Security
-
-Claude runs with `--dangerously-skip-permissions` inside the container. That is intentional — the container *is* the boundary, which is why AgentMill is container-first. Do not run the entrypoints directly on your host.
-
-To report a vulnerability, see [SECURITY.md](SECURITY.md).
-
-## License
-
-[MIT](LICENSE) © Michal Kurc
+The former Compose commands are available only through `mill legacy`, such as
+`mill legacy run`, `mill legacy watch`, and `mill legacy stop`.
+See [legacy documentation](docs/legacy.md). The default `init` writes only
+`MILL.md`; the default `run` never starts Compose.

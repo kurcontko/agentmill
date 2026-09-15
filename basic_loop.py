@@ -1,4 +1,4 @@
-"""Container entrypoint for the opt-in, foreground Claude loop. Stdlib only."""
+"""Container entrypoint for the foreground Claude loop. Stdlib only."""
 
 import argparse
 import json
@@ -98,6 +98,14 @@ class BasicLoop:
         mission = (self.args.repo / "MILL.md").read_text()
         if not mission.strip():
             raise RunStopped("empty_mission")
+        # Source setup in a bounded child, then carry its activated PATH into
+        # both the checks and Claude. Never dump credentials into setup logs.
+        setup_path = self.args.logs / "setup-path"
+        self.command(["bash", "-c", '. "$1" "$2"; printf "%s" "$PATH" > "$3"',
+                      "_", str(self.args.setup_script), str(self.args.repo),
+                      str(setup_path)], "setup")
+        os.environ["PATH"] = setup_path.read_text()
+        self.require_clean()
         self.verify("baseline")
         prompt = (
             "Work on the mission below. Read PROGRESS.md and git history for the handoff "
@@ -143,13 +151,15 @@ def positive(value):
     return number
 
 
-def main(repo=Path("/workspace"), logs=Path("/logs")):
+def main(repo=Path("/workspace"), logs=Path("/logs"),
+         setup_script=Path("/setup-repo-env.sh")):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--iterations", type=positive, default=5)
     parser.add_argument("--timeout", type=positive, default=1800)
     parser.add_argument("--model", default="")
     args = parser.parse_args()
     args.repo, args.logs = repo, logs
+    args.setup_script = setup_script
     args.check = os.environ.get("CHECK_CMD", "")
     if not args.check.strip():
         parser.error("CHECK_CMD is required")

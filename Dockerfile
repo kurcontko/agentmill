@@ -61,5 +61,5 @@ RUN mkdir -p /home/agent/.claude && \
     echo '{"hasCompletedOnboarding":true,"hasTrustDialogAccepted":true,"hasTrustDialogHooksAccepted":true}' > /home/agent/.claude/claude.json && \
     echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep"],"defaultMode":"bypassPermissions"}}' > /home/agent/.claude/settings.json
 
-# Default: headless pipe mode. Use entrypoint-tui.sh for watch/interactive modes.
-ENTRYPOINT ["/entrypoint.sh"]
+# Compose explicitly selects the legacy entrypoints.
+ENTRYPOINT ["python3", "-I", "/basic_loop.py"]
