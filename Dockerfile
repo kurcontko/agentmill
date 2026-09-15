@@ -37,6 +37,8 @@ ENV ANTHROPIC_DEFAULT_OPUS_MODEL=claude-opus-4-7 \
     ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-6 \
     ANTHROPIC_DEFAULT_HAIKU_MODEL=claude-haiku-4-5-20251001
 WORKDIR /workspace
+# uv must not replace a macOS/host virtualenv in a bind-mounted checkout.
+ENV UV_PROJECT_ENVIRONMENT=/tmp/agentmill-venv
 RUN chown agent:agent /workspace
 
 # Entrypoints
