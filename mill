@@ -77,7 +77,7 @@ MISSION
     fi
     echo "Edit MILL.md, or pass --task / --task-file directly. Source input is committed HEAD."
     echo "Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in your environment or AgentMill's .env."
-    printf "Next: mill run %q --check 'your test command'\n" "$repo"
+    printf "Next: mill run %q --agent claude --check 'your test command'\n" "$repo"
 }
 
 cmd_build() {

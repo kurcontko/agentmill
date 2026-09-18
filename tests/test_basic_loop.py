@@ -249,6 +249,18 @@ class BasicLoopTests(unittest.TestCase):
         self.assertEqual(outcome.status, 'checked_complete')
         self.assertIn('event callback failed: BrokenPipeError', outcome.errors)
 
+    def test_native_inputs_are_validated_before_source_or_checks(self):
+        fifo = self.root / 'config-pipe'
+        os.mkfifo(fifo)
+        for field in ('agent_config', 'auth_file'):
+            for path in (self.root / 'missing', self.root, fifo):
+                with self.subTest(field=field, path=path):
+                    with patch('agentmill.runner.Workspace.prepare') as prepare:
+                        with self.assertRaisesRegex(ValueError, f'{field} must be a regular file'):
+                            self.launch(**{field: str(path)})
+                        prepare.assert_not_called()
+                    self.assertFalse((self.root / 'runs').exists())
+
     def test_outcome_is_final(self):
         self.set_mode('done')
         outcome = self.launch()

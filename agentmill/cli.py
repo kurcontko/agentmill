@@ -1,6 +1,7 @@
 """The small command-line surface: run, show and diff."""
 
 import argparse
+from contextlib import suppress
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import re
 import sys
 
 from .contracts import RunSpec
+from .output import OutputSink
 from .records import runs_root
 from .runner import run
 
@@ -56,7 +58,7 @@ def parser():
     return root
 
 
-def human_event(event):
+def human_event(event, sink=None):
     kind = event["event"]
     if kind == "run.started":
         message = (f"Run:       {event['run_id']}\nSource:    {event['source']} @ {event['revision']}\n"
@@ -81,7 +83,7 @@ def human_event(event):
                    f"Outcome: {event['outcome']}\nDiff: mill diff {event['run_id']}")
     else:
         return
-    print(message, file=sys.stderr, flush=True)
+    (sink or OutputSink(sys.stderr)).write(message)
 
 
 def make_spec(args):
@@ -152,6 +154,7 @@ def inspect_run(args):
 
 
 def main(argv=None):
+    diagnostics = OutputSink(sys.stderr)
     try:
         args = parser().parse_args(argv)
     except SystemExit as error:
@@ -161,17 +164,20 @@ def main(argv=None):
         if args.command != "run":
             return inspect_run(args)
         spec = make_spec(args)
+        output = OutputSink(sys.stdout) if args.json else diagnostics
         def emit(event):
             if args.json:
-                print(json.dumps(event), flush=True)
+                output.write(json.dumps(event))
             else:
-                human_event(event)
+                human_event(event, output)
         outcome = run(spec, on_event=emit, runs_dir=args.runs_dir)
         for error in outcome.errors:
-            print(error, file=sys.stderr)
+            with suppress(OSError):
+                diagnostics.write(error)
         return outcome.exit_code
     except (OSError, ValueError) as error:
-        print(f"mill: {error}", file=sys.stderr)
+        with suppress(OSError):
+            diagnostics.write(f"mill: {error}")
         return 1
 
 

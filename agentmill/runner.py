@@ -35,6 +35,12 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
     storage = Path(runs_dir) if runs_dir else runs_root()
     if source_path.is_dir() and storage.resolve().is_relative_to(source_path.resolve()):
         raise ValueError("run directory must be outside the source checkout")
+    # Reject unusable native inputs before cloning, setup or baseline checks.
+    # The executor rechecks before mounting in case a file disappears during a run.
+    for field in ("agent_config", "auth_file"):
+        path = getattr(spec, field)
+        if path and not Path(path).is_file():
+            raise ValueError(f"{field} must be a regular file")
     records = Records(runs_dir, on_event)
     outcome = RunOutcome(records.run_id)
     outcome.artifacts = {"run_directory": str(records.directory),

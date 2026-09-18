@@ -11,6 +11,8 @@ COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /uvx /usr/local/bin/
 ARG CLAUDE_CODE_VERSION=2.1.119
 ARG CODEX_VERSION=0.154.0
 
+# Disable dependency lifecycle scripts. Only Claude's pinned, reviewed installer
+# is run explicitly: it places the already-downloaded platform binary (no fetch).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
@@ -26,7 +28,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
-    && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}" \
+    && npm install -g --ignore-scripts "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}" \
+    && node /usr/local/lib/node_modules/@anthropic-ai/claude-code/install.cjs \
+    && claude --version && codex --version \
     && useradd -m -s /bin/bash agent
 
 # Belt-and-suspenders: pin per-family aliases at the env layer so any code

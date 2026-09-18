@@ -134,6 +134,8 @@ selected profile TOML file, and `--auth-file /path/to/auth.json` for native acco
 authentication. Only those selected files are mounted read-only into the worker;
 Codex receives an ephemeral writable copy. Refreshed account tokens are not
 written back to the source auth file. No entire home directory is copied.
+Selected config/auth paths must be regular files; the runner validates them
+before preparing the source or running setup and baseline checks.
 
 Containers run as the invoking user's numeric UID/GID, drop capabilities, and
 use `no-new-privileges`. They have network access. The worker sees only its private
@@ -228,6 +230,13 @@ native output stays in session files. Events carry `schema_version`, `run_id`,
 `session.finished`, `candidate.captured`, `check.finished`, and `run.finished`.
 Session/check events identify the session; baseline checks use session 0.
 `outcome.json` is authoritative, even if the consumer missed the final event.
+The CLI detaches a closed or stalled output stream after a bounded write attempt
+(100 ms per message). A detached JSON stream may end with a partial line. Read
+`events.jsonl` for the complete event sequence; slow consumers do not stop a run.
+
+The Python API is experimental. Its `on_event` callback runs synchronously and
+must return promptly; callers own any callback queuing or backpressure handling.
+The CLI's bounded output forwarding does not apply to arbitrary Python callbacks.
 
 ```python
 from agentmill import RunSpec, run

@@ -4,7 +4,11 @@ import io
 import json
 import os
 from pathlib import Path
+import signal
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -63,6 +67,62 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code,2)
         self.assertEqual(json.loads(stdout.getvalue())['event'],'run.started')
         self.assertEqual(stderr.getvalue(),'diagnostic\n')
+
+    def test_full_connected_output_pipe_does_not_prevent_cancellation(self):
+        # Fill the pipe before launching; keep its reader connected without draining.
+        # Exercise real CLI forwarding, Records, and the runner's signal handler.
+        script = '''
+import sys, time
+from unittest.mock import patch
+from agentmill.cli import main
+def wait_for_cancel(workspace, *args):
+    while True:
+        workspace.executor.guard()
+        time.sleep(0.01)
+with patch('agentmill.runner.Workspace.prepare', wait_for_cancel):
+    raise SystemExit(main(sys.argv[1:]))
+'''
+        for json_mode in (True, False):
+            with self.subTest(json_mode=json_mode):
+                read_fd, write_fd = os.pipe()
+                process = None
+                try:
+                    os.set_blocking(write_fd, False)
+                    try:
+                        while True:
+                            os.write(write_fd, b'x' * 4096)
+                    except BlockingIOError:
+                        pass
+                    os.set_blocking(write_fd, True)
+                    storage = self.root / ('json' if json_mode else 'human')
+                    argv = [sys.executable, '-c', script, 'run', str(self.root / 'source'),
+                            '--task', 'task', '--check', 'true', '--runs-dir', str(storage)]
+                    if json_mode:
+                        argv.append('--json')
+                    process = subprocess.Popen(argv, cwd=Path(__file__).resolve().parents[1],
+                        stdout=write_fd if json_mode else subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL if json_mode else write_fd)
+                    deadline = time.monotonic() + 5
+                    events = []
+                    while time.monotonic() < deadline:
+                        events = list(storage.glob('*/events.jsonl'))
+                        if events and events[0].stat().st_size:
+                            break
+                        time.sleep(0.01)
+                    self.assertTrue(events, 'supervisor never persisted its start event')
+                    process.send_signal(signal.SIGTERM)
+                    self.assertEqual(process.wait(timeout=3), 143)
+                    outcome = json.loads((events[0].parent / 'outcome.json').read_text())
+                    self.assertEqual(outcome['status'], 'cancelled')
+                    self.assertIn('event callback failed: TimeoutError', outcome['errors'])
+                    self.assertEqual(json.loads(events[0].read_text().splitlines()[-1])['event'], 'run.finished')
+                    self.assertTrue(os.get_blocking(write_fd), 'shared descriptor flags must be restored')
+                finally:
+                    if process and process.poll() is None:
+                        process.kill()
+                        process.wait(timeout=3)
+                    os.close(write_fd)
+                    os.close(read_fd)
 
     def test_invalid_cli_usage_is_not_an_incomplete_run(self):
         with contextlib.redirect_stderr(io.StringIO()):
