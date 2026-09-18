@@ -64,7 +64,7 @@ jobs:
           persist-credentials: false
 
       - name: Compile Python sources
-        run: python3 -m compileall -q tests
+        run: python3 -m compileall -q agentmill basic_loop.py tests
 
       - name: Run Python unit tests
         run: python3 -m unittest discover -s tests -p 'test_*.py'
@@ -116,5 +116,15 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smoke test the packaged basic loop
+      - name: Smoke test the checked run contract
         run: python3 tests/smoke_basic_image.py
+
+      - name: Exercise real native CLI protocols against an offline fixture API
+        run: |
+          docker run --rm --network none --cap-drop ALL --security-opt no-new-privileges \
+            --user "$(id -u):$(id -g)" \
+            --tmpfs /home/agentmill:rw,mode=1777 \
+            --tmpfs /workspace:rw,mode=1777 --tmpfs /inputs:rw,mode=1777 --tmpfs /scratch:rw,mode=1777 \
+            --mount "type=bind,src=$PWD/tests/smoke_native_clis.py,dst=/fixture.py,readonly" \
+            --mount "type=bind,src=$PWD/agentmill,dst=/code/agentmill,readonly" \
+            --entrypoint python3 agentmill:ci /fixture.py

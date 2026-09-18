@@ -9,6 +9,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.8.17 /uv /uvx /usr/local/bin/
 # Refs: https://github.com/anthropics/claude-code/issues/50810
 #       https://code.claude.com/docs/en/changelog
 ARG CLAUDE_CODE_VERSION=2.1.119
+ARG CODEX_VERSION=0.154.0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
@@ -25,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ripgrep \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /usr/lib/python*/EXTERNALLY-MANAGED \
-    && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" "@openai/codex@${CODEX_VERSION}" \
     && useradd -m -s /bin/bash agent
 
 # Belt-and-suspenders: pin per-family aliases at the env layer so any code
@@ -49,7 +50,6 @@ COPY lib/agentmill/sh /lib/agentmill/sh
 COPY setup-claude-config.sh /setup-claude-config.sh
 COPY setup-repo-env.sh /setup-repo-env.sh
 COPY auto-trust.exp /auto-trust.exp
-COPY basic_loop.py /basic_loop.py
 RUN chmod +x /entrypoint.sh /entrypoint-tui.sh /entrypoint-common.sh /setup-claude-config.sh /setup-repo-env.sh /auto-trust.exp
 
 USER agent
@@ -61,5 +61,6 @@ RUN mkdir -p /home/agent/.claude && \
     echo '{"hasCompletedOnboarding":true,"hasTrustDialogAccepted":true,"hasTrustDialogHooksAccepted":true}' > /home/agent/.claude/claude.json && \
     echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep"],"defaultMode":"bypassPermissions"}}' > /home/agent/.claude/settings.json
 
+# The host supervisor explicitly selects each container command.
 # Compose explicitly selects the legacy entrypoints.
-ENTRYPOINT ["python3", "-I", "/basic_loop.py"]
+CMD ["bash"]

@@ -1,89 +1,53 @@
 # AgentMill
 
-Docker-based framework for running autonomous AI agents (Claude Code) in respawning loops. Give it a git repo and a prompt — it clones, works, commits, pushes, and repeats.
-
-## Commands
-
-```bash
-# CLI (preferred)
-./mill run ~/myrepo                        # headless loop
-./mill run ~/myrepo --model opus --iterations 5
-./mill watch ~/myrepo --ralph              # autonomous TUI with Ralph Loop
-./mill multi ~/myrepo 3                    # 3 parallel agents
-./mill shell ~/myrepo                      # interactive Claude session
-./mill status                              # show agent iteration status
-./mill history                             # show iteration results log
-./mill memory                              # list memory topics
-./mill memory decisions                    # read a memory topic
-./mill memory --search "pattern"           # search across memory
-./mill memory decisions --clear            # clear a memory topic
-./mill diff                                # show recent changes across iterations
-./mill logs 1                              # tail agent-1 logs
-./mill build                               # build container image
-./mill stop                                # stop all services
-
-# Direct docker compose (still works)
-REPO_PATH=/path/to/repo docker compose up headless
-REPO_PATH=/path/to/repo docker compose up agent-1 agent-2 agent-3
-REPO_PATH=/path/to/repo docker compose run watch
-REPO_PATH=/path/to/repo docker compose run interactive
-
-# Test
-python3 -m unittest tests.test_entrypoint_retry_limit
-bash tests/test_entrypoint_push_retry.sh
-
-# Lint
-shellcheck entrypoint.sh entrypoint-tui.sh mill
-```
+A small, checked job runner around `codex exec` and `claude -p`. Read README.md for
+the public contract and docs/positioning.md for the product boundary.
 
 ## Architecture
 
-```
-mill                   # CLI wrapper — run/watch/multi/shell/status/memory/history
-entrypoint.sh          # Claude headless agent loop
-entrypoint-tui.sh      # Claude interactive TUI mode
-entrypoint-common.sh   # Shared functions: logging, auth, git, settings, sentinel, memory
-setup-repo-env.sh      # Auto-bootstrap repo (uv/poetry/pip detection)
-setup-claude-config.sh # Merge host Claude config into container
-prompts/               # Agent task prompts (PROMPT.md, PROMPT_LITE.md, PROMPT_MEMORY.md)
-memory/                # Shared markdown memory (flock-guarded, multi-agent safe)
-logs/results.tsv       # Iteration results log (Karpathy autoresearch pattern)
-```
+- `agentmill/contracts.py`: RunSpec, RunOutcome, worker reply and process contracts.
+- `agentmill/runner.py`: one bounded repair/continuation loop.
+- `agentmill/executor.py`: shared subprocess deadlines, Docker lifecycle and cleanup.
+- `agentmill/workspace.py`: private checkouts, supervisor-owned snapshots and exports.
+- `agentmill/checks.py`: fresh candidate check environments and bounded feedback.
+- `agentmill/records.py`: versioned events and atomic terminal outcome.
+- `agentmill/adapters/`: native command construction and final-result parsing only.
+- `agentmill/cli.py`: run, show and diff.
+- `mill`: checkout launcher, image build, optional mission init and legacy dispatch.
+- `basic_loop.py`: isolated Python launcher for the evolved checked loop.
 
-## Key Patterns
+The supervisor runs on the host. Workers never receive a writable mount of its
+records or snapshot store. Checks receive no supplied agent credentials. Never
+mount the source checkout or Docker socket into a worker. Do not infer completion
+from an exit code alone: require a valid native terminal envelope, a `done` reply,
+and passing configured checks on the captured candidate.
 
-- **Respawning Loop**: Each iteration runs Claude in a fresh context, commits results, waits, repeats. No context rot.
-- **Multi-Agent Sync**: Agents push to their own branches (`agent-1`, `agent-2`, etc.). On conflict: rebase + retry (max 3).
-- **Graceful Shutdown**: Entrypoints trap SIGTERM/SIGINT, complete current session, commit WIP, exit.
-- **Settings Override**: Agents backup `.claude/settings.local.json`, apply permissive config, restore on exit.
-- **Auto-Setup**: Detects `pyproject.toml`/`requirements.txt` and runs appropriate installer (uv > poetry > pip).
-- **Shared Memory**: Agents write to `memory/` via flock-guarded append-only markdown files. Read freely, write safely.
-- **Iteration Log**: Every iteration appends to `logs/results.tsv` (agent, files changed, commits, status). View with `mill history`.
+## Conventions
 
-## Code Conventions
-
-- Shell scripts use `set -euo pipefail` and `shellcheck` compliance
-- Python targets 3.11+, stdlib only (no third-party deps)
-- Entrypoints must handle signals and clean up — never leave orphan processes
-- Git operations must have retry limits; never retry infinitely
-- All user-facing config via environment variables (see docker-compose.yml)
-- Status files go under `logs/` directory hierarchy
+Python 3.11+, standard-library runtime only. Keep provider flags out of the runner.
+All subprocesses must be bounded. Killing a Docker client is not container cleanup.
+Capture partial changes after worker exit, even on failure or cancellation. Never
+reset, stash, merge, or push the user's checkout. Preserve both latest and last
+passing candidates. Never run host Git against worker-controlled Git metadata.
 
 ## Testing
 
-- Python tests use `unittest` (no pytest dependency in the framework itself)
-- Shell tests use plain bash assertions or bats
-- Run individual test files, not the full suite, during development
+Run focused unittest files during development, then the relevant CI checks:
 
-## Important
+```bash
+python3 -m unittest discover -s tests -p 'test_basic_loop.py'
+python3 -m unittest discover -s tests -p 'test_adapters.py'
+python3 -m unittest discover -s tests -p 'test_workspace.py'
+shellcheck mill
+AGENTMILL_SMOKE_IMAGE=agentmill:latest python3 tests/smoke_basic_image.py
+```
 
-- Container runs as non-root `agent` user (UID 1000)
-- Claude runs with `--dangerously-skip-permissions` inside containers — this is intentional for automation
-- Multi-agent services share `REPO_PATH` as upstream but clone into isolated workspaces
-- PROMPT files are mounted at `/prompts/` inside the container
+Docker smoke tests use deterministic native CLI fixtures without provider billing.
+Real native CLI protocol tests must also exercise the packaged versions. Do not
+add agent-framework, scheduler, review, approval, or provider-registry abstractions.
 
-## Web Search
+## Legacy
 
-Always prefer using Brightdata MCP (scrape as markdown, search engine) instead of built-in web tools.
-
-When scraping git repos, consider cloning into /tmp and perform file-level ops on it.
+Compose, entrypoint shell scripts, automatic dependency detection, shared memory,
+and multi-agent commands remain under `mill legacy`. Do not bring that machinery
+into the checked runner. Preserve its focused tests while changing shared images.

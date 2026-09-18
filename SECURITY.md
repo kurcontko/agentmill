@@ -27,6 +27,18 @@ Only the latest release on the `main` branch is actively supported with security
 
 ## Security Considerations
 
-- Containers run Claude Code with `--dangerously-skip-permissions` by design. This is intentional for autonomous operation inside isolated containers and should **never** be used outside a container boundary.
-- Agents have full read/write access to the mounted repository. Do not mount sensitive host directories.
-- API keys (`ANTHROPIC_API_KEY`) are passed via environment variables. Use Docker secrets or a vault in production.
+- Docker is the checked runner's execution boundary. Codex uses an explicit
+  `danger-full-access` native profile inside that boundary; Claude uses `dontAsk`
+  and coding-tool approvals. These commands are constructed for isolated worker
+  containers, not unrestricted execution in the source checkout.
+- Workers can modify their private checkout, use the network, and access selected
+  native credentials. The source checkout, Docker socket, supervisor records, and
+  snapshot repository are never mounted into workers. Check containers receive no
+  supplied agent credentials or native configuration mounts.
+- Check commands and repository tests execute code. A passing configured check is
+  limited evidence, not a guarantee of correctness or independent acceptance.
+- Captures exclude ignored new files and a documented set of credential filenames.
+  They are not a secret scanner. Tracked sensitive files, logs, native configuration,
+  and retained workspaces require appropriate handling before sharing artifacts.
+- The legacy Compose runtime has a different boundary and uses Claude's
+  `--dangerously-skip-permissions`. See the legacy documentation before using it.

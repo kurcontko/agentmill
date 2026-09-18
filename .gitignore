@@ -23,3 +23,7 @@ credentials*
 !*secret*.sh
 .ssh/
 *.kube/config
+
+build/
+dist/
+*.egg-info/

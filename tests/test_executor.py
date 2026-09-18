@@ -1,0 +1,115 @@
+"""Transport invariants; actual Docker behavior is covered by the smoke tests."""
+from contextlib import contextmanager
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+from unittest.mock import patch
+
+from agentmill.contracts import Command, ProcessOutput, RunSpec, RunStopped
+from agentmill.executor import Container, Executor
+
+
+class ExecutorTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.workspace = self.root / 'workspace'
+        self.workspace.mkdir()
+        self.inputs = self.root / 'inputs'
+        self.inputs.mkdir()
+        self.config = self.root / 'config.toml'
+        self.config.write_text('model="fixture"')
+        self.auth = self.root / 'auth.json'
+        self.auth.write_text('{}')
+        self.spec = RunSpec(str(self.workspace),'task',('true',),profile='chosen',
+                            agent_config=str(self.config),auth_file=str(self.auth),credential_env=('FIXTURE_KEY',))
+        self.executor = Executor(self.spec,self.root)
+        self.calls = []
+
+    def control(self, argv, **kwargs):
+        self.calls.append(argv)
+        if argv[1:3]==['image','inspect']:
+            return json.dumps([{'Id':'sha256:pinned','RepoDigests':['fixture@sha256:digest'],'Os':'linux','Architecture':'arm64'}]).encode()
+        return b''
+
+    def process(self, argv, stdout, stderr, timeout, **kwargs):
+        self.calls.append(argv)
+        stdout.parent.mkdir(parents=True,exist_ok=True)
+        stdout.write_bytes(b'')
+        stderr.write_bytes(b'')
+        return ProcessOutput(0,stdout,stderr,0)
+
+    def test_worker_mounts_narrow_inputs_and_cleanup_owns_container(self):
+        with patch.object(self.executor,'control',self.control),patch.object(self.executor,'command',self.process):
+            env=self.executor.inspect_image()
+            self.assertEqual(env['image_id'],'sha256:pinned')
+            with self.executor.container(self.workspace,inputs=self.inputs,worker=True):
+                self.assertFalse(self.executor.worker_stopped)
+            self.assertTrue(self.executor.worker_stopped)
+        create=next(c for c in self.calls if c[1]=='create')
+        mounts=[create[i+1] for i,x in enumerate(create) if x=='--mount']
+        self.assertEqual(len(mounts),4)
+        self.assertIn(f'type=bind,src={self.workspace},dst=/workspace',mounts)
+        self.assertIn(f'type=bind,src={self.inputs},dst=/inputs,readonly',mounts)
+        self.assertIn('sha256:pinned',create)
+        self.assertFalse(any('docker.sock' in x or 'dst=/logs' in x for x in create))
+        self.assertTrue(any(c[1:3]==['rm','--force'] for c in self.calls))
+        self.assertTrue(any(c[1:3]==['ps','-aq'] for c in self.calls))
+
+    def test_checks_have_no_native_config_auth_or_credentials(self):
+        with patch.object(self.executor,'control',self.control),patch.object(self.executor,'command',self.process):
+            with self.executor.container(self.workspace) as container:
+                container.setup(self.root / 'baseline')
+                container.check('true',self.root / 'baseline',1)
+        create=next(c for c in self.calls if c[1]=='create')
+        self.assertFalse(any('/native/' in x or 'FIXTURE_KEY' in x for x in create))
+        for argv in self.calls:
+            if argv[1]=='exec':
+                self.assertNotIn('--env',argv)
+
+    def test_credentials_only_on_native_exec_and_explicit_configuration_copy(self):
+        container=Container(self.executor,'fixture')
+        with patch.object(self.executor,'command',self.process),patch.dict(os.environ,{'FIXTURE_KEY':'not-recorded'}):
+            output=container.session(Command(('codex','exec','-')),self.root / 'session')
+        argv=self.calls[-1]
+        self.assertEqual(argv[:4],['docker','exec','--env','FIXTURE_KEY'])
+        self.assertNotIn('not-recorded',str(argv))
+        self.assertIn('chosen.config.toml',argv[-1])
+        self.assertIn('auth.json',argv[-1])
+        self.assertEqual(output.stdout.name,'native.jsonl')
+
+    def test_cleanup_failure_prevents_candidate_capture(self):
+        with patch.object(self.executor,'control',self.control),patch.object(self.executor,'_remove_container',return_value=False):
+            with self.assertRaisesRegex(RunStopped,'container_cleanup_failed'):
+                with self.executor.container(self.workspace,worker=True):
+                    pass
+        self.assertFalse(self.executor.worker_stopped)
+
+    def test_uncertain_daemon_cleanup_is_not_reported_as_stopped(self):
+        with patch.object(self.executor,'command',self.process),patch.object(self.executor,'control',side_effect=RunStopped('runtime_failed')):
+            self.assertFalse(self.executor._remove_container('fixture'))
+        with patch.object(self.executor,'command',self.process),patch.object(self.executor,'control',return_value=b'container-id'):
+            self.assertFalse(self.executor._remove_container('fixture'))
+
+    def test_phase_failures_and_signal_codes_are_distinct(self):
+        self.executor.cancelled=15
+        for reason,phase,expected in (('cancelled','session',143),('run_duration_limit','setup',2),
+                                      ('timeout','session',2),('timeout','check',1),(None,'setup',1)):
+            with self.assertRaises(RunStopped) as caught:
+                self.executor.require(ProcessOutput(1,self.root/'out',self.root/'err',0,reason),phase)
+            self.assertEqual(caught.exception.exit_code,expected)
+
+    def test_mount_rejects_ambiguous_paths_and_config_requires_file(self):
+        with self.assertRaises(ValueError):
+            Executor.mount(self.root/'path,with,commas','/workspace')
+        self.config.unlink()
+        with self.assertRaises(ValueError):
+            with self.executor.container(self.workspace,worker=True):
+                self.fail('invalid mount accepted')
+
+
+if __name__=='__main__':
+    unittest.main()
