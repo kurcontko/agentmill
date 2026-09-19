@@ -22,7 +22,6 @@ Usage:
   mill run --spec run.json --json
   mill show RUN_ID                  Inspect a retained run
   mill diff RUN_ID                  Print its final candidate patch
-  mill legacy COMMAND              Access the old Compose runtime
 
 Set CODEX_API_KEY, ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in your environment.
 Repo defaults to REPO_PATH, then the current directory.
@@ -95,9 +94,6 @@ cmd_build() {
     fi
 }
 
-case "${1:-}" in
-    legacy) shift; exec bash "$MILL_DIR/legacy/mill" "$@" ;;
-esac
 load_env
 case "${1:-}" in
     run) shift; cmd_run "$@" ;;
@@ -105,5 +101,5 @@ case "${1:-}" in
     init) shift; cmd_init "$@" ;;
     build) shift; cmd_build "$@" ;;
     ""|-h|--help|help) usage 0 ;;
-    *) echo "Unknown command: $1 (old commands are under 'mill legacy')." >&2; usage 1 ;;
+    *) echo "Unknown command: $1." >&2; usage 1 ;;
 esac

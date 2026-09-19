@@ -156,15 +156,12 @@ mill --help
 ```
 
 The installed `mill` provides **run, show, and diff** with standard-library runtime
-dependencies. It does not include the checkout-only `build`, `init`, `.env` loader,
-or `legacy` conveniences. Build the image with the checkout's `./mill build` (or
+dependencies. The checkout also provides `build`, `init`, and a `.env` loader.
+Build the image with the checkout's `./mill build` (or
 `docker build -t agentmill:latest /path/to/checkout`), then use the installed CLI
 from any directory. `--image` selects a custom local image; runs record its resolved ID.
 
 - [Native config/auth inputs, JSON specs/events, Python API, and retained records](docs/runner-reference.md)
-- [Release validation, timing evidence, and deliberately deferred work](docs/release-validation.md)
-- [Security finding triage](docs/security-triage.md)
-- [Legacy compatibility](docs/legacy.md)
 
 The Python API and internal record details remain experimental. There is no
 scheduler, graph engine, agent team, daemon, or shared execution environment.

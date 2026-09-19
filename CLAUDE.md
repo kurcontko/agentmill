@@ -1,7 +1,7 @@
 # AgentMill
 
 A small, checked job runner around `codex exec` and `claude -p`. Read README.md for
-the public contract and docs/positioning.md for the product boundary.
+the public contract and docs/runner-reference.md for detailed interfaces.
 
 ## Architecture
 
@@ -13,7 +13,7 @@ the public contract and docs/positioning.md for the product boundary.
 - `agentmill/records.py`: versioned events and atomic terminal outcome.
 - `agentmill/adapters/`: native command construction and final-result parsing only.
 - `agentmill/cli.py`: run, show and diff.
-- `mill`: checkout launcher, image build, optional mission init and legacy dispatch.
+- `mill`: checkout launcher, image build, and optional mission init.
 - `basic_loop.py`: isolated Python launcher for the evolved checked loop.
 
 The supervisor runs on the host. Workers never receive a writable mount of its
@@ -46,8 +46,10 @@ Docker smoke tests use deterministic native CLI fixtures without provider billin
 Real native CLI protocol tests must also exercise the packaged versions. Do not
 add agent-framework, scheduler, review, approval, or provider-registry abstractions.
 
-## Legacy
+## Repository scope
 
-Compose, entrypoint shell scripts, automatic dependency detection, shared memory,
-and multi-agent commands remain under `mill legacy`. Do not bring that machinery
-into the checked runner. Preserve its focused tests while changing shared images.
+Keep one checked runner and its user-facing documentation. Do not restore the
+retired Compose runtime, prompt templates, memory helpers, or automatic Git
+publication. Keep private notes, review transcripts, and per-PR validation journals
+outside tracked files; `.docs/` is ignored for local notes. Summarize validation in
+the PR description instead.

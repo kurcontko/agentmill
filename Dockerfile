@@ -17,7 +17,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ca-certificates \
     curl \
-    expect \
     git \
     jq \
     make \
@@ -46,25 +45,7 @@ WORKDIR /workspace
 ENV UV_PROJECT_ENVIRONMENT=/tmp/agentmill-venv
 RUN chown agent:agent /workspace
 
-# Entrypoints
-COPY entrypoint.sh /entrypoint.sh
-COPY entrypoint-tui.sh /entrypoint-tui.sh
-COPY entrypoint-common.sh /entrypoint-common.sh
-COPY lib/agentmill/sh /lib/agentmill/sh
-COPY setup-claude-config.sh /setup-claude-config.sh
-COPY setup-repo-env.sh /setup-repo-env.sh
-COPY auto-trust.exp /auto-trust.exp
-RUN chmod +x /entrypoint.sh /entrypoint-tui.sh /entrypoint-common.sh /setup-claude-config.sh /setup-repo-env.sh /auto-trust.exp
-
 USER agent
 
-# Pre-configure Claude Code: skip onboarding + trust prompts
-# NOSONAR — bypassPermissions is required for autonomous headless operation inside an isolated container
-RUN mkdir -p /home/agent/.claude && \
-    echo '{"hasCompletedOnboarding":true}' > /home/agent/.claude.json && \
-    echo '{"hasCompletedOnboarding":true,"hasTrustDialogAccepted":true,"hasTrustDialogHooksAccepted":true}' > /home/agent/.claude/claude.json && \
-    echo '{"permissions":{"allow":["Bash","Read","Edit","Write","Glob","Grep"],"defaultMode":"bypassPermissions"}}' > /home/agent/.claude/settings.json
-
-# The host supervisor explicitly selects each container command.
-# Compose explicitly selects the legacy entrypoints.
+# The host supervisor selects each container command and supplies native settings.
 CMD ["bash"]

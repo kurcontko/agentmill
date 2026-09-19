@@ -80,17 +80,7 @@ jobs:
           persist-credentials: false
 
       - name: Run shell test suite
-        run: |
-          set -euo pipefail
-          mapfile -t test_scripts < <(find tests -maxdepth 1 -type f -name 'test_*.sh' | sort)
-          for test_script in "${test_scripts[@]}"; do
-            if [[ "$test_script" == "tests/test_smoke_integration.sh" ]]; then
-              continue
-            fi
-            echo "::group::$test_script"
-            bash "$test_script"
-            echo "::endgroup::"
-          done
+        run: bash tests/test_mill.sh
 
   docker-build:
     name: Docker Build

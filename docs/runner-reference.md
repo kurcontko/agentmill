@@ -177,4 +177,4 @@ outcome = run(RunSpec(
 
 The Python package has no runtime dependencies and can be installed with
 `pip install .`; its `mill` entrypoint provides `run`, `show`, and `diff`. Image
-building and optional `init`/`legacy` conveniences live in the checkout's `./mill`.
+building and optional `init` convenience live in the checkout's `./mill`.

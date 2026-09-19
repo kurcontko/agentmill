@@ -40,5 +40,3 @@ Only the latest release on the `main` branch is actively supported with security
 - Captures exclude ignored new files and a documented set of credential filenames.
   They are not a secret scanner. Tracked sensitive files, logs, native configuration,
   and retained workspaces require appropriate handling before sharing artifacts.
-- The legacy Compose runtime has a different boundary and uses Claude's
-  `--dangerously-skip-permissions`. See the legacy documentation before using it.
