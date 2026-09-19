@@ -57,7 +57,6 @@ class Executor:
 
     def command(self, argv, stdout, stderr, timeout, *, stdin=None, env=None, maintenance=False, cwd=None):
         start = time.monotonic()
-        phase_deadline = start + timeout
         reason = None
         process = None
         self.guard(maintenance=maintenance)
@@ -67,8 +66,11 @@ class Executor:
             input_stream = open(stdin, "rb") if stdin else None
             try:
                 self.guard(maintenance=maintenance)
-                deadline = min(phase_deadline, self.finalize_deadline
-                               if maintenance and self.finalize_deadline is not None else self.deadline)
+                budget_deadline = (self.finalize_deadline
+                                   if maintenance and self.finalize_deadline is not None else self.deadline)
+                # None omits only the per-command cap; the enclosing budget is finite.
+                phase_deadline = start + timeout if timeout is not None else budget_deadline
+                deadline = min(phase_deadline, budget_deadline)
                 process = subprocess.Popen(argv, stdin=input_stream or subprocess.DEVNULL,
                                            stdout=out, stderr=err, env=env, cwd=cwd, start_new_session=True)
                 while process.poll() is None:
@@ -155,25 +157,22 @@ class Executor:
                         raise ValueError(f"{field} must be a regular file")
                     argv += self.mount(path, target, True)
         argv += ["--entrypoint", "sleep", self.image, "infinity"]
-        attempted = False
         try:
-            attempted = True
             if worker:
                 self.worker_stopped = False
             self.control(argv)
             self.control(["docker", "start", name])
             yield Container(self, name)
         finally:
-            if attempted:
-                primary = sys.exception()
-                # Never merely kill docker exec: the daemon owns the worker processes.
-                stopped = self._remove_container(name)
-                if worker:
-                    self.worker_stopped = stopped
-                if not stopped:
-                    self.errors.append(f"container_cleanup_failed: shutdown of {name} could not be confirmed")
-                    if primary is None:
-                        raise RunStopped("container_cleanup_failed")
+            primary = sys.exception()
+            # Even a failed create client may have created a daemon-owned container.
+            stopped = self._remove_container(name)
+            if worker:
+                self.worker_stopped = stopped
+            if not stopped:
+                self.errors.append(f"container_cleanup_failed: shutdown of {name} could not be confirmed")
+                if primary is None:
+                    raise RunStopped("container_cleanup_failed")
 
     def _remove_container(self, name):
         folder = self.directory / "operations"

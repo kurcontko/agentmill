@@ -64,7 +64,7 @@ class Workspace:
         env = dict(self.env)
         if index:
             env["GIT_INDEX_FILE"] = str(index)
-        return self.executor.control([*argv, *map(str, args)], env=env, maintenance=maintenance)
+        return self.executor.control([*argv, *map(str, args)], timeout=None, env=env, maintenance=maintenance)
 
     def prepare(self, source, revision):
         local = Path(source).expanduser()
@@ -90,7 +90,9 @@ class Workspace:
             raise RunStopped("unsupported_submodule_or_nested_repository")
 
     def checkout(self, revision, destination):
-        self.git("clone", "--no-local", "--no-checkout", "--", self.store, destination, repo=False)
+        # Copy the trusted store's object files without repacking. Never share
+        # writable objects with worker/check code via hardlinks or alternates.
+        self.git("clone", "--local", "--no-hardlinks", "--no-checkout", "--", self.store, destination, repo=False)
         (destination / ".git/info/attributes").write_text("* -filter -ident -text\n")
         self.git("-C", destination, "checkout", "--detach", revision, repo=False)
         self.git("-C", destination, "remote", "remove", "origin", repo=False)

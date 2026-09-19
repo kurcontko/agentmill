@@ -99,6 +99,15 @@ class ExecutorTests(unittest.TestCase):
         self.assertFalse(self.executor.worker_stopped)
         self.assertIn('container_cleanup_failed', ' '.join(self.executor.errors))
 
+    def test_failed_create_still_attempts_cleanup(self):
+        with patch.object(self.executor, 'control', side_effect=RunStopped('runtime_timeout')), \
+             patch.object(self.executor, '_remove_container', return_value=True) as remove:
+            with self.assertRaisesRegex(RunStopped, 'runtime_timeout'):
+                with self.executor.container(self.workspace, worker=True):
+                    self.fail('create did not succeed')
+        remove.assert_called_once()
+        self.assertTrue(self.executor.worker_stopped)
+
     def test_no_subprocess_is_admitted_after_its_budget(self):
         for maintenance in (False, True):
             with self.subTest(maintenance=maintenance):

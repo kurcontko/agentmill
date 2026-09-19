@@ -4,6 +4,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 from agentmill import RunSpec, run
 from agentmill.contracts import RunStopped
@@ -85,6 +86,69 @@ class WorkspaceTests(unittest.TestCase):
         self.executor.worker_stopped = False
         with self.assertRaisesRegex(RunStopped,'worker_running'):
             self.workspace.capture(1)
+
+    def test_git_uses_remaining_budget_past_thirty_seconds(self):
+        now = [0]
+        def advance(_):
+            now[0] += 31
+        process = Mock(returncode=0)
+        process.poll.side_effect = [None, None, 0]
+        self.executor.deadline = 90
+        with patch('agentmill.executor.time.monotonic', lambda: now[0]), \
+             patch('agentmill.executor.time.sleep', advance), \
+             patch('agentmill.executor.subprocess.Popen', return_value=process), \
+             patch.object(self.executor, 'kill_group'):
+            # A simulated slow Git command completes within the run's budget.
+            self.assertEqual(self.workspace.git('rev-parse', 'HEAD'), b'')
+        self.assertEqual(now[0], 62)
+
+    def test_git_still_stops_at_run_or_finalization_deadline(self):
+        for maintenance in (False, True):
+            now = [0]
+            def advance(_):
+                now[0] += 31
+            process = Mock(returncode=0)
+            process.poll.side_effect = [None, None, 0]
+            self.executor.deadline = 90 if maintenance else 20
+            self.executor.finalize_deadline = 20 if maintenance else None
+            with self.subTest(maintenance=maintenance), \
+                 patch('agentmill.executor.time.monotonic', lambda: now[0]), \
+                 patch('agentmill.executor.time.sleep', advance), \
+                 patch('agentmill.executor.subprocess.Popen', return_value=process), \
+                 patch.object(self.executor, 'kill_group'), self.assertRaises(RunStopped) as caught:
+                self.workspace.git('rev-parse', 'HEAD', maintenance=maintenance)
+            self.assertEqual(str(caught.exception), 'runtime_timeout' if maintenance else 'run_duration_limit')
+            self.assertEqual(now[0], 31)
+            if maintenance:
+                self.assertEqual(self.executor.finalize_deadline, 20)
+
+    def test_private_checkouts_copy_objects_without_repacking_or_sharing(self):
+        destination = self.root/'check'
+        control = self.executor.control
+        commands = []
+        def record(argv, **kwargs):
+            commands.append(argv)
+            return control(argv, **kwargs)
+        with patch.object(self.executor, 'control', record):
+            self.workspace.checkout(self.base, destination)
+        clone = next(argv for argv in commands if 'clone' in argv)
+        self.assertIn('--local', clone)
+        self.assertIn('--no-hardlinks', clone)
+        self.assertFalse((destination/'.git/objects/info/alternates').exists())
+        # Worker/check code can overwrite object files. They must be independent
+        # of the supervisor's trusted store and of the other checkout.
+        objects = [path for path in (self.workspace.store/'objects').rglob('*') if path.is_file()]
+        self.assertTrue(objects)
+        for trusted in objects:
+            relative = trusted.relative_to(self.workspace.store/'objects')
+            copied = destination/'.git/objects'/relative
+            self.assertTrue(copied.is_file())
+            self.assertFalse(os.path.samefile(trusted, copied))
+            content = trusted.read_bytes()
+            copied.chmod(0o600)
+            copied.write_bytes(b'hostile check object')
+            self.assertEqual(trusted.read_bytes(), content)
+        self.assertEqual(self.workspace.git('show', self.base+':base.txt'), b'original\r\n')
 
     def test_no_change_candidate_reuses_revision_and_exports_bundle(self):
         self.assertEqual(self.workspace.capture(1),self.base)

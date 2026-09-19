@@ -11,6 +11,12 @@ the current directory, and may be a regular checkout, Git URL, or exported bundl
 The selected revision is resolved once and retained. Uncommitted source changes
 are never imported. Explicit flags override fields in `--spec`.
 
+Host Git commands use the enclosing run or finalization deadline, rather than a
+fixed per-command timeout. Initial source cloning remains independent of the
+source object store. Worker and check checkouts copy objects from the private
+snapshot store with `--local --no-hardlinks`: no repacking, shared object
+alternates, or writable hardlinks to the supervisor's store.
+
 The checkout's `./mill` launcher can load environment defaults from its own `.env`;
 the installed Python entrypoint does not. Both accept `CHECK_CMD` and
 `AGENTMILL_IMAGE` from their environment. Choose `--setup` explicitly for the
@@ -100,7 +106,12 @@ that failure. Partial exports are not advertised as completed artifacts.
 The self-contained bundle includes
 `agentmill-base`, `agentmill-candidate`, and, when available, `agentmill-passing`
 refs; its `HEAD` identifies the latest candidate, so it can be the source of a new
-run. Importing, merging, committing to your branch, and pushing are explicit
+run. It carries reachable history rather than requiring an external base commit.
+Bundle creation shares the single 30-second finalization allowance with cleanup
+and capture. Large repositories can exceed it; required export failure is reported
+as non-success, with the captured candidate and workspace retained. There is no
+claim-only or patch-only fallback that silently converts that failure to success.
+Importing, merging, committing to your branch, and pushing are explicit
 user or ADE actions. For example, inspect a result in another directory:
 
 ```bash

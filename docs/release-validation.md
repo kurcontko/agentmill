@@ -82,6 +82,32 @@ was not repeated and does not validate these new execution changes against a
 provider. Unrelated local resource-limit/source-URL changes were left untouched
 and excluded from this patch and its isolated validation checkout.
 
+### Git-budget review follow-up (after `507dcce`)
+
+Inspected PR head `507dcce63fa241d9826a8d5292b05da377c75cdc`, with the same
+`bd27cfc` stacked base. Its tests and separate Sonar gate passed; its automated
+model review subsequently failed by exhausting the configured 40-turn limit.
+That review failure is not a passing review and was not manually rerun.
+
+Ordinary Git commands now use the remaining run budget. Maintenance Git commands
+remain bounded by the single finalization allowance. Private worker/check clones
+copy object files with `--local --no-hardlinks`, avoiding repacking without sharing
+writable objects. The redundant container-attempt flag was removed; failed create
+calls still trigger cleanup. The capture-interruption fix in `507dcce` remains.
+
+Fresh validation: **81 unit tests passed**; a rebuilt, independently installed
+wheel passed all **12 Docker lifecycle/auth-routing scenarios**. New tests advance
+a simulated clock beyond 30 seconds, enforce run/finalization deadlines, overwrite
+copied checkout objects to prove store isolation, and require cleanup after a failed
+create. Compilation, ShellCheck, and whitespace checks passed. No live worker calls
+or real large-repository benchmark were performed; the timing regression verifies
+deadline policy, not throughput on a CPython-sized repository.
+
+The self-contained, full-history bundle and fixed finalization allowance are
+unchanged. Large exports can still fail honestly while retaining the captured
+candidate and workspace. Incremental bundles would change direct-clone and
+next-run-source behavior; that artifact-contract change is deferred.
+
 ### Commands and acceptance boundaries
 
 Run existing suites; do not expand this into a benchmark or orchestration project:

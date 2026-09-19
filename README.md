@@ -118,6 +118,12 @@ admits no new subprocess, including Git export. These are supervisor
 policies, not strict wall-clock guarantees under kernel/filesystem stalls or a
 dead Docker daemon. Cleanup uncertainty is reported, never treated as success.
 
+Host Git operations use the remaining run budget, without a separate 30-second
+command cap. Finalization still has the single 30-second allowance. The bundle is
+self-contained and includes history; a sufficiently large export can exceed that
+allowance. Required export failure prevents checked completion and leaves the
+captured candidate and workspace available for inspection.
+
 ## Setup and trust
 
 Setup runs in fresh containers: once for the baseline, once per worker session,
