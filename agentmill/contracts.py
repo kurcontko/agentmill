@@ -143,6 +143,7 @@ class RunOutcome:
     base_revision: str | None = None
     latest_candidate_sha: str | None = None
     last_passing_candidate_sha: str | None = None
+    candidate_check_status: str = "unchecked"
     agent_reply: dict | None = None
     sessions: int = 0
     checks: list[dict] = field(default_factory=list)

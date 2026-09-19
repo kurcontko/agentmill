@@ -52,6 +52,7 @@ def run_session(spec, executor, workspace, records, outcome, command, directory,
             raise RunStopped("capture_unsafe_worker_running")
         candidate = workspace.capture(outcome.sessions, maintenance=executor.finalize_deadline is not None)
         outcome.latest_candidate_sha = candidate
+        outcome.candidate_check_status = "unchecked"
     except RUN_ERRORS as error:
         outcome.errors.append(f"candidate capture failed: {error}; artifacts cover only the last captured "
                               f"revision {outcome.latest_candidate_sha}; uncaptured work remains in {workspace.path}")
@@ -157,7 +158,7 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
             command = adapter.build_command(SessionRequest(spec.model, spec.profile, bool(spec.agent_config)))
             atomic_json(directory / "command.json", {"argv": command.argv, "stdin": command.stdin,
                                                      "reply_path": command.reply_path})
-            records.emit("session.started", session=session, max_sessions=spec.max_sessions)
+            records.emit("session.started", session=session, max_sessions=spec.max_sessions, logs=str(directory))
             reply, candidate = run_session(spec, executor, workspace, records, outcome, command, directory, inputs)
             if executor.cancelled:
                 executor.guard()

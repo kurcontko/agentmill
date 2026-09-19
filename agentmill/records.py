@@ -56,4 +56,7 @@ class Records:
         self.emit("run.finished", status=outcome.status, stop_reason=outcome.stop_reason,
                   exit_code=outcome.exit_code, outcome=str(path),
                   latest_candidate_sha=outcome.latest_candidate_sha,
-                  last_passing_candidate_sha=outcome.last_passing_candidate_sha)
+                  last_passing_candidate_sha=outcome.last_passing_candidate_sha,
+                  candidate_check_status=outcome.candidate_check_status,
+                  sessions=outcome.sessions, agent_reply=outcome.agent_reply,
+                  artifacts=outcome.artifacts, errors=outcome.errors)

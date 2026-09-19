@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -149,11 +150,13 @@ with patch('agentmill.runner.Workspace.prepare', wait_for_cancel):
         directory=self.root/run_id
         directory.mkdir()
         outcome=RunOutcome(run_id,status='checked_complete',stop_reason='checked_complete',exit_code=0)
+        outcome.artifacts['patch'] = str(directory/'artifacts/result.patch')
         atomic_json(directory/'outcome.json',outcome.to_dict())
-        stdout=io.StringIO()
-        with contextlib.redirect_stdout(stdout):
+        stdout,stderr=io.StringIO(),io.StringIO()
+        with contextlib.redirect_stdout(stdout),contextlib.redirect_stderr(stderr):
             self.assertEqual(main(['show',run_id,'--runs-dir',str(self.root)]),0)
-        self.assertIn('checked_complete',stdout.getvalue())
+        self.assertEqual(stdout.getvalue(), '')
+        self.assertIn('checked_complete',stderr.getvalue())
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(main(['diff',run_id,'--runs-dir',str(self.root)]),1)
         (directory/'artifacts').mkdir()
@@ -164,6 +167,78 @@ with patch('agentmill.runner.Workspace.prepare', wait_for_cancel):
         with patch('sys.stdout',output):
             self.assertEqual(main(['diff',run_id,'--runs-dir',str(self.root)]),0)
         self.assertEqual(output.buffer.getvalue(),b'fixture patch')
+
+    def test_human_result_commands_use_real_storage_and_artifacts(self):
+        root = self.root / "custom run's storage"
+        run_id = 'r_' + 'c'*16
+        directory = root / run_id
+        artifacts = directory / 'artifacts'
+        artifacts.mkdir(parents=True)
+        patch_path = artifacts / 'result.patch'
+        patch_path.write_bytes(b'actual patch')
+        bundle = artifacts / 'result.bundle'
+        bundle.touch()
+        outcome = RunOutcome(run_id, status='checked_complete', stop_reason='checked_complete', exit_code=0,
+            latest_candidate_sha='candidate', last_passing_candidate_sha='candidate', sessions=1,
+            candidate_check_status='passed',
+            agent_reply={'status':'done', 'summary':'Fixed the retry bug.', 'question':None, 'next_step':None},
+            checks=[{'session':1, 'candidate_sha':'candidate', 'status':'passed'}],
+            artifacts={'run_directory':str(directory), 'workspace':str(directory/'workspace'),
+                       'patch':str(patch_path), 'bundle':str(bundle)})
+        record = {'event':'run.finished', 'outcome':str(directory/'outcome.json'), **outcome.to_dict()}
+        stdout,stderr=io.StringIO(),io.StringIO()
+        with contextlib.redirect_stdout(stdout),contextlib.redirect_stderr(stderr):
+            human_event(record)
+        text = stderr.getvalue()
+        self.assertEqual(stdout.getvalue(), '')
+        for expected in ('Fixed the retry bug.', 'passed', str(patch_path), str(bundle), str(directory)):
+            self.assertIn(expected, text)
+        atomic_json(directory/'outcome.json', outcome.to_dict())
+        commands = {}
+        for line in text.splitlines():
+            if line.startswith(('Show: ', 'Diff: ')):
+                name, command = line.split(': ', 1)
+                args = shlex.split(command)
+                self.assertEqual(args[0], 'mill')
+                self.assertIn(str(root.resolve()), args)
+                commands[name] = args[1:]
+        self.assertEqual(set(commands), {'Show', 'Diff'})
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main(commands['Show']), 0)
+        class Output:
+            buffer = io.BytesIO()
+        with patch('sys.stdout', Output()):
+            self.assertEqual(main(commands['Diff']), 0)
+            self.assertEqual(sys.stdout.buffer.getvalue(), b'actual patch')
+
+    def test_blocked_result_shows_question_unchecked_candidate_and_missing_patch(self):
+        event = dict(event='run.finished', run_id='r_'+'d'*16, outcome=str(self.root/'outcome.json'),
+            status='blocked', stop_reason='agent_blocked', sessions=1,
+            latest_candidate_sha='new', last_passing_candidate_sha='old',
+            candidate_check_status='unchecked',
+            agent_reply={'summary':'Need clarification.', 'question':'Which API contract?', 'next_step':None},
+            checks=[{'candidate_sha':'old', 'session':0, 'status':'passed'}],
+            artifacts={'workspace':str(self.root/'workspace')}, errors=['export unavailable'])
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            human_event(event)
+        text = stderr.getvalue()
+        for expected in ('Which API contract?', 'unchecked', 'export unavailable', str(self.root/'workspace')):
+            self.assertIn(expected, text)
+        self.assertNotIn('Diff:', text)
+        self.assertNotIn('git clone', text)
+
+    def test_partial_export_is_not_advertised_as_a_final_patch(self):
+        run_id = 'r_' + 'e'*16
+        directory = self.root / run_id
+        (directory/'artifacts').mkdir(parents=True)
+        (directory/'artifacts/result.patch').write_text('partial export')
+        outcome = RunOutcome(run_id, stop_reason='artifact_export_failed')
+        atomic_json(directory/'outcome.json', outcome.to_dict())
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(main(['diff', run_id, '--runs-dir', str(self.root)]), 1)
+        self.assertIn('no exported patch', stderr.getvalue())
 
     def test_human_events_do_not_write_stdout(self):
         events=[dict(event='run.started',run_id='fixture',source='source',revision='HEAD',workspace='workspace',

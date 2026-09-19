@@ -138,6 +138,7 @@ class BasicLoopTests(unittest.TestCase):
                 self.assertEqual((imported / 'value').read_text(), 'fixed\n')
                 self.assertEqual((imported / 'new.txt').read_text(), 'new file\n')
                 self.assertEqual((imported / 'binary.dat').read_bytes(), b'\x00\xff\x01')
+                subprocess.run(['bash', '-ec', self.spec.checks[0]], cwd=imported, check=True)
                 for excluded in ('.env', 'ignored.tmp', 'staged', 'untracked'):
                     self.assertFalse((imported / excluded).exists())
                 subprocess.run(['git', '-C', str(imported), 'checkout', '-q', outcome.base_revision], check=True)
@@ -165,6 +166,7 @@ class BasicLoopTests(unittest.TestCase):
             self.assertEqual(outcome.last_passing_candidate_sha, outcome.base_revision)
             self.assertNotEqual(outcome.latest_candidate_sha, outcome.base_revision)
             self.assertFalse((self.run_dir / 'checks/0001').exists())
+            self.assertEqual(outcome.candidate_check_status, 'unchecked')
 
     def test_one_session_is_a_hard_limit_for_a_continuing_reply(self):
         self.set_mode('continue')
@@ -265,6 +267,12 @@ class BasicLoopTests(unittest.TestCase):
             outcome = self.launch(checks=('exec agentmill-nonexistent-command',))
         self.assertEqual(outcome.stop_reason, 'check_command_unavailable')
         self.assertIn('check record unavailable', ' '.join(outcome.errors))
+
+    def test_partial_check_set_is_not_a_passing_candidate(self):
+        outcome = self.launch(checks=('true', 'exec agentmill-nonexistent-command'))
+        self.assertEqual(outcome.stop_reason, 'check_command_unavailable')
+        self.assertEqual(outcome.checks[0]['status'], 'passed')
+        self.assertEqual(outcome.candidate_check_status, 'error')
 
     def test_both_adapters_protocol_and_process_failures_capture_work(self):
         for mode in ('malformed', 'missing_terminal', 'native_error', 'bad_schema', 'crash'):

@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import sys
 
 from .contracts import RunSpec
@@ -58,6 +59,43 @@ def parser():
     return root
 
 
+def human_result(value, directory):
+    directory = Path(directory).resolve()
+    candidate = value.get("latest_candidate_sha")
+    check_status = value.get("candidate_check_status", "unknown (see recorded checks)")
+    lines = [f"Run: {value['run_id']}", f"Result: {value['status']} ({value['stop_reason']})"]
+    reply = value.get("agent_reply") or {}
+    for field, label in (("summary", "Agent summary"), ("question", "Question"), ("next_step", "Next step")):
+        if reply.get(field):
+            lines.append(f"{label}: {reply[field]}")
+    lines += [f"Latest captured candidate: {candidate or 'none'}",
+              f"Candidate checks: {check_status}",
+              f"Last passing candidate: {value.get('last_passing_candidate_sha') or 'none'}",
+              f"Outcome: {directory / 'outcome.json'}", f"Run files/logs: {directory}"]
+    for label, path in (("Baseline logs", directory / "baseline"),
+                        ("Session logs", directory / "sessions" / f"{value.get('sessions', 0):04d}"),
+                        ("Execution logs", directory / "operations")):
+        if path.is_dir():
+            lines.append(f"{label}: {path}")
+    artifacts = value.get("artifacts", {})
+    if artifacts.get("workspace"):
+        lines.append(f"Retained workspace: {artifacts['workspace']}")
+    def inspect_command(command):
+        return shlex.join(["mill", command, value["run_id"], "--runs-dir", str(directory.parent)])
+    lines.append(f"Show: {inspect_command('show')}")
+    if artifacts.get("patch") and Path(artifacts["patch"]).is_file():
+        lines += [f"Patch: {artifacts['patch']}", f"Diff: {inspect_command('diff')}"]
+    else:
+        lines.append("No exported patch; inspect retained work and diagnostics.")
+    if artifacts.get("bundle") and Path(artifacts["bundle"]).is_file():
+        lines.append(f"Bundle: {artifacts['bundle']}")
+        command = shlex.join(["git", "clone", "--branch", "agentmill-candidate", "--",
+                              artifacts["bundle"], f"./review-{value['run_id']}"])
+        lines.append(f"Clean review checkout: {command}")
+    lines.extend(f"Diagnostic: {error}" for error in value.get("errors", []))
+    return "\n".join(lines)
+
+
 def human_event(event, sink=None):
     kind = event["event"]
     if kind == "run.started":
@@ -65,9 +103,12 @@ def human_event(event, sink=None):
                    f"Workspace: {event['workspace']}\nAgent:     {event['agent']}\n"
                    f"Limits:    {event['max_sessions']} sessions, {event['max_duration']:g}s total; "
                    f"setup {event['setup_timeout']:g}s, session {event['session_timeout']:g}s, "
-                   f"check {event['check_timeout']:g}s\n{event['input_policy']}")
+                   f"check {event['check_timeout']:g}s\n{event['input_policy']}\n"
+                   f"Preparing source and baseline; run files: {Path(event['workspace']).parent}")
     elif kind == "session.started":
         message = f"\nSession {event['session']}/{event['max_sessions']}"
+        if event.get("logs"):
+            message += f"\n  Session logs: {event['logs']}"
     elif kind == "session.finished" and event.get("agent_status"):
         message = f"  Agent claim: {event['agent_status']}"
     elif kind == "candidate.captured":
@@ -77,10 +118,7 @@ def human_event(event, sink=None):
         label = "Baseline" if not event["session"] else "  Check"
         message = f"{label}: {event['status']} — {event['command']}"
     elif kind == "run.finished":
-        message = (f"\nResult: {event['status']} ({event['stop_reason']})\n"
-                   f"Candidate: {event['latest_candidate_sha'] or 'none'}\n"
-                   f"Last passing: {event['last_passing_candidate_sha'] or 'none'}\n"
-                   f"Outcome: {event['outcome']}\nDiff: mill diff {event['run_id']}")
+        message = "\n" + human_result(event, Path(event["outcome"]).parent)
     else:
         return
     (sink or OutputSink(sys.stderr)).write(message)
@@ -137,19 +175,15 @@ def inspect_run(args):
     else:
         value = json.loads(path.read_text())
     if args.command == "diff":
-        patch = directory / "artifacts/result.patch"
-        if not patch.is_file():
+        exported = value.get("artifacts", {}).get("patch")
+        if not exported or not Path(exported).is_file():
             raise ValueError("run has no exported patch; inspect its outcome and preserved workspace")
-        sys.stdout.buffer.write(patch.read_bytes())
+        sys.stdout.buffer.write(Path(exported).read_bytes())
     elif args.json:
         print(json.dumps(value))
     else:
-        print(f"Run: {value['run_id']}\nResult: {value['status']} ({value['stop_reason']})")
-        for name in ("base_revision", "latest_candidate_sha", "last_passing_candidate_sha", "agent_reply", "artifacts", "errors"):
-            if value.get(name) is not None:
-                print(f"{name}: {json.dumps(value[name])}")
-        for result in value.get("checks", []):
-            print(f"Check [{result['candidate_sha'][:12]}]: {result['status']} — {result['command']}")
+        with suppress(OSError):
+            OutputSink(sys.stderr).write(human_result(value, directory))
     return 0
 
 
@@ -171,7 +205,7 @@ def main(argv=None):
             else:
                 human_event(event, output)
         outcome = run(spec, on_event=emit, runs_dir=args.runs_dir)
-        for error in outcome.errors:
+        for error in outcome.errors if args.json else ():
             with suppress(OSError):
                 diagnostics.write(error)
         return outcome.exit_code

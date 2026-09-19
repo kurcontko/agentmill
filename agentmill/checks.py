@@ -8,6 +8,8 @@ from .records import atomic_json
 
 
 def check_candidate(spec, executor, workspace, records, outcome, revision, session=0):
+    # A partial check set must never be displayed as a passing candidate.
+    outcome.candidate_check_status = "error"
     directory = records.directory / (f"sessions/{session:04d}" if session else "baseline")
     directory.mkdir(parents=True, exist_ok=True)
     checkout = records.directory / "checks" / (f"{session:04d}")
@@ -51,6 +53,7 @@ def check_candidate(spec, executor, workspace, records, outcome, revision, sessi
         passed = all(result["status"] == "passed" for result in results)
         if passed:
             outcome.last_passing_candidate_sha = revision
+        outcome.candidate_check_status = "passed" if passed else "failed"
         return passed, results
     finally:
         primary = sys.exception()
