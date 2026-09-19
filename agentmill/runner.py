@@ -50,9 +50,20 @@ def run_session(spec, executor, workspace, records, outcome, command, directory,
     try:
         if not executor.worker_stopped:
             raise RunStopped("capture_unsafe_worker_running")
-        candidate = workspace.capture(outcome.sessions, maintenance=executor.finalize_deadline is not None)
+        maintenance = executor.finalize_deadline is not None
+        try:
+            candidate = workspace.capture(outcome.sessions, maintenance=maintenance)
+        except RunStopped as error:
+            if maintenance or str(error) not in ("cancelled", "run_duration_limit"):
+                raise
+            # Interruption can arrive between capture's Git commands. Restart once
+            # against the same stopped workspace using the remaining finalization budget.
+            primary = primary or error
+            executor.finalize()
+            candidate = workspace.capture(outcome.sessions, maintenance=True)
+        if candidate != outcome.latest_candidate_sha:
+            outcome.candidate_check_status = "unchecked"
         outcome.latest_candidate_sha = candidate
-        outcome.candidate_check_status = "unchecked"
     except RUN_ERRORS as error:
         outcome.errors.append(f"candidate capture failed: {error}; artifacts cover only the last captured "
                               f"revision {outcome.latest_candidate_sha}; uncaptured work remains in {workspace.path}")

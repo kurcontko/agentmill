@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import signal
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -242,6 +243,44 @@ with patch('agentmill.runner.Workspace.prepare', wait_for_cancel):
             self.assertIn(expected, text)
         self.assertNotIn('Diff:', text)
         self.assertNotIn('git clone', text)
+
+    def test_source_only_launcher_prints_executable_inspection_commands(self):
+        source = Path(__file__).resolve().parents[1]
+        checkout = self.root / "source checkout's launcher"
+        checkout.mkdir()
+        for name in ('mill', 'basic_loop.py'):
+            shutil.copy2(source/name, checkout/name)
+        (checkout/'agentmill').symlink_to(source/'agentmill', target_is_directory=True)
+        # No installed mill, native clients, or user environment on PATH.
+        binaries = self.root/'bin'
+        binaries.mkdir()
+        for name, executable in (('bash', '/bin/bash'), ('dirname', '/usr/bin/dirname'),
+                                 ('python3', sys.executable)):
+            (binaries/name).symlink_to(executable)
+        env = {'PATH':str(binaries), 'HOME':str(self.root)}
+        self.assertIsNone(shutil.which('mill', path=env['PATH']))
+        run_id = 'r_' + 'f'*16
+        storage = self.root/"run storage's directory"
+        directory = storage/run_id
+        directory.mkdir(parents=True)
+        patch_path = directory/'result.patch'
+        patch_path.write_text('retained patch')
+        outcome = RunOutcome(run_id, artifacts={'patch':str(patch_path)})
+        atomic_json(directory/'outcome.json', outcome.to_dict())
+        for launcher in ([str(checkout/'mill')], [sys.executable, '-m', 'agentmill'],
+                         [sys.executable, '-m', 'agentmill.cli']):
+            result = subprocess.run([*launcher, 'show', run_id, '--runs-dir', str(storage)],
+                                    cwd=checkout, env=env, text=True, capture_output=True, check=True, timeout=5)
+            commands = dict(line.split(': ', 1) for line in result.stderr.splitlines()
+                            if line.startswith(('Show: ', 'Diff: ')))
+            self.assertEqual(set(commands), {'Show', 'Diff'})
+            for name, command in commands.items():
+                with self.subTest(command=name):
+                    inspected = subprocess.run(['/bin/sh', '-c', command], cwd=checkout, env=env,
+                                               text=True, capture_output=True, timeout=5)
+                    self.assertEqual(inspected.returncode, 0, inspected.stderr)
+                    if name == 'Diff':
+                        self.assertEqual(inspected.stdout, 'retained patch')
 
     def test_partial_export_is_not_advertised_as_a_final_patch(self):
         run_id = 'r_' + 'e'*16

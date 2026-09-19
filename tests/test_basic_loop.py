@@ -175,6 +175,89 @@ class BasicLoopTests(unittest.TestCase):
             self.assertEqual((outcome.sessions, outcome.stop_reason, outcome.exit_code), (1, 'session_limit', 2))
             self.assertEqual((self.run_dir / 'workspace/iteration').read_text(), '1')
 
+    def test_interrupted_capture_retries_once_with_finalization_budget(self):
+        capture, git = Workspace.capture, Workspace.git
+        for backend in ('codex', 'claude'):
+            for cancel in (False, True):
+                calls = []
+                def record_capture(workspace, session, *, maintenance=False):
+                    calls.append(maintenance)
+                    return capture(workspace, session, maintenance=maintenance)
+                def interrupt_git(workspace, *args, **kwargs):
+                    result = git(workspace, *args, **kwargs)
+                    if calls and args[0] == 'read-tree' and not kwargs.get('maintenance'):
+                        if cancel:
+                            workspace.executor.cancel(signal.SIGINT)
+                        else:
+                            workspace.executor.deadline = 0
+                    return result
+                with self.subTest(backend=backend, cancel=cancel), \
+                     patch.object(Workspace, 'capture', record_capture), patch.object(Workspace, 'git', interrupt_git):
+                    outcome = self.launch(backend)
+                    self.assertEqual(calls, [False, True])
+                    self.assertEqual((outcome.stop_reason, outcome.exit_code),
+                                     ('cancelled', 130) if cancel else ('run_duration_limit', 2))
+                    self.assertNotEqual(outcome.latest_candidate_sha, outcome.base_revision)
+                    self.assertTrue(Path(outcome.artifacts['patch']).stat().st_size)
+                    self.assertEqual([check['session'] for check in outcome.checks], [0])
+                    self.assertFalse(any('capture failed' in error for error in outcome.errors))
+
+    def test_capture_retry_failure_preserves_original_interruption(self):
+        calls = []
+        def fail_capture(workspace, session, *, maintenance=False):
+            calls.append(maintenance)
+            if not maintenance:
+                workspace.executor.deadline = 0
+                raise RunStopped('run_duration_limit', 2)
+            raise OSError('retry storage unavailable')
+        with patch.object(Workspace, 'capture', fail_capture):
+            outcome = self.launch()
+        self.assertEqual(calls, [False, True])
+        self.assertEqual((outcome.stop_reason, outcome.exit_code), ('run_duration_limit', 2))
+        self.assertIn('retry storage unavailable', ' '.join(outcome.errors))
+        self.assertEqual(outcome.latest_candidate_sha, outcome.base_revision)
+
+    def test_capture_already_finalizing_is_not_retried(self):
+        self.set_mode('blocked')
+        with patch.object(Workspace, 'capture', side_effect=RunStopped('run_duration_limit', 2)) as capture:
+            outcome = self.launch()
+        self.assertEqual(capture.call_count, 1)
+        self.assertTrue(capture.call_args.kwargs['maintenance'])
+        self.assertEqual(outcome.stop_reason, 'run_duration_limit')
+
+    def test_unchanged_continuing_candidate_is_still_rechecked(self):
+        self.set_mode('continue_unchanged')
+        for backend in ('codex', 'claude'):
+            outcome = self.launch(backend, checks=('true',), max_sessions=1)
+            self.assertEqual(outcome.stop_reason, 'session_limit')
+            self.assertEqual(outcome.latest_candidate_sha, outcome.base_revision)
+            self.assertEqual([check['session'] for check in outcome.checks], [0, 1])
+
+    def test_unchanged_blocked_candidate_retains_historical_check_evidence(self):
+        self.set_mode('blocked_unchanged')
+        for backend in ('codex', 'claude'):
+            outcome = self.launch(backend, checks=('true',))
+            self.assertEqual((outcome.stop_reason, outcome.exit_code), ('agent_blocked', 3))
+            self.assertEqual(outcome.latest_candidate_sha, outcome.base_revision)
+            self.assertEqual(outcome.last_passing_candidate_sha, outcome.base_revision)
+            self.assertEqual(outcome.candidate_check_status, 'passed')
+            self.assertEqual([check['session'] for check in outcome.checks], [0])
+
+    def test_cancellation_during_export_keeps_evidence_and_signal_exit(self):
+        self.set_mode('done')
+        export = Workspace.export
+        def cancel_after_export(workspace, passing):
+            artifacts = export(workspace, passing)
+            workspace.executor.cancel(signal.SIGTERM)
+            return artifacts
+        with patch.object(Workspace, 'export', cancel_after_export):
+            outcome = self.launch()
+        self.assertEqual((outcome.stop_reason, outcome.exit_code), ('cancelled', 143))
+        self.assertEqual(outcome.latest_candidate_sha, outcome.last_passing_candidate_sha)
+        self.assertEqual(outcome.candidate_check_status, 'passed')
+        self.assertTrue(Path(outcome.artifacts['bundle']).is_file())
+        self.assertIn('cancelled while handling: checked_complete', outcome.errors)
+
     def test_primary_native_failure_survives_capture_and_export_failures(self):
         for mode, reason in (('crash', 'session_failed'), ('missing_terminal', 'invalid_native_terminal')):
             self.set_mode(mode)
@@ -275,7 +358,7 @@ class BasicLoopTests(unittest.TestCase):
         self.assertEqual(outcome.candidate_check_status, 'error')
 
     def test_both_adapters_protocol_and_process_failures_capture_work(self):
-        for mode in ('malformed', 'missing_terminal', 'native_error', 'bad_schema', 'crash'):
+        for mode in ('malformed', 'deep_json', 'missing_terminal', 'native_error', 'bad_schema', 'crash'):
             self.set_mode(mode)
             for backend in ('codex', 'claude'):
                 with self.subTest(mode=mode, backend=backend):

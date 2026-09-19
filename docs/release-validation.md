@@ -2,7 +2,8 @@
 
 ## Reference and scope
 
-Inspected PR #38 at `9d2dd9ee4c01b4c1e57b10c26e2a2568df4adb27`, stacked on
+The original steering brief inspected PR #38 at
+`9d2dd9ee4c01b4c1e57b10c26e2a2568df4adb27`, stacked on
 `split/32-basic-loop` at `bd27cfc315d9cf7ab70082499deb0a01229bbdc9`. All checks,
 including the separate Sonar quality gate and automated review, passed on that
 reference head. The release-candidate changes preserve that stack and its gates.
@@ -12,7 +13,7 @@ two native adapters, private regular checkouts, and supervisor-owned snapshots.
 Only terminal semantics, result inspection, documentation, and release validation
 are in scope. The API and internal records remain experimental.
 
-## Validation performed for this change
+## Validation of the initial release candidate (`1287431`)
 
 Local environment: macOS arm64, Colima, Python 3.13 for coverage and Python 3.14
 for the independently installed package. The unchanged runtime Dockerfile supplies
@@ -45,6 +46,43 @@ A new model-driven full-path run of these changes remains conditional on explici
 authorization. No other OS/architecture or published package/image is claimed.
 
 ## Finite acceptance gate
+
+### Follow-up to the review of `1287431`
+
+The follow-up inspected head `12874319db6eb9ab4e33be9ac168d05b68f62231` with the
+same stacked base. All 17 checks, including the separate Sonar quality gate and
+automated model review, were green on that inspected head. Those results are
+historical evidence, not substituted for checks on the follow-up commit.
+
+The patch retries interrupted capture once within the existing finalization
+allowance, closes cleanup's deadline-admission race, handles native JSON decoder
+recursion failures, retains check evidence for unchanged candidates, and prints
+inspection commands using the actual source, installed, or module entrypoint.
+Cancellation during export still takes the signal-derived exit code.
+
+Fresh local validation of the follow-up:
+
+- **77 unittest tests passed**, approximately **93% coverage**. Focused tests
+  reproduce interrupted capture, failed preservation retry, cleanup admission,
+  unchanged blocked/continuing work, nested JSON, and source-only command lookup.
+  The source-only test executes printed commands with no installed `mill` on PATH.
+- Rebuilt and independently installed the wheel. Imports outside the checkout
+  resolve to `site-packages`; printed `show`/`diff` commands execute without the
+  virtualenv on PATH. Source and both Python module entrypoints also pass.
+- **12 Docker lifecycle scenarios passed through the new installed wheel**,
+  including dummy authentication routing, using the existing
+  `agentmill:pr38-review` image. The stale `agentmill:latest` tag was not used or
+  changed. Colima tests used a copy in its shared host directory because it cannot
+  bind-mount the isolated `/private/tmp` checkout.
+- Both packaged native CLIs passed the offline protocol fixture with networking
+  disabled. ShellCheck, compilation, and `git diff --check` passed.
+
+No provider credits were spent. The earlier live-run and timing evidence below
+was not repeated and does not validate these new execution changes against a
+provider. Unrelated local resource-limit/source-URL changes were left untouched
+and excluded from this patch and its isolated validation checkout.
+
+### Commands and acceptance boundaries
 
 Run existing suites; do not expand this into a benchmark or orchestration project:
 
@@ -103,8 +141,8 @@ The recorded baseline/candidate check-command durations are 0.138/0.092 seconds
 for Codex and 0.143/0.123 seconds for Claude. Setup was not separately timed then;
 these measurements do not establish cold dependency-install performance.
 
-For a fresh breakdown without provider calls, a one-off harness replayed the
-retained fix against that same source task using the current runner. It timed
+For the initial release candidate, a one-off harness replayed the
+retained fix against that same source task without provider calls. It timed
 `Container.setup/session/check` and `Workspace.prepare/capture/export` with a
 monotonic clock. Setup created a new Python virtualenv in each container; checks
 ran the reference unittests. The native fixture replayed the recorded edit and

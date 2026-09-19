@@ -139,8 +139,9 @@ Session/check events identify the session; baseline checks use session 0.
 It identifies the latest captured and last passing revisions independently.
 `candidate_check_status` describes the latest check attempt on the captured
 candidate (`unchecked`, `passed`, `failed`, or `error`); a partial check set cannot
-establish a pass. A blocked reply leaves the new capture unchecked, even if the
-same revision had passed previously. Run completion still requires the full
+establish a pass. A blocked reply leaves a changed capture unchecked. An unchanged
+capture retains the same revision's historical check evidence; non-blocked replies
+still trigger fresh checks, even for an unchanged revision. Run completion requires the full
 completion contract in the README, including cleanup and export.
 The CLI detaches a closed or stalled output stream after a bounded write attempt
 (100 ms per message). A detached JSON stream may end with a partial line. Read

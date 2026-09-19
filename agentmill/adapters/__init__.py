@@ -22,7 +22,7 @@ def events(output):
                     if not isinstance(event, dict):
                         raise ValueError("native event must be an object")
                     yield event
-    except (ValueError, UnicodeError) as error:
+    except (ValueError, UnicodeError, RecursionError) as error:
         raise RunStopped("invalid_native_output") from error
 
 

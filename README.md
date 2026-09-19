@@ -87,8 +87,9 @@ passing revision never establishes completion of newer work.
 A failing baseline can be repaired. Ordinary failing checks become feedback for
 another bounded session; partial work is retained. A valid `blocked` reply stops
 after cleanup and capture, without starting another check environment. Its
-candidate is unchecked, and its question is preserved. Missing executables,
-setup/check infrastructure faults, or malformed native replies stop the run.
+changed candidate is unchecked, and its question is preserved. An unchanged
+candidate retains its historical check evidence; no new checks run for blocked
+work. Missing executables, setup/check infrastructure faults, or malformed native replies stop the run.
 Check exits 126/127 mean unavailable commands; other nonzero exits are repair
 feedback. There is no automatic infrastructure retry or resume.
 
@@ -101,15 +102,19 @@ feedback. There is no automatic infrastructure retry or resume.
 | 130 / 143 | Cancelled by SIGINT / SIGTERM |
 
 An execution failure stays primary when capture or export also fails; secondary
-diagnostics remain visible. Cancellation retains its signal-derived exit code.
+diagnostics remain visible. Cancellation retains its signal-derived exit code,
+including a signal during export after an in-budget success decision; already
+captured artifacts and passing-check evidence remain available.
 Capture requires confirmed worker shutdown. If capture fails, artifacts describe
 only the **last successfully captured** revision; uncaptured work remains in the
 workspace and is identified in diagnostics.
 
 Normal work and the success decision must fit within the run deadline. A single,
 nonrenewing finalization allowance of up to 30 seconds permits cleanup, capture,
-and export after stopping, or export after an in-budget success decision. Expired
-finalization admits no new subprocess, including Git export. These are supervisor
+and export after stopping, or export after an in-budget success decision. If the
+run deadline or cancellation interrupts capture, one retry may use that same
+finalization allowance, after confirmed worker shutdown. Expired finalization
+admits no new subprocess, including Git export. These are supervisor
 policies, not strict wall-clock guarantees under kernel/filesystem stalls or a
 dead Docker daemon. Cleanup uncertainty is reported, never treated as success.
 
@@ -131,8 +136,8 @@ CPU, memory, or disk quotas. Read the [isolation and authentication reference](d
 
 ## Installation and further details
 
-This PR documents a source checkout and a locally built image. It does not require
-a published package or registry image. Validation covers macOS arm64 with Colima
+The supported workflow uses a source checkout and a locally built image. It does
+not require a published package or registry image. Validation covers macOS arm64 with Colima
 and Linux amd64 in CI; other OS/architecture combinations are not release-validated.
 
 To install the Python entrypoint into a virtual environment, from this checkout:

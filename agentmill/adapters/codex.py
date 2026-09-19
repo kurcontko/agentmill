@@ -39,7 +39,7 @@ class Codex:
             raise RunStopped("invalid_native_terminal")
         try:
             reply = AgentReply.parse(json.loads(message))
-        except ValueError as error:
+        except (ValueError, RecursionError) as error:
             raise RunStopped("invalid_agent_reply") from error
         # Interpret the message in the native stream, never a worker-writable reply file alone.
         return reply, {"source": "codex.turn.completed", "usage": terminal.get("usage"),

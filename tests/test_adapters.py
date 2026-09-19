@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from agentmill.adapters import get_adapter
 from agentmill.contracts import AgentReply, ProcessOutput, RunSpec, RunStopped, SessionRequest
@@ -34,6 +35,33 @@ class AdapterTests(unittest.TestCase):
             self.assertEqual(reply, AgentReply(**REPLY))
             self.assertIsNone(telemetry['cost_usd_estimate'])
             self.assertTrue(telemetry['source'].startswith(backend+'.'))
+
+    def test_deeply_nested_native_json_is_a_protocol_failure(self):
+        nested = '[' * 2000 + '0' + ']' * 2000
+        output = self.output([])
+        output.stdout.write_text(nested)
+        for backend in ('codex', 'claude'):
+            with self.subTest(backend=backend), self.assertRaisesRegex(RunStopped, 'invalid_native_output'):
+                get_adapter(backend).parse_result(output)
+        events = self.valid('codex')
+        events[-2]['item']['text'] = nested
+        with self.assertRaisesRegex(RunStopped, 'invalid_agent_reply'):
+            get_adapter('codex').parse_result(self.output(events))
+
+        # Some Python versions decode deeply nested JSON without recursion. Also
+        # exercise the decoder's RecursionError explicitly on those runtimes.
+        decode = json.loads
+        def recursion_limit(text):
+            if text == nested:
+                raise RecursionError('decoder nesting limit')
+            return decode(text)
+        with patch('agentmill.adapters.json.loads', recursion_limit):
+            output.stdout.write_text(nested)
+            for backend in ('codex', 'claude'):
+                with self.assertRaisesRegex(RunStopped, 'invalid_native_output'):
+                    get_adapter(backend).parse_result(output)
+            with self.assertRaisesRegex(RunStopped, 'invalid_agent_reply'):
+                get_adapter('codex').parse_result(self.output(events))
 
     def test_real_packaged_native_terminal_fixtures(self):
         for backend in ('codex','claude'):

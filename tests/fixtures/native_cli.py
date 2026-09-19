@@ -29,21 +29,22 @@ elif Path('expect-auth').exists():
         name = Path('expect-auth-name').read_text()
     assert os.environ.get(name) == Path('expect-auth').read_text()
 mode = Path('mode').read_text().strip()
-count = Path('iteration')
-iteration = int(count.read_text()) + 1 if count.exists() else 1
-count.write_text(str(iteration))
-Path('new.txt').write_text('new file\n')
-Path('binary.dat').write_bytes(b'\x00\xff\x01')
-Path('.env').write_text('FIXTURE_SECRET=excluded\n')
-Path('ignored.tmp').write_text('generated\n')
-if mode == 'repair':
-    if iteration > 1:
-        assert 'Status: failed' in prompt
-    Path('value').write_text('fixed\n' if iteration == 2 else 'partial\n')
-elif mode == 'regress':
-    Path('value').write_text('fixed\n' if iteration == 1 else 'broken\n')
-else:
-    Path('value').write_text('fixed\n')
+if mode not in ('blocked_unchanged', 'continue_unchanged'):
+    count = Path('iteration')
+    iteration = int(count.read_text()) + 1 if count.exists() else 1
+    count.write_text(str(iteration))
+    Path('new.txt').write_text('new file\n')
+    Path('binary.dat').write_bytes(b'\x00\xff\x01')
+    Path('.env').write_text('FIXTURE_SECRET=excluded\n')
+    Path('ignored.tmp').write_text('generated\n')
+    if mode == 'repair':
+        if iteration > 1:
+            assert 'Status: failed' in prompt
+        Path('value').write_text('fixed\n' if iteration == 2 else 'partial\n')
+    elif mode == 'regress':
+        Path('value').write_text('fixed\n' if iteration == 1 else 'broken\n')
+    else:
+        Path('value').write_text('fixed\n')
 if mode == 'git_tamper':
     hook = Path('.git/hooks/post-checkout')
     hook.write_text('#!/bin/sh\ntouch /tmp/agentmill-hook-must-not-run\n')
@@ -62,10 +63,13 @@ if mode == 'hang':
     time.sleep(120)
 if mode == 'crash':
     raise SystemExit(7)
+if mode == 'deep_json':
+    print('[' * 2000 + '0' + ']' * 2000)
+    raise SystemExit(0)
 if mode == 'malformed':
     print('done')
     raise SystemExit(0)
-status = 'continue' if mode in ('continue', 'regress') else 'blocked' if mode == 'blocked' else 'done'
+status = 'continue' if mode in ('continue', 'continue_unchanged', 'regress') else 'blocked' if mode in ('blocked', 'blocked_unchanged') else 'done'
 reply = dict(status=status, summary='Changed value.', next_step=None,
              question='Need the API contract.' if status == 'blocked' else None)
 if mode == 'bad_schema':

@@ -35,8 +35,11 @@ class Executor:
 
     def guard(self, *, maintenance=False):
         if maintenance:
+            now = time.monotonic()
+            if self.finalize_deadline is None and (self.cancelled or now >= self.deadline):
+                self.finalize()
             deadline = self.finalize_deadline if self.finalize_deadline is not None else self.deadline
-            if time.monotonic() >= deadline:
+            if now >= deadline:
                 raise RunStopped("finalization_timeout" if self.finalize_deadline is not None else "run_duration_limit",
                                  1 if self.finalize_deadline is not None else 2)
             return
@@ -55,8 +58,6 @@ class Executor:
     def command(self, argv, stdout, stderr, timeout, *, stdin=None, env=None, maintenance=False, cwd=None):
         start = time.monotonic()
         phase_deadline = start + timeout
-        deadline = min(phase_deadline, self.finalize_deadline
-                       if maintenance and self.finalize_deadline is not None else self.deadline)
         reason = None
         process = None
         self.guard(maintenance=maintenance)
@@ -66,6 +67,8 @@ class Executor:
             input_stream = open(stdin, "rb") if stdin else None
             try:
                 self.guard(maintenance=maintenance)
+                deadline = min(phase_deadline, self.finalize_deadline
+                               if maintenance and self.finalize_deadline is not None else self.deadline)
                 process = subprocess.Popen(argv, stdin=input_stream or subprocess.DEVNULL,
                                            stdout=out, stderr=err, env=env, cwd=cwd, start_new_session=True)
                 while process.poll() is None:

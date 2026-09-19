@@ -59,7 +59,7 @@ def parser():
     return root
 
 
-def human_result(value, directory):
+def human_result(value, directory, launcher=("mill",)):
     directory = Path(directory).resolve()
     candidate = value.get("latest_candidate_sha")
     check_status = value.get("candidate_check_status", "unknown (see recorded checks)")
@@ -81,7 +81,7 @@ def human_result(value, directory):
     if artifacts.get("workspace"):
         lines.append(f"Retained workspace: {artifacts['workspace']}")
     def inspect_command(command):
-        return shlex.join(["mill", command, value["run_id"], "--runs-dir", str(directory.parent)])
+        return shlex.join([*launcher, command, value["run_id"], "--runs-dir", str(directory.parent)])
     lines.append(f"Show: {inspect_command('show')}")
     if artifacts.get("patch") and Path(artifacts["patch"]).is_file():
         lines += [f"Patch: {artifacts['patch']}", f"Diff: {inspect_command('diff')}"]
@@ -96,7 +96,7 @@ def human_result(value, directory):
     return "\n".join(lines)
 
 
-def human_event(event, sink=None):
+def human_event(event, sink=None, launcher=("mill",)):
     kind = event["event"]
     if kind == "run.started":
         message = (f"Run:       {event['run_id']}\nSource:    {event['source']} @ {event['revision']}\n"
@@ -118,7 +118,7 @@ def human_event(event, sink=None):
         label = "Baseline" if not event["session"] else "  Check"
         message = f"{label}: {event['status']} — {event['command']}"
     elif kind == "run.finished":
-        message = "\n" + human_result(event, Path(event["outcome"]).parent)
+        message = "\n" + human_result(event, Path(event["outcome"]).parent, launcher)
     else:
         return
     (sink or OutputSink(sys.stderr)).write(message)
@@ -161,7 +161,7 @@ def make_spec(args):
         raise ValueError(str(error)) from error
 
 
-def inspect_run(args):
+def inspect_run(args, launcher):
     if not re.fullmatch(r"r_[a-f0-9]{16}", args.run_id):
         raise ValueError("invalid run ID")
     directory = (args.runs_dir or runs_root()) / args.run_id
@@ -183,11 +183,12 @@ def inspect_run(args):
         print(json.dumps(value))
     else:
         with suppress(OSError):
-            OutputSink(sys.stderr).write(human_result(value, directory))
+            OutputSink(sys.stderr).write(human_result(value, directory, launcher))
     return 0
 
 
-def main(argv=None):
+def main(argv=None, *, launcher=None):
+    launcher = launcher or (str(Path(sys.argv[0]).absolute()),)
     diagnostics = OutputSink(sys.stderr)
     try:
         args = parser().parse_args(argv)
@@ -196,14 +197,14 @@ def main(argv=None):
         return 0 if error.code == 0 else 1
     try:
         if args.command != "run":
-            return inspect_run(args)
+            return inspect_run(args, launcher)
         spec = make_spec(args)
         output = OutputSink(sys.stdout) if args.json else diagnostics
         def emit(event):
             if args.json:
                 output.write(json.dumps(event))
             else:
-                human_event(event, output)
+                human_event(event, output, launcher)
         outcome = run(spec, on_event=emit, runs_dir=args.runs_dir)
         for error in outcome.errors if args.json else ():
             with suppress(OSError):
@@ -216,4 +217,4 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(launcher=(sys.executable, "-m", "agentmill.cli")))
