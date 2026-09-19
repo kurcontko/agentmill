@@ -1,6 +1,7 @@
 """Checks always start from a captured revision in a fresh environment."""
 
 from pathlib import Path
+import sys
 
 from .contracts import RunStopped
 from .records import atomic_json
@@ -52,9 +53,15 @@ def check_candidate(spec, executor, workspace, records, outcome, revision, sessi
             outcome.last_passing_candidate_sha = revision
         return passed, results
     finally:
-        atomic_json(directory / "checks.json", results)
-        for result in results:
-            records.emit("check.finished", **result)
+        primary = sys.exception()
+        try:
+            atomic_json(directory / "checks.json", results)
+            for result in results:
+                records.emit("check.finished", **result)
+        except (OSError, ValueError) as error:
+            if primary is None:
+                raise
+            executor.errors.append(f"check record failed: {error}")
 
 
 def feedback(results, limit=12000):

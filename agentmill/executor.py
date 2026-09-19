@@ -7,6 +7,7 @@ from pathlib import Path
 import shlex
 import signal
 import subprocess
+import sys
 import time
 import uuid
 
@@ -23,6 +24,7 @@ class Executor:
         self.image = spec.image
         self.operation = 0
         self.worker_stopped = True
+        self.errors = []
 
     def cancel(self, signum, _frame=None):
         self.cancelled = self.cancelled or signum
@@ -31,7 +33,13 @@ class Executor:
         if self.finalize_deadline is None:
             self.finalize_deadline = time.monotonic() + 30
 
-    def guard(self):
+    def guard(self, *, maintenance=False):
+        if maintenance:
+            deadline = self.finalize_deadline if self.finalize_deadline is not None else self.deadline
+            if time.monotonic() >= deadline:
+                raise RunStopped("finalization_timeout" if self.finalize_deadline is not None else "run_duration_limit",
+                                 1 if self.finalize_deadline is not None else 2)
+            return
         if self.cancelled:
             raise RunStopped("cancelled", 128 + self.cancelled)
         if time.monotonic() >= self.deadline:
@@ -47,17 +55,17 @@ class Executor:
     def command(self, argv, stdout, stderr, timeout, *, stdin=None, env=None, maintenance=False, cwd=None):
         start = time.monotonic()
         phase_deadline = start + timeout
-        deadline = min(phase_deadline, (self.finalize_deadline or phase_deadline)
-                       if maintenance else self.deadline)
+        deadline = min(phase_deadline, self.finalize_deadline
+                       if maintenance and self.finalize_deadline is not None else self.deadline)
         reason = None
         process = None
+        self.guard(maintenance=maintenance)
         stdout, stderr = Path(stdout), Path(stderr)
         stdout.parent.mkdir(parents=True, exist_ok=True)
-        if not maintenance:
-            self.guard()
         with stdout.open("wb") as out, stderr.open("wb") as err:
             input_stream = open(stdin, "rb") if stdin else None
             try:
+                self.guard(maintenance=maintenance)
                 process = subprocess.Popen(argv, stdin=input_stream or subprocess.DEVNULL,
                                            stdout=out, stderr=err, env=env, cwd=cwd, start_new_session=True)
                 while process.poll() is None:
@@ -154,23 +162,27 @@ class Executor:
             yield Container(self, name)
         finally:
             if attempted:
+                primary = sys.exception()
                 # Never merely kill docker exec: the daemon owns the worker processes.
                 stopped = self._remove_container(name)
                 if worker:
                     self.worker_stopped = stopped
                 if not stopped:
-                    raise RunStopped("container_cleanup_failed")
+                    self.errors.append(f"container_cleanup_failed: shutdown of {name} could not be confirmed")
+                    if primary is None:
+                        raise RunStopped("container_cleanup_failed")
 
     def _remove_container(self, name):
-        if self.cancelled or time.monotonic() >= self.deadline:
-            self.finalize()
         folder = self.directory / "operations"
-        self.command(["docker", "stop", "--time", "2", name], folder / f"{name}-stop.log",
-                     folder / f"{name}-stop.stderr.log", 5, maintenance=True)
-        self.command(["docker", "rm", "--force", name], folder / f"{name}-rm.log",
-                     folder / f"{name}-rm.stderr.log", 5, maintenance=True)
-        # Listing requires a healthy daemon. A failed inspect alone could mean an outage.
         try:
+            for action, options in (("stop", ("--time", "2")), ("rm", ("--force",))):
+                if self.cancelled or time.monotonic() >= self.deadline:
+                    self.finalize()
+                self.command(["docker", action, *options, name], folder / f"{name}-{action}.log",
+                             folder / f"{name}-{action}.stderr.log", 5, maintenance=True)
+            # Listing requires a healthy daemon. A failed inspect alone could mean an outage.
+            if self.cancelled or time.monotonic() >= self.deadline:
+                self.finalize()
             remaining = self.control(["docker", "ps", "-aq", "--filter", f"name=^/{name}$"],
                                      timeout=5, maintenance=True)
             return not remaining.strip()

@@ -15,6 +15,78 @@ from .records import Records, atomic_json, runs_root
 from .workspace import Workspace
 
 
+RUN_ERRORS = (RunStopped, OSError, ValueError, KeyError)
+
+
+def run_session(spec, executor, workspace, records, outcome, command, directory, inputs):
+    """Stop the worker before capture; preservation must not replace its failure."""
+    output = reply = primary = None
+    try:
+        with executor.container(workspace.path, inputs=inputs, worker=True) as container:
+            container.setup(directory / "worker")
+            version = container.execute(f"source /tmp/agentmill-setup.env; {spec.agent} --version",
+                                        directory, "version", 30)
+            executor.require(version, "agent_executable")
+            outcome.environment["agent_version"] = version.stdout.read_text().strip()
+            output = container.session(command, directory)
+            # Validate before teardown so cleanup cannot replace a native failure.
+            executor.require(output, "session")
+            reply, telemetry = get_adapter(spec.agent).parse_result(output)
+            outcome.agent_reply = asdict(reply)
+        atomic_json(directory / "reply.json", outcome.agent_reply)
+        atomic_json(directory / "telemetry.json", telemetry)
+    except RUN_ERRORS as error:
+        primary = error
+    try:
+        records.emit("session.finished", session=outcome.sessions,
+                     returncode=output.returncode if output else None,
+                     stop_reason=str(primary) if primary else None,
+                     agent_status=(outcome.agent_reply or {}).get("status"))
+    except RUN_ERRORS as error:
+        outcome.errors.append(f"session record failed: {error}")
+        primary = primary or error
+    if primary or (reply and reply.status == "blocked") or executor.cancelled or executor.deadline <= time.monotonic():
+        executor.finalize()
+    try:
+        if not executor.worker_stopped:
+            raise RunStopped("capture_unsafe_worker_running")
+        candidate = workspace.capture(outcome.sessions, maintenance=executor.finalize_deadline is not None)
+        outcome.latest_candidate_sha = candidate
+    except RUN_ERRORS as error:
+        outcome.errors.append(f"candidate capture failed: {error}; artifacts cover only the last captured "
+                              f"revision {outcome.latest_candidate_sha}; uncaptured work remains in {workspace.path}")
+        if primary is None:
+            primary = error if isinstance(error, RunStopped) else RunStopped("candidate_capture_failed")
+    else:
+        try:
+            records.emit("candidate.captured", session=outcome.sessions, candidate_sha=candidate)
+        except RUN_ERRORS as error:
+            outcome.errors.append(f"candidate record failed: {error}")
+            primary = primary or error
+    if primary:
+        raise primary
+    return reply, candidate
+
+
+def finish_run(executor, workspace, records, outcome):
+    executor.finalize()
+    if workspace and outcome.base_revision:
+        try:
+            executor.guard(maintenance=True)
+            outcome.artifacts.update(workspace.export(outcome.last_passing_candidate_sha))
+        except RUN_ERRORS as error:
+            outcome.errors.append(f"artifact export failed: {error}")
+            if outcome.exit_code == 0:
+                outcome.status, outcome.stop_reason, outcome.exit_code = "failed", "artifact_export_failed", 1
+    outcome.errors.extend(executor.errors)
+    if executor.cancelled:
+        if outcome.stop_reason != "cancelled":
+            outcome.errors.append(f"cancelled while handling: {outcome.stop_reason}")
+        outcome.status, outcome.stop_reason = "cancelled", "cancelled"
+        outcome.exit_code = 128 + executor.cancelled
+    records.finish(outcome)
+
+
 def session_prompt(spec, outcome, baseline, previous):
     handoff = json.dumps(outcome.agent_reply) if outcome.agent_reply else "No previous session."
     return (
@@ -86,39 +158,16 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
             atomic_json(directory / "command.json", {"argv": command.argv, "stdin": command.stdin,
                                                      "reply_path": command.reply_path})
             records.emit("session.started", session=session, max_sessions=spec.max_sessions)
-            output = None
-            session_error = None
-            try:
-                with executor.container(workspace.path, inputs=inputs, worker=True) as container:
-                    container.setup(directory / "worker")
-                    version = container.execute(f"source /tmp/agentmill-setup.env; {spec.agent} --version",
-                                                directory, "version", 30)
-                    executor.require(version, "agent_executable")
-                    outcome.environment["agent_version"] = version.stdout.read_text().strip()
-                    output = container.session(command, directory)
-                executor.require(output, "session")
-                reply, telemetry = adapter.parse_result(output)
-                outcome.agent_reply = asdict(reply)
-                atomic_json(directory / "reply.json", outcome.agent_reply)
-                atomic_json(directory / "telemetry.json", telemetry)
-            except RunStopped as error:
-                session_error = error.reason
-                raise
-            finally:
-                records.emit("session.finished", session=session,
-                             returncode=output.returncode if output else None,
-                             stop_reason=session_error or (output.stop_reason if output else None),
-                             agent_status=(outcome.agent_reply or {}).get("status"))
-                # A failed native reply must not lose the work that preceded it.
-                if executor.cancelled or executor.deadline <= time.monotonic():
-                    executor.finalize()
-                candidate = workspace.capture(session, maintenance=executor.finalize_deadline is not None)
-                outcome.latest_candidate_sha = candidate
-                records.emit("candidate.captured", session=session, candidate_sha=candidate)
-            executor.guard()
-            passed, previous = check_candidate(spec, executor, workspace, records, outcome, candidate, session)
+            reply, candidate = run_session(spec, executor, workspace, records, outcome, command, directory, inputs)
+            if executor.cancelled:
+                executor.guard()
             if reply.status == "blocked":
                 raise RunStopped("agent_blocked", 3)
+            executor.guard()
+            passed, previous = check_candidate(spec, executor, workspace, records, outcome, candidate, session)
+            # Success is decided within the run budget; required exports may use
+            # the single finalization allowance after that decision.
+            executor.guard()
             if reply.status == "done" and passed:
                 outcome.status, outcome.stop_reason, outcome.exit_code = "checked_complete", "checked_complete", 0
                 break
@@ -131,19 +180,8 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
         outcome.stop_reason, outcome.exit_code, outcome.status = "runtime_error", 1, "failed"
         outcome.errors.append(f"{type(error).__name__}: {error}")
     finally:
-        executor.finalize()
-        if workspace and outcome.base_revision:
-            try:
-                outcome.artifacts.update(workspace.export(outcome.last_passing_candidate_sha))
-            except (OSError, ValueError, RunStopped) as error:
-                outcome.errors.append(f"artifact export failed: {error}")
-                if outcome.exit_code == 0:
-                    outcome.status, outcome.stop_reason, outcome.exit_code = "failed", "artifact_export_failed", 1
-        if executor.cancelled:
-            outcome.status, outcome.stop_reason = "cancelled", "cancelled"
-            outcome.exit_code = 128 + executor.cancelled
         try:
-            records.finish(outcome)
+            finish_run(executor, workspace, records, outcome)
         finally:
             for sig, handler in previous_handlers.items():
                 signal.signal(sig, handler)

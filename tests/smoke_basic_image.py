@@ -106,6 +106,10 @@ def main():
                     elif mode == 'regress':
                         assert outcome['last_passing_candidate_sha'] is not None
                         assert outcome['last_passing_candidate_sha']!=outcome['latest_candidate_sha']
+                    elif mode == 'blocked':
+                        assert outcome['agent_reply']['question']
+                        assert [c['session'] for c in outcome['checks']] == [0]
+                        assert not (run_dir / 'checks/0001').exists()
                     print(f'PASS Docker {backend}: {mode} (exit {expected})', flush=True)
         finally:
             containers = subprocess.check_output(['docker','ps','-aq','--filter',f'ancestor={image}'],text=True).split()

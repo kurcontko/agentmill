@@ -88,6 +88,35 @@ class ExecutorTests(unittest.TestCase):
                     pass
         self.assertFalse(self.executor.worker_stopped)
 
+    def test_cleanup_failure_does_not_replace_execution_failure(self):
+        primary = RunStopped('session_timeout', 2)
+        with patch.object(self.executor, 'control', self.control), \
+             patch.object(self.executor, '_remove_container', return_value=False):
+            with self.assertRaises(RunStopped) as caught:
+                with self.executor.container(self.workspace, worker=True):
+                    raise primary
+        self.assertIs(caught.exception, primary)
+        self.assertFalse(self.executor.worker_stopped)
+        self.assertIn('container_cleanup_failed', ' '.join(self.executor.errors))
+
+    def test_no_subprocess_is_admitted_after_its_budget(self):
+        for maintenance in (False, True):
+            with self.subTest(maintenance=maintenance):
+                self.executor.deadline = 0
+                self.executor.finalize_deadline = 0
+                with patch('agentmill.executor.subprocess.Popen', side_effect=AssertionError('admitted expired work')) as launch:
+                    with self.assertRaises(RunStopped):
+                        self.executor.command(['must-not-start'], self.root/'out', self.root/'err',
+                                              10, maintenance=maintenance)
+                    launch.assert_not_called()
+
+    def test_finalization_allowance_is_not_renewed(self):
+        with patch('agentmill.executor.time.monotonic', return_value=10):
+            self.executor.finalize()
+        with patch('agentmill.executor.time.monotonic', return_value=100):
+            self.executor.finalize()
+        self.assertEqual(self.executor.finalize_deadline, 40)
+
     def test_uncertain_daemon_cleanup_is_not_reported_as_stopped(self):
         with patch.object(self.executor,'command',self.process),patch.object(self.executor,'control',side_effect=RunStopped('runtime_failed')):
             self.assertFalse(self.executor._remove_container('fixture'))

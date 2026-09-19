@@ -19,7 +19,9 @@ from unittest.mock import patch
 
 from agentmill import RunSpec, run
 from agentmill.executor import Executor
+from agentmill.contracts import RunStopped
 from agentmill.records import Records, atomic_json
+from agentmill.workspace import Workspace
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / 'tests/fixtures/native_cli.py'
@@ -114,6 +116,7 @@ class BasicLoopTests(unittest.TestCase):
         (self.repo / 'staged').write_text('my staged changes\n')
         self.git('add', 'staged')
         (self.repo / 'untracked').write_text('my untracked file\n')
+        (self.repo / 'ignored.tmp').write_text('my ignored file\n')
         status = self.git('status', '--porcelain')
         index = (self.repo / '.git/index').read_bytes()
         for backend in ('codex', 'claude'):
@@ -128,6 +131,7 @@ class BasicLoopTests(unittest.TestCase):
                 self.assertEqual(self.git('status', '--porcelain'), status)
                 self.assertEqual((self.repo / '.git/index').read_bytes(), index)
                 self.assertEqual((self.repo / 'value').read_text(), 'my unstaged changes\n')
+                self.assertEqual((self.repo / 'ignored.tmp').read_text(), 'my ignored file\n')
                 self.assertTrue((self.run_dir / 'workspace/.env').is_file())
                 imported = self.root / f'import-{backend}'
                 subprocess.run(['git', 'clone', '-q', '-b', 'agentmill-candidate', outcome.artifacts['bundle'], str(imported)], check=True)
@@ -151,13 +155,116 @@ class BasicLoopTests(unittest.TestCase):
             self.assertIsNotNone(outcome.last_passing_candidate_sha)
             self.assertEqual(outcome.checks[-1]['status'], 'failed')
 
-    def test_both_adapters_blocked_is_not_complete_even_with_passing_checks(self):
+    def test_both_adapters_blocked_preserves_candidate_without_checking_it(self):
         self.set_mode('blocked')
         for backend in ('codex', 'claude'):
-            outcome = self.launch(backend)
+            outcome = self.launch(backend, checks=('true',))
             self.assertEqual((outcome.status, outcome.exit_code, outcome.sessions), ('blocked', 3, 1))
             self.assertTrue(outcome.agent_reply['question'])
-            self.assertEqual(outcome.checks[-1]['status'], 'passed')
+            self.assertEqual([c['session'] for c in outcome.checks], [0])
+            self.assertEqual(outcome.last_passing_candidate_sha, outcome.base_revision)
+            self.assertNotEqual(outcome.latest_candidate_sha, outcome.base_revision)
+            self.assertFalse((self.run_dir / 'checks/0001').exists())
+
+    def test_one_session_is_a_hard_limit_for_a_continuing_reply(self):
+        self.set_mode('continue')
+        for backend in ('codex', 'claude'):
+            outcome = self.launch(backend, max_sessions=1)
+            self.assertEqual((outcome.sessions, outcome.stop_reason, outcome.exit_code), (1, 'session_limit', 2))
+            self.assertEqual((self.run_dir / 'workspace/iteration').read_text(), '1')
+
+    def test_primary_native_failure_survives_capture_and_export_failures(self):
+        for mode, reason in (('crash', 'session_failed'), ('missing_terminal', 'invalid_native_terminal')):
+            self.set_mode(mode)
+            for backend in ('codex', 'claude'):
+                with self.subTest(mode=mode, backend=backend), \
+                     patch.object(Workspace, 'capture', side_effect=OSError('capture unavailable')), \
+                     patch.object(Workspace, 'export', side_effect=OSError('export unavailable')):
+                    outcome = self.launch(backend)
+                    self.assertEqual((outcome.stop_reason, outcome.exit_code), (reason, 1))
+                    self.assertIn('capture unavailable', ' '.join(outcome.errors))
+                    self.assertIn('export unavailable', ' '.join(outcome.errors))
+                    self.assertEqual(outcome.latest_candidate_sha, outcome.base_revision)
+                    self.assertEqual((self.run_dir / 'workspace/value').read_text(), 'fixed\n')
+                    self.assertNotIn('patch', outcome.artifacts)
+
+    def test_required_capture_and_export_failures_prevent_success(self):
+        self.set_mode('done')
+        for operation, reason in (('capture', 'candidate_capture_failed'), ('export', 'artifact_export_failed')):
+            with self.subTest(operation=operation), patch.object(Workspace, operation, side_effect=OSError(operation)):
+                outcome = self.launch()
+                self.assertEqual((outcome.stop_reason, outcome.exit_code), (reason, 1))
+
+    def test_run_deadline_at_success_boundary_is_not_success(self):
+        self.set_mode('done')
+        from agentmill.checks import check_candidate
+        def expire_after_checks(spec, executor, *args, **kwargs):
+            result = check_candidate(spec, executor, *args, **kwargs)
+            if result[0]:
+                executor.deadline = 0
+            return result
+        with patch('agentmill.runner.check_candidate', expire_after_checks):
+            outcome = self.launch()
+        self.assertEqual((outcome.stop_reason, outcome.exit_code), ('run_duration_limit', 2))
+        self.assertEqual(outcome.checks[-1]['status'], 'passed')
+
+    def test_success_decided_in_budget_can_export_during_finalization(self):
+        self.set_mode('done')
+        export = Workspace.export
+        def after_deadline(workspace, passing):
+            workspace.executor.deadline = 0
+            return export(workspace, passing)
+        with patch.object(Workspace, 'export', after_deadline):
+            outcome = self.launch()
+        self.assertEqual(outcome.status, 'checked_complete')
+        self.assertTrue(Path(outcome.artifacts['bundle']).is_file())
+
+    def test_expired_finalization_skips_export_but_writes_outcome(self):
+        self.set_mode('crash')
+        def expire_during_capture(workspace, *args, **kwargs):
+            workspace.executor.finalize_deadline = 0
+            raise OSError('capture exhausted finalization')
+        with patch.object(Workspace, 'capture', expire_during_capture), patch.object(Workspace, 'export') as export:
+            outcome = self.launch()
+            export.assert_not_called()
+        self.assertEqual(outcome.stop_reason, 'session_failed')
+        self.assertIn('finalization', ' '.join(outcome.errors))
+
+    def test_final_record_failure_still_restores_signal_handlers(self):
+        self.set_mode('done')
+        handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+        with patch.object(Records, 'finish', side_effect=OSError('storage unavailable')):
+            with self.assertRaisesRegex(OSError, 'storage unavailable'):
+                self.launch()
+        self.assertEqual({sig: signal.getsignal(sig) for sig in handlers}, handlers)
+
+    def test_uncertain_cleanup_skips_capture_and_remains_visible_on_cancellation(self):
+        self.set_mode('done')
+        @contextmanager
+        def uncertain(executor, workspace, *, inputs=None, worker=False):
+            with fixture_container(executor, workspace, inputs=inputs, worker=worker) as container:
+                yield container
+            if worker:
+                executor.worker_stopped = False
+                if cancel:
+                    executor.cancel(signal.SIGTERM)
+                raise RunStopped('container_cleanup_failed')
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel), patch.object(Executor, 'container', uncertain), \
+                 patch.object(Workspace, 'capture') as capture:
+                outcome = self.launch()
+                capture.assert_not_called()
+            self.assertEqual(outcome.exit_code, 143 if cancel else 1)
+            self.assertEqual(outcome.latest_candidate_sha, outcome.base_revision)
+            self.assertIn('capture_unsafe_worker_running', ' '.join(outcome.errors))
+            if cancel:
+                self.assertIn('container_cleanup_failed', ' '.join(outcome.errors))
+
+    def test_check_record_failure_does_not_mask_unavailable_check(self):
+        with patch('agentmill.checks.atomic_json', side_effect=OSError('check record unavailable')):
+            outcome = self.launch(checks=('exec agentmill-nonexistent-command',))
+        self.assertEqual(outcome.stop_reason, 'check_command_unavailable')
+        self.assertIn('check record unavailable', ' '.join(outcome.errors))
 
     def test_both_adapters_protocol_and_process_failures_capture_work(self):
         for mode in ('malformed', 'missing_terminal', 'native_error', 'bad_schema', 'crash'):
