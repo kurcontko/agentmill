@@ -1,279 +1,159 @@
 # AgentMill
 
-Give a native coding agent a task, a private workspace, and a bounded opportunity
-to work. AgentMill captures its changes, runs your checks, and returns an honest
-result.
+Give `codex exec` or `claude -p` one coding task in a **private repository checkout**.
+AgentMill bounds its sessions, captures its changes, runs your checks, and returns
+an explicit result. The native CLI owns reasoning and tools; an external caller
+owns scheduling, review, approval, and publication.
 
-AgentMill runs `codex exec` or `claude -p` in Docker. The native CLI owns reasoning,
-tools, context management, and native subagents. AgentMill owns the run lifecycle.
-There is no scheduler, reviewer agent, daemon, database, or task graph in the core.
+**Input is a committed revision** (`HEAD` by default). Your staged, unstaged,
+untracked, and ignored source files stay untouched and are not included. The
+source checkout is never mounted into a worker. Use `--revision` to select another
+commit. Linked source worktrees and submodules are currently unsupported.
 
-## Quick start
+## Run a task
 
-Requires Python 3.11+, Git, and a running local Docker daemon on Linux or macOS.
-From this checkout:
+You need Python 3.11+, Git, and a running local Docker daemon. From this checkout,
+build the runtime image locally:
 
 ```bash
 ./mill build
-export CODEX_API_KEY=... # or select Claude's native environment authentication
-./mill run /path/to/repo \
-  --agent codex \
-  --task "Fix retry handling without changing the public API." \
-  --setup "uv sync --frozen" \
-  --check "uv run pytest -q"
 ```
 
-Or:
+Choose setup and checks appropriate to the target repository. For example:
 
 ```bash
-./mill run /path/to/repo \
-  --agent claude \
-  --task-file task.md \
-  --setup "npm ci" \
-  --check "npm test" \
-  --check "npm run lint" \
-  --max-sessions 5 \
-  --max-duration 30m
+export CODEX_API_KEY=...
+./mill run /path/to/repo --agent codex \
+  --task "Fix retry handling without changing the public API." \
+  --setup "uv sync --frozen" --check "uv run pytest -q"
+```
 
+Or use Claude with its native environment authentication:
+
+```bash
+export ANTHROPIC_API_KEY=... # alternatively, CLAUDE_CODE_OAUTH_TOKEN
+./mill run /path/to/repo --agent claude \
+  --task-file task.md --setup "npm ci" --check "npm test"
+```
+
+No wizard or committed configuration file is required. Task inputs are snapshotted
+into the run directory. A local `MILL.md` is an optional fallback;
+`./mill init [repo]` creates it. At least one `--check` is required; repeat the flag for multiple
+commands. Setup defaults to `true`.
+
+Defaults are **three native sessions and 30 minutes total**. One session means
+one CLI invocation, not one model turn. `--max-sessions 1` lets a caller own any
+subsequent attempt. Use `--max-duration`, `--setup-timeout`, `--session-timeout`,
+and `--check-timeout` for tighter bounds; durations accept seconds, `s`, `m`, or `h`.
+Phase defaults are 5 minutes for setup/checks and 15 minutes for a native session.
+
+## Inspect the result
+
+The final summary gives the agent's claim or blocking question, stop reason,
+latest captured candidate, check status, and actual artifact/log locations.
+Use the run ID printed by your run:
+
+```bash
 ./mill show r_0123456789abcdef
 ./mill diff r_0123456789abcdef
 ```
 
-`--task` and `--task-file` need no repository configuration or committed mission
-file. If neither is supplied, a local `MILL.md` is read as an optional task input.
-The task is snapshotted separately into the run directory. `mill init [repo]`
-creates that optional file; no wizard or commit is required.
+Storage defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/agentmill/runs/`.
+`--runs-dir DIR` selects another location outside the source checkout; the printed
+inspection commands preserve that location and quote paths. Human summaries go
+to stderr. `show --json` returns the outcome; `diff` writes the exported patch to
+stdout. `run --json` writes supervisor events to stdout and retains native output
+separately. A slow display is detached; the event file and atomic outcome remain
+authoritative. Missing `outcome.json` means **unknown/interrupted**, never success.
 
-The source defaults to `REPO_PATH`, then the current directory. **Only the selected
-committed revision is included** (`--revision HEAD` by default). Staged, unstaged,
-untracked, and ignored source files remain untouched and are not copied. The
-source is never mounted into a container. Source inputs may also be a Git URL or
-an exported bundle. Linked source worktrees and submodules are currently rejected.
+Review an exported bundle in a clean checkout:
 
-The shell launcher can load environment defaults from the installation's `.env`.
-`CHECK_CMD` and `AGENTMILL_IMAGE` are supported shortcuts. Setup defaults to `true`:
-choose an explicit setup command for the project. A custom image can supply
-additional tools with `--image your-image:tag`; its resolved image ID is pinned
-for the run. The packaged image includes Python, uv, Git, Node, Claude and Codex.
+```bash
+git clone --branch agentmill-candidate -- "/path/to/result.bundle" "/path/to/new-review"
+```
 
-## What a result means
+Run the relevant setup and checks in that review checkout. Do not run host Git
+against the retained worker workspace's `.git`: the worker could have changed
+its configuration or hooks. Importing, applying, merging, and pushing are your
+explicit actions. AgentMill does none of them automatically.
 
-Each session is one fresh native CLI invocation. After it stops, AgentMill
-captures eligible changes, including new files. Native commits are optional.
-Checks run in a fresh checkout and fresh container prepared from that exact
-candidate, with the same setup command and **no supplied agent credentials**.
-Setup runs again for every check environment and every native session. Use
-explicit commands such as `uv run ...`, or activate tools in the setup command;
-exported shell variables are carried into that container's subsequent commands.
+## What completion means
 
-A failing baseline is recorded and can be repaired. Ordinary failing checks
-become bounded feedback for the next session. Failed candidates stay in the
-workspace. AgentMill never resets useful changes to the last passing revision.
+`checked_complete` requires a successful native terminal envelope, a validated
+`done` claim, and **every configured check passing on the latest captured
+candidate**. Required cleanup, capture, and export must also succeed. An earlier
+passing revision never establishes completion of newer work.
 
-`checked_complete` means exactly:
-
-1. The native process and its terminal protocol completed successfully.
-2. Its validated structured reply claimed `done`.
-3. Every configured check passed on the captured candidate.
-
-At least one check is required. This is evidence about your checks, not proof
-that every requirement is satisfied. Repository-owned tests can be modified by
-the agent. Independent acceptance tests and review belong above this runner.
-
-The outcome distinguishes `latest_candidate_sha` from
-`last_passing_candidate_sha`. The latter may be the baseline or an earlier
-candidate, and does not itself imply task completion. A blocked agent returns
-its question. Missing executables, setup failures, malformed terminal replies,
-and check infrastructure failures stop the run. Check exit codes 126/127 are
-classified as unavailable commands; other nonzero exits are repair feedback.
-
-Checks may create build products, but changing tracked candidate files makes the
-check invalid. Setup must not change tracked source in check environments.
-Generated dependencies and build outputs should be ignored by the repository.
+A failing baseline can be repaired. Ordinary failing checks become feedback for
+another bounded session; partial work is retained. A valid `blocked` reply stops
+after cleanup and capture, without starting another check environment. Its
+candidate is unchecked, and its question is preserved. Missing executables,
+setup/check infrastructure faults, or malformed native replies stop the run.
+Check exits 126/127 mean unavailable commands; other nonzero exits are repair
+feedback. There is no automatic infrastructure retry or resume.
 
 | Exit | Meaning |
 | --- | --- |
 | 0 | Checked completion |
-| 1 | Runtime, setup, check infrastructure, protocol, or artifact failure |
+| 1 | Execution, setup/check infrastructure, protocol, capture, or artifact failure |
 | 2 | Incomplete at a session count, session timeout, or total time limit |
 | 3 | Blocked; outside input required |
 | 130 / 143 | Cancelled by SIGINT / SIGTERM |
 
-## Bounds and cancellation
+An execution failure stays primary when capture or export also fails; secondary
+diagnostics remain visible. Cancellation retains its signal-derived exit code.
+Capture requires confirmed worker shutdown. If capture fails, artifacts describe
+only the **last successfully captured** revision; uncaptured work remains in the
+workspace and is identified in diagnostics.
 
-Defaults are **3 sessions and 30 minutes total**. Setup and each check have a
-5-minute timeout; each native session has a 15-minute timeout. Override them with
-`--max-sessions`, `--max-duration`, `--setup-timeout`, `--session-timeout`, and
-`--check-timeout`. Durations accept seconds, `s`, `m`, or `h`. Each operation is
-also bounded by the remaining total time. The launch summary prints the limits.
+Normal work and the success decision must fit within the run deadline. A single,
+nonrenewing finalization allowance of up to 30 seconds permits cleanup, capture,
+and export after stopping, or export after an in-budget success decision. Expired
+finalization admits no new subprocess, including Git export. These are supervisor
+policies, not strict wall-clock guarantees under kernel/filesystem stalls or a
+dead Docker daemon. Cleanup uncertainty is reported, never treated as success.
 
-Cancellation stops the Docker container, waits a short grace period, and forcibly
-removes it if necessary. Capture only proceeds after the worker is confirmed
-stopped. A bounded finalization allowance of up to 30 seconds is used for cleanup,
-preservation, and export after a limit or cancellation. If capture or export
-fails, the outcome reports the failure and the private workspace remains for
-inspection. An abruptly killed supervisor may have no final outcome; `show`
-reports unknown, never success. There is no automatic resume or crash recovery.
+## Setup and trust
 
-## Authentication and isolation
+Setup runs in fresh containers: once for the baseline, once per worker session,
+and once per non-blocked candidate check. A three-session run can execute setup
+seven times. Exported setup variables carry into later commands in that container;
+dependencies and environment state are not shared across containers. Checks use
+fresh candidate checkouts and receive **no supplied worker credentials**. Check
+setup/check commands must not change tracked candidate files; ignored build
+products are allowed.
 
-By default, only these selected variables are forwarded to the native session:
+Repository-owned tests may be edited by the agent. Passing them is useful
+evidence, not independent proof of every requirement. Containers have network
+access. Filename exclusions are not a secret scanner; logs and retained work
+may contain sensitive data. Time/session limits are not universal billing,
+CPU, memory, or disk quotas. Read the [isolation and authentication reference](docs/runner-reference.md).
 
-- Codex: `CODEX_API_KEY`.
-- Claude: `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`.
+## Installation and further details
 
-Repeat `--credential-env NAME` to explicitly replace that selection, for example
-to use native provider configuration or a custom endpoint. Names, never values,
-are stored in the spec. Native invocation flags and unmodified native output are
-retained. Usage telemetry identifies its native source; missing usage stays
-unknown and Claude cost fields are estimates. There is no universal dollar cap.
+This PR documents a source checkout and a locally built image. It does not require
+a published package or registry image. Validation covers macOS arm64 with Colima
+and Linux amd64 in CI; other OS/architecture combinations are not release-validated.
 
-`--agent-config FILE` selects one native configuration file: Codex TOML or Claude
-settings JSON. Codex additionally supports `--profile NAME` with an explicitly
-selected profile TOML file, and `--auth-file /path/to/auth.json` for native account
-authentication. Only those selected files are mounted read-only into the worker;
-Codex receives an ephemeral writable copy. Refreshed account tokens are not
-written back to the source auth file. No entire home directory is copied.
-Selected config/auth paths must be regular files; the runner validates them
-before preparing the source or running setup and baseline checks.
-
-Containers run as the invoking user's numeric UID/GID, drop capabilities, and
-use `no-new-privileges`. They have network access. The worker sees only its private
-checkout, read-only session inputs, temporary scratch space, and selected native
-configuration/authentication. The supervisor's snapshot repository, outcome, and
-logs are not mounted. Checks use different containers with no native auth/config
-mounts or forwarded agent credentials. Custom images must not bake in credentials.
-
-**Docker is the execution isolation boundary.** Codex explicitly uses
-`--sandbox danger-full-access` and noninteractive approval policy inside that
-container: nested Codex namespace sandboxing is incompatible with the default
-Docker restrictions tested here. Claude uses `dontAsk` with coding-tool approvals.
-No Docker socket is mounted into either worker or check containers.
-
-## Captures and artifacts
-
-Runs live under `${XDG_STATE_HOME:-$HOME/.local/state}/agentmill/runs/`, or
-`--runs-dir DIR`. Storage must be outside the source checkout.
-
-```text
-r_<id>/
-  spec.json                 # frozen commands, limits, resolved revision
-  input.json                # source and pinned base
-  task.txt
-  events.jsonl
-  outcome.json              # atomic, final once written
-  workspace/                # retained working files, including unfinished work
-  snapshots.git/            # supervisor-owned candidate history
-  baseline/                 # setup and baseline check evidence
-  checks/                   # retained scratch checkouts
-  sessions/0001/
-    prompt.txt
-    inputs/
-    command.json
-    native.jsonl
-    native.stderr.log
-    reply.json
-    telemetry.json
-    checks.json
-    worker/                 # worker setup evidence
-  operations/               # Git and Docker diagnostics
-  artifacts/
-    result.patch
-    result.bundle
-```
-
-Capture preserves tracked-file edits/deletions, regular new files, executable
-bits, symlinks, and binary content. It ignores repository-ignored new files and
-[the explicit untracked credential exclusions](agentmill/workspace.py).
-Worker-controlled Git hooks, config, index, and commits are not authoritative;
-the supervisor captures bytes using its own Git repository and index. New nested
-Git repositories are rejected. Existing tracked sensitive files remain tracked;
-filename exclusions are not a secret scanner. Inspect artifacts before sharing.
-Logs and retained workspaces can also contain sensitive data.
-
-The patch is the base-to-latest-candidate diff. The self-contained bundle includes
-`agentmill-base`, `agentmill-candidate`, and, when available, `agentmill-passing`
-refs; its `HEAD` identifies the latest candidate, so it can be the source of a new
-run. Importing, merging, committing to your branch, and pushing are explicit
-user or ADE actions. For example, inspect a result in another directory:
+To install the Python entrypoint into a virtual environment, from this checkout:
 
 ```bash
-git clone -b agentmill-candidate /path/to/result.bundle /tmp/review-result
+python3 -m venv "$HOME/.venvs/agentmill"
+source "$HOME/.venvs/agentmill/bin/activate"
+python -m pip install .
+mill --help
 ```
 
-## Machine and Python interfaces
+The installed `mill` provides **run, show, and diff** with standard-library runtime
+dependencies. It does not include the checkout-only `build`, `init`, `.env` loader,
+or `legacy` conveniences. Build the image with the checkout's `./mill build` (or
+`docker build -t agentmill:latest /path/to/checkout`), then use the installed CLI
+from any directory. `--image` selects a custom local image; runs record its resolved ID.
 
-```bash
-./mill run --spec run.json --json
-```
+- [Native config/auth inputs, JSON specs/events, Python API, and retained records](docs/runner-reference.md)
+- [Release validation, timing evidence, and deliberately deferred work](docs/release-validation.md)
+- [Security finding triage](docs/security-triage.md)
+- [Legacy compatibility](docs/legacy.md)
 
-`--spec` accepts exactly the `RunSpec` fields; explicit CLI flags override it.
-JSON durations are numbers of seconds. Paths are relative to the calling working
-directory. Example:
-
-```json
-{
-  "source": "/projects/payments",
-  "revision": "HEAD",
-  "task": "Fix retry handling without changing the public API.",
-  "agent": "codex",
-  "setup": "uv sync --frozen",
-  "checks": ["uv run pytest -q"],
-  "max_sessions": 3,
-  "max_duration": 1800
-}
-```
-
-JSON mode writes only AgentMill JSONL events to stdout. Diagnostics go to stderr;
-native output stays in session files. Events carry `schema_version`, `run_id`,
-`seq`, and a UTC timestamp. The vocabulary is `run.started`, `session.started`,
-`session.finished`, `candidate.captured`, `check.finished`, and `run.finished`.
-Session/check events identify the session; baseline checks use session 0.
-`outcome.json` is authoritative, even if the consumer missed the final event.
-The CLI detaches a closed or stalled output stream after a bounded write attempt
-(100 ms per message). A detached JSON stream may end with a partial line. Read
-`events.jsonl` for the complete event sequence; slow consumers do not stop a run.
-
-The Python API is experimental. Its `on_event` callback runs synchronously and
-must return promptly; callers own any callback queuing or backpressure handling.
-The CLI's bounded output forwarding does not apply to arbitrary Python callbacks.
-
-```python
-from agentmill import RunSpec, run
-
-outcome = run(RunSpec(
-    source="/projects/payments",
-    revision="HEAD",
-    task="Fix retry handling without changing the public API.",
-    agent="codex",
-    setup="uv sync --frozen",
-    checks=("uv run pytest -q",),
-), on_event=print)
-```
-
-The Python package has no runtime dependencies and can be installed with
-`pip install .`; its `mill` entrypoint provides `run`, `show`, and `diff`. Image
-building and optional `init`/`legacy` conveniences live in the checkout's `./mill`.
-
-## Development
-
-```bash
-python3 -m unittest discover -s tests -p 'test_basic_loop.py'
-python3 -m unittest discover -s tests -p 'test_adapters.py'
-python3 -m unittest discover -s tests -p 'test_workspace.py'
-shellcheck mill
-# Real Docker lifecycle, deterministic native fixtures, no provider billing:
-AGENTMILL_SMOKE_IMAGE=agentmill:latest python3 tests/smoke_basic_image.py
-```
-
-The packaged versions are pinned in `Dockerfile`; each run records the actual
-native CLI version and resolved image identity. Adapter changes require terminal
-protocol fixtures and the shared lifecycle contract tests.
-
-## Legacy users
-
-The former Compose runtime remains under `mill legacy`. It is not used by the
-checked runner. See [legacy documentation](docs/legacy.md). The previous
-`--iterations` spelling aliases `--max-sessions`; replace `--timeout` with explicit
-phase timeouts or `--max-duration`. Automatic setup detection is legacy behavior;
-the new runner uses your explicit `--setup` command.
+The Python API and internal record details remain experimental. There is no
+scheduler, graph engine, agent team, daemon, or shared execution environment.

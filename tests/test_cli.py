@@ -176,8 +176,14 @@ with patch('agentmill.runner.Workspace.prepare', wait_for_cancel):
         artifacts.mkdir(parents=True)
         patch_path = artifacts / 'result.patch'
         patch_path.write_bytes(b'actual patch')
-        bundle = artifacts / 'result.bundle'
-        bundle.touch()
+        bundle = artifacts / 'result; touch PWNED; .bundle'
+        source = self.root / 'bundle source'
+        source.mkdir()
+        (source/'proof.txt').write_text('reviewed candidate')
+        for args in (['init', '-q', '-b', 'agentmill-candidate'], ['add', '.'],
+                     ['-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '-qm', 'fixture'],
+                     ['bundle', 'create', str(bundle), 'agentmill-candidate']):
+            subprocess.run(['git', '-C', str(source), *args], check=True, capture_output=True, timeout=5)
         outcome = RunOutcome(run_id, status='checked_complete', stop_reason='checked_complete', exit_code=0,
             latest_candidate_sha='candidate', last_passing_candidate_sha='candidate', sessions=1,
             candidate_check_status='passed',
@@ -203,6 +209,15 @@ with patch('agentmill.runner.Workspace.prepare', wait_for_cancel):
                 self.assertIn(str(root.resolve()), args)
                 commands[name] = args[1:]
         self.assertEqual(set(commands), {'Show', 'Diff'})
+        review = next(line.removeprefix('Clean review checkout: ') for line in text.splitlines()
+                      if line.startswith('Clean review checkout: '))
+        self.assertEqual(shlex.split(review), ['git', 'clone', '--branch', 'agentmill-candidate', '--',
+                                               str(bundle), f'./review-{run_id}'])
+        # Exercise exactly what a user pastes, with metacharacters in a real bundle
+        # filename. The shell must pass one path argument, not execute its contents.
+        subprocess.run(['sh', '-c', review], cwd=self.root, check=True, capture_output=True, timeout=5)
+        self.assertEqual((self.root/f'review-{run_id}'/'proof.txt').read_text(), 'reviewed candidate')
+        self.assertFalse((self.root/'PWNED').exists())
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(main(commands['Show']), 0)
         class Output:

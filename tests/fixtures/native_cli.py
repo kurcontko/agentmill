@@ -19,8 +19,14 @@ assert 'Task:' in prompt
 assert '--json-schema' in sys.argv if backend == 'claude' else '--output-schema' in sys.argv
 if Path('expect-setup').exists():
     assert os.environ.get('AGENTMILL_SETUP_FLAG') == Path('expect-setup').read_text()
-if Path('expect-auth').exists():
+if Path('expect-auth-file').exists():
+    auth = Path(os.environ['CODEX_HOME']) / 'auth.json'
+    assert json.loads(auth.read_text()) == {'OPENAI_API_KEY': 'fixture-only'}
+    assert not os.environ.get('CODEX_API_KEY')
+elif Path('expect-auth').exists():
     name = 'CODEX_API_KEY' if backend == 'codex' else 'ANTHROPIC_API_KEY'
+    if Path('expect-auth-name').exists():
+        name = Path('expect-auth-name').read_text()
     assert os.environ.get(name) == Path('expect-auth').read_text()
 mode = Path('mode').read_text().strip()
 count = Path('iteration')

@@ -16,6 +16,28 @@ Other dependency lifecycle scripts remain disabled. Re-review this exception
 when updating Claude. The packaged native protocol smoke test must pass with
 that image, including actual shell tool execution and structured replies.
 
+## Release-candidate display command: false positive
+
+`pythonsecurity:S8705` (`AaC3POdKddlVqJjXWv-Q`) flags the `shlex.join()` call
+that formats a clean bundle-review checkout instruction in `cli.human_result()`.
+Its trace labels argparse input as an HTTP request and the formatting call as
+command execution. Neither description applies: there is no HTTP input or
+subprocess invocation in this function.
+
+The supervisor generates run IDs, and `show` validates the requested ID before
+loading its local record. Worker containers cannot write that record. Each word
+of the displayed command is shell-quoted by `shlex.join`; Git's `--` separates
+options from the bundle/destination paths, and the destination starts with `./`.
+The CLI regression test creates a real bundle with spaces, an apostrophe, and
+shell metacharacters in its path, executes the printed instruction in a temporary
+directory, and verifies the imported file and absence of the injection marker.
+It passes locally and is included in the CI test suite.
+
+The narrowly scoped `displayCommand` exclusion dismisses this rule only in
+`agentmill/cli.py`. Revisit it if command formatting becomes execution, quoting or
+the option delimiter changes, or records acquire a new untrusted writer. No
+quality-gate threshold or other security rule is disabled.
+
 ## Explicit local file inputs: false positives
 
 `agentmill/cli.py`:
@@ -47,7 +69,7 @@ repository files, a client request, or a retained `checks.json`. Worker/check
 containers cannot write the host records directory. Log content is untrusted
 feedback, but log paths are supervisor-owned.
 
-`sonar-project.properties` therefore dismisses only these three security rules
-in these two exact files. It does not exclude the files from analysis, suppress
-other security rules, or lower the gate. Revisit these dispositions if a server
+`sonar-project.properties` therefore dismisses these file-input/log-path rules
+in these two exact files, plus the display-only command rule explained above.
+It does not exclude the files from analysis or lower the gate. Revisit these dispositions if a server
 accepts untrusted launch arguments or feedback starts loading external records.

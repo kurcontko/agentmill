@@ -24,6 +24,8 @@ def command(*args, **kwargs):
 def main():
     image = f'agentmill-contract-test:{uuid.uuid4().hex}'
     base = os.environ.get('AGENTMILL_SMOKE_IMAGE', 'agentmill:ci')
+    launcher = ([os.environ['AGENTMILL_SMOKE_CLI']] if os.environ.get('AGENTMILL_SMOKE_CLI')
+                else [sys.executable, '-I', str(ROOT / 'basic_loop.py')])
     # Keep bind mounts in a shared host directory on Docker Desktop and Colima.
     with tempfile.TemporaryDirectory(prefix='agentmill-smoke-', dir=ROOT / 'tests') as directory:
         root = Path(directory)
@@ -43,9 +45,20 @@ def main():
             (repo / '.gitignore').write_text('ignored.tmp\n')
             (repo / 'expect-setup').write_text('prepared')
             (repo / 'expect-auth').write_text('fixture-only')
-            runs = root / 'runs'
+            runs = root / 'runs with spaces'
             for backend in ('codex','claude'):
                 for mode, expected in (('repair',0), ('regress',2), ('blocked',3), ('missing_terminal',1), ('hang',2), ('hang',143)):
+                    auth_args = []
+                    for flag in ('expect-auth-name', 'expect-auth-file'):
+                        (repo / flag).unlink(missing_ok=True)
+                    if mode == 'blocked' and backend == 'codex':
+                        auth = root / 'native auth.json'
+                        auth.write_text(json.dumps({'OPENAI_API_KEY': 'fixture-only'}))
+                        (repo / 'expect-auth-file').touch()
+                        auth_args = ['--auth-file', str(auth), '--credential-env', 'UNSET_FIXTURE_KEY']
+                    elif mode == 'blocked':
+                        (repo / 'expect-auth-name').write_text('CLAUDE_CODE_OAUTH_TOKEN')
+                        auth_args = ['--credential-env', 'CLAUDE_CODE_OAUTH_TOKEN']
                     (repo / 'mode').write_text(mode)
                     (repo / 'value').write_text('broken\n')
                     command('git','-C',str(repo),'add','.')
@@ -56,15 +69,17 @@ def main():
                     command('git','-C',str(repo),'add','staged')
                     index = (repo / '.git/index').read_bytes()
                     before = set(runs.glob('r_*')) if runs.exists() else set()
-                    argv = [sys.executable,'-I',str(ROOT / 'basic_loop.py'),'run',str(repo),
+                    argv = [*launcher, 'run',str(repo),
                             '--agent',backend,'--task','Repair value.','--setup','export AGENTMILL_SETUP_FLAG=prepared','--check',
-                            'test "$AGENTMILL_SETUP_FLAG" = prepared; test -z "${CODEX_API_KEY:-}${ANTHROPIC_API_KEY:-}"; test "$(cat value)" = fixed',
+                            'test "$AGENTMILL_SETUP_FLAG" = prepared; test -z "${CODEX_API_KEY:-}${ANTHROPIC_API_KEY:-}${CLAUDE_CODE_OAUTH_TOKEN:-}"; test "$(cat value)" = fixed',
                             '--max-sessions','2','--max-duration','90s','--session-timeout','1s' if expected==2 and mode=='hang' else '20s',
-                            '--image',image,'--runs-dir',str(runs),'--json']
+                            '--image',image,'--runs-dir',str(runs),'--json', *auth_args]
                     stdout = root / 'stdout.jsonl'
                     stderr = root / 'stderr.log'
                     with stdout.open('w') as out, stderr.open('w') as err:
-                        process = subprocess.Popen(argv,stdout=out,stderr=err, env={**os.environ, 'CODEX_API_KEY':'fixture-only', 'ANTHROPIC_API_KEY':'fixture-only', 'CLAUDE_CODE_OAUTH_TOKEN':''})
+                        env = {**os.environ, 'CODEX_API_KEY':'fixture-only', 'ANTHROPIC_API_KEY':'fixture-only',
+                               'CLAUDE_CODE_OAUTH_TOKEN':'fixture-only', 'PYTHONPATH':''}
+                        process = subprocess.Popen(argv,stdout=out,stderr=err, env=env, cwd=tempfile.gettempdir())
                         try:
                             if mode == 'hang' and expected == 143:
                                 deadline = time.monotonic()+60
@@ -95,9 +110,11 @@ def main():
                     assert not containers.strip(), 'execution container survived'
                     patch = Path(outcome['artifacts']['patch'])
                     assert patch.stat().st_size > 0
-                    shown = subprocess.check_output([sys.executable,'-I',str(ROOT / 'basic_loop.py'),'show',run_dir.name,'--runs-dir',str(runs),'--json'],text=True)
+                    shown = subprocess.check_output([*launcher,'show',run_dir.name,'--runs-dir',str(runs),'--json'],
+                                                    text=True, cwd=tempfile.gettempdir(), env=env)
                     assert json.loads(shown)==outcome
-                    diff = subprocess.check_output([sys.executable,'-I',str(ROOT / 'basic_loop.py'),'diff',run_dir.name,'--runs-dir',str(runs)])
+                    diff = subprocess.check_output([*launcher,'diff',run_dir.name,'--runs-dir',str(runs)],
+                                                   cwd=tempfile.gettempdir(), env=env)
                     assert diff==patch.read_bytes()
                     if mode == 'repair':
                         assert outcome['sessions']==2
