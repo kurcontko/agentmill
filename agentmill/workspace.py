@@ -75,13 +75,13 @@ class Workspace:
             if local.is_dir() and self.directory.is_relative_to(local.resolve()):
                 raise ValueError("run directory must be outside the source checkout")
         self.git("clone", "--bare", "--no-local", "--", source, self.store, repo=False)
-        self.base = self.git("rev-parse", "--verify", "--end-of-options", revision + "^{commit}").decode().strip()
-        self.latest = self.base
+        base = self.git("rev-parse", "--verify", "--end-of-options", revision + "^{commit}").decode().strip()
         # Override repository attributes for byte-for-byte capture and checkout.
         (self.store / "info/attributes").write_text("* -filter -ident -text\n")
-        self.reject_gitlinks(self.base)
-        self.git("update-ref", "refs/heads/agentmill-base", self.base)
-        self.checkout(self.base, self.path)
+        self.reject_gitlinks(base)
+        self.git("update-ref", "refs/heads/agentmill-base", base)
+        self.checkout(base, self.path)
+        self.base = self.latest = base
         return self.base
 
     def reject_gitlinks(self, revision, maintenance=False):

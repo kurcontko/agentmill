@@ -7,13 +7,13 @@ from ..contracts import AgentReply, Command, RunStopped
 class Codex:
     def build_command(self, request):
         argv = ["codex", "exec", "--json", "--output-schema", "/inputs/reply.schema.json",
-                "--output-last-message", "/scratch/reply.json", "--sandbox", "danger-full-access",
+                "--sandbox", "danger-full-access",
                 "-c", 'approval_policy="never"', "--color", "never"]
         if request.model:
             argv += ["--model", request.model]
         if request.profile:
             argv += ["--profile", request.profile]
-        return Command(tuple([*argv, "-"]), reply_path="/scratch/reply.json")
+        return Command(tuple([*argv, "-"]))
 
     def parse_result(self, output):
         terminal = None
@@ -41,6 +41,6 @@ class Codex:
             reply = AgentReply.parse(json.loads(message))
         except (ValueError, RecursionError) as error:
             raise RunStopped("invalid_agent_reply") from error
-        # Interpret the message in the native stream, never a worker-writable reply file alone.
+        # Interpret the final message only after validating the native terminal stream.
         return reply, {"source": "codex.turn.completed", "usage": terminal.get("usage"),
                        "cost_usd_estimate": None}

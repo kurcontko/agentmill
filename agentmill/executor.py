@@ -11,11 +11,11 @@ import sys
 import time
 import uuid
 
-from .contracts import ProcessOutput, RunStopped
+from .contracts import ProcessOutput, RunStopped, preserve_failure
 
 
 class Executor:
-    def __init__(self, spec, directory):
+    def __init__(self, spec, directory, *, errors=None):
         self.spec = spec
         self.directory = Path(directory)
         self.deadline = time.monotonic() + spec.max_duration
@@ -24,7 +24,7 @@ class Executor:
         self.image = spec.image
         self.operation = 0
         self.worker_stopped = True
-        self.errors = []
+        self.errors = [] if errors is None else errors
 
     def cancel(self, signum, _frame=None):
         self.cancelled = self.cancelled or signum
@@ -33,20 +33,36 @@ class Executor:
         if self.finalize_deadline is None:
             self.finalize_deadline = time.monotonic() + 30
 
+    @property
+    def cancellation(self):
+        return RunStopped("cancelled", 128 + self.cancelled) if self.cancelled else None
+
+    def preservation_mode(self):
+        """Use preservation after a stop or once finalization has begun."""
+        if self._stop_reason(self.deadline):
+            self.finalize()
+        return self.finalize_deadline is not None
+
+    def _budget_deadline(self, maintenance):
+        return self.finalize_deadline if maintenance and self.finalize_deadline is not None else self.deadline
+
+    def _stop_reason(self, deadline, *, maintenance=False, expired="run_duration_limit", now=None):
+        if self.cancelled and not maintenance:
+            return "cancelled"
+        if (time.monotonic() if now is None else now) >= deadline:
+            return expired
+        return None
+
     def guard(self, *, maintenance=False):
+        now = time.monotonic()
         if maintenance:
-            now = time.monotonic()
-            if self.finalize_deadline is None and (self.cancelled or now >= self.deadline):
+            if self.finalize_deadline is None and self._stop_reason(self.deadline, now=now):
                 self.finalize()
-            deadline = self.finalize_deadline if self.finalize_deadline is not None else self.deadline
-            if now >= deadline:
-                raise RunStopped("finalization_timeout" if self.finalize_deadline is not None else "run_duration_limit",
-                                 1 if self.finalize_deadline is not None else 2)
-            return
-        if self.cancelled:
-            raise RunStopped("cancelled", 128 + self.cancelled)
-        if time.monotonic() >= self.deadline:
-            raise RunStopped("run_duration_limit", 2)
+        expired = "finalization_timeout" if maintenance and self.finalize_deadline is not None else "run_duration_limit"
+        reason = self._stop_reason(self._budget_deadline(maintenance), maintenance=maintenance, expired=expired, now=now)
+        if reason:
+            code = {"cancelled": 128 + self.cancelled, "run_duration_limit": 2}.get(reason, 1)
+            raise RunStopped(reason, code)
 
     @staticmethod
     def kill_group(process, sig):
@@ -66,19 +82,16 @@ class Executor:
             input_stream = open(stdin, "rb") if stdin else None
             try:
                 self.guard(maintenance=maintenance)
-                budget_deadline = (self.finalize_deadline
-                                   if maintenance and self.finalize_deadline is not None else self.deadline)
+                budget_deadline = self._budget_deadline(maintenance)
                 # None omits only the per-command cap; the enclosing budget is finite.
                 phase_deadline = start + timeout if timeout is not None else budget_deadline
                 deadline = min(phase_deadline, budget_deadline)
+                expired = "run_duration_limit" if not maintenance and self.deadline <= phase_deadline else "timeout"
                 process = subprocess.Popen(argv, stdin=input_stream or subprocess.DEVNULL,
                                            stdout=out, stderr=err, env=env, cwd=cwd, start_new_session=True)
                 while process.poll() is None:
-                    if self.cancelled and not maintenance:
-                        reason = "cancelled"
-                        break
-                    if time.monotonic() >= deadline:
-                        reason = "run_duration_limit" if not maintenance and self.deadline <= phase_deadline else "timeout"
+                    reason = self._stop_reason(deadline, maintenance=maintenance, expired=expired)
+                    if reason:
                         break
                     time.sleep(0.025)
             finally:
@@ -170,21 +183,18 @@ class Executor:
             if worker:
                 self.worker_stopped = stopped
             if not stopped:
-                self.errors.append(f"container_cleanup_failed: shutdown of {name} could not be confirmed")
-                if primary is None:
-                    raise RunStopped("container_cleanup_failed")
+                error = RunStopped("container_cleanup_failed")
+                if preserve_failure(primary, error, self.errors,
+                                    f"container_cleanup_failed: shutdown of {name} could not be confirmed") is error:
+                    raise error
 
     def _remove_container(self, name):
         folder = self.directory / "operations"
         try:
             for action, options in (("stop", ("--time", "2")), ("rm", ("--force",))):
-                if self.cancelled or time.monotonic() >= self.deadline:
-                    self.finalize()
                 self.command(["docker", action, *options, name], folder / f"{name}-{action}.log",
                              folder / f"{name}-{action}.stderr.log", 5, maintenance=True)
             # Listing requires a healthy daemon. A failed inspect alone could mean an outage.
-            if self.cancelled or time.monotonic() >= self.deadline:
-                self.finalize()
             remaining = self.control(["docker", "ps", "-aq", "--filter", f"name=^/{name}$"],
                                      timeout=5, maintenance=True)
             return not remaining.strip()

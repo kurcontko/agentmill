@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from agentmill.contracts import Command, ProcessOutput, RunSpec, RunStopped
 from agentmill.executor import Container, Executor
@@ -118,6 +118,25 @@ class ExecutorTests(unittest.TestCase):
                         self.executor.command(['must-not-start'], self.root/'out', self.root/'err',
                                               10, maintenance=maintenance)
                     launch.assert_not_called()
+
+    def test_delayed_poll_preserves_phase_timeout_and_cancellation_precedence(self):
+        for cancel in (False, True):
+            now = [0]
+            def advance(_):
+                now[0] = 10  # Both the 5s command cap and 7s run budget have expired.
+                if cancel:
+                    self.executor.cancel(15)
+            process = Mock(returncode=0)
+            process.poll.side_effect = [None, None]
+            self.executor.deadline = 7
+            self.executor.cancelled = 0
+            self.executor.finalize_deadline = None
+            with self.subTest(cancel=cancel), patch('agentmill.executor.time.monotonic', lambda: now[0]), \
+                 patch('agentmill.executor.time.sleep', advance), \
+                 patch('agentmill.executor.subprocess.Popen', return_value=process), \
+                 patch.object(self.executor, 'kill_group'):
+                output = self.executor.command(['fixture'], self.root/'out', self.root/'err', 5)
+            self.assertEqual(output.stop_reason, 'cancelled' if cancel else 'timeout')
 
     def test_finalization_allowance_is_not_renewed(self):
         with patch('agentmill.executor.time.monotonic', return_value=10):

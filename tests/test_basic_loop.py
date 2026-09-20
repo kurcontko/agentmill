@@ -351,6 +351,23 @@ class BasicLoopTests(unittest.TestCase):
         self.assertEqual(outcome.stop_reason, 'check_command_unavailable')
         self.assertIn('check record unavailable', ' '.join(outcome.errors))
 
+    def test_check_record_failure_after_passing_checks_still_fails(self):
+        with patch('agentmill.checks.atomic_json', side_effect=OSError('check record unavailable')):
+            outcome = self.launch(checks=('true',))
+        self.assertEqual((outcome.stop_reason, outcome.exit_code), ('runtime_error', 1))
+        self.assertEqual(outcome.checks[0]['status'], 'passed')
+        self.assertIn('check record unavailable', ' '.join(outcome.errors))
+
+    def test_failed_initial_checkout_does_not_publish_a_partial_revision(self):
+        with patch.object(Workspace, 'checkout', side_effect=OSError('checkout unavailable')), \
+             patch.object(Workspace, 'export') as export:
+            outcome = self.launch()
+        export.assert_not_called()
+        self.assertEqual((outcome.stop_reason, outcome.exit_code), ('runtime_error', 1))
+        self.assertIsNone(outcome.base_revision)
+        self.assertIsNone(outcome.latest_candidate_sha)
+        self.assertEqual(outcome.sessions, 0)
+
     def test_partial_check_set_is_not_a_passing_candidate(self):
         outcome = self.launch(checks=('true', 'exec agentmill-nonexistent-command'))
         self.assertEqual(outcome.stop_reason, 'check_command_unavailable')

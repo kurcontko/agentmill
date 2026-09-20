@@ -3,7 +3,7 @@
 from pathlib import Path
 import sys
 
-from .contracts import RunStopped
+from .contracts import RunStopped, preserve_failure
 from .records import atomic_json
 
 
@@ -62,9 +62,8 @@ def check_candidate(spec, executor, workspace, records, outcome, revision, sessi
             for result in results:
                 records.emit("check.finished", **result)
         except (OSError, ValueError) as error:
-            if primary is None:
+            if preserve_failure(primary, error, executor.errors, f"check record failed: {error}") is error:
                 raise
-            executor.errors.append(f"check record failed: {error}")
 
 
 def feedback(results, limit=12000):

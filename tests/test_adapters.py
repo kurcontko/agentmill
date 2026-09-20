@@ -105,6 +105,7 @@ class AdapterTests(unittest.TestCase):
         codex = get_adapter('codex').build_command(SessionRequest('chosen-model','profile',True))
         self.assertEqual(codex.argv[0:2], ('codex','exec'))
         self.assertEqual(codex.argv[-1], '-')
+        self.assertNotIn('--output-last-message', codex.argv)
         self.assertIn('danger-full-access',codex.argv)
         self.assertIn('profile',codex.argv)
         self.assertIn('chosen-model',codex.argv)

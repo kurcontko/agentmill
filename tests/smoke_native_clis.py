@@ -158,7 +158,9 @@ def main():
             assert events[-1]['structured_output']==REPLY
         else:
             assert events[-1]['type']=='turn.completed'
-            assert json.loads(Path('/scratch/reply.json').read_text())==REPLY
+            messages = [event['item']['text'] for event in events if event.get('type')=='item.completed'
+                        and event['item'].get('type')=='agent_message']
+            assert json.loads(messages[-1])==REPLY
         print(f'PASS real {backend}: shell tool, structured terminal reply, isolated permissions',flush=True)
     server.shutdown()
 

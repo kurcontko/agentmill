@@ -26,6 +26,13 @@ class RunStopped(Exception):
         self.exit_code = exit_code
 
 
+def preserve_failure(primary, error, diagnostics, message=None):
+    """Record a secondary fault without replacing an existing primary failure."""
+    if message is not None:
+        diagnostics.append(message)
+    return primary if primary is not None else error
+
+
 @dataclass(frozen=True)
 class RunSpec:
     source: str
@@ -122,7 +129,6 @@ class SessionRequest:
 class Command:
     argv: tuple[str, ...]
     stdin: str = "/inputs/prompt.txt"
-    reply_path: str | None = None
 
 
 @dataclass
@@ -151,6 +157,24 @@ class RunOutcome:
     environment: dict = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     schema_version: int = 1
+
+    def finish(self, failure=None, *, cancellation=None):
+        """Construct the terminal result once, after required preservation work."""
+        if failure is None:
+            reason, code = "checked_complete", 0
+        elif isinstance(failure, RunStopped):
+            reason, code = failure.reason, failure.exit_code
+        else:
+            reason, code = "runtime_error", 1
+            self.errors.append(f"{type(failure).__name__}: {failure}")
+        if cancellation is not None:
+            if reason != "cancelled":
+                self.errors.append(f"cancelled while handling: {reason}")
+            reason, code = cancellation.reason, cancellation.exit_code
+        self.status = "cancelled" if cancellation is not None else {
+            0: "checked_complete", 2: "incomplete", 3: "blocked",
+            130: "cancelled", 143: "cancelled"}.get(code, "failed")
+        self.stop_reason, self.exit_code = reason, code
 
     def to_dict(self):
         return asdict(self)

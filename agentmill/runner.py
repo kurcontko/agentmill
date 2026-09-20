@@ -5,11 +5,10 @@ import json
 from pathlib import Path
 import signal
 import threading
-import time
 
 from .adapters import get_adapter
 from .checks import check_candidate, feedback
-from .contracts import REPLY_SCHEMA, RunOutcome, RunSpec, RunStopped, SessionRequest
+from .contracts import REPLY_SCHEMA, RunOutcome, RunSpec, RunStopped, SessionRequest, preserve_failure
 from .executor import Executor
 from .records import Records, atomic_json, runs_root
 from .workspace import Workspace
@@ -43,14 +42,14 @@ def run_session(spec, executor, workspace, records, outcome, command, directory,
                      stop_reason=str(primary) if primary else None,
                      agent_status=(outcome.agent_reply or {}).get("status"))
     except RUN_ERRORS as error:
-        outcome.errors.append(f"session record failed: {error}")
-        primary = primary or error
-    if primary or (reply and reply.status == "blocked") or executor.cancelled or executor.deadline <= time.monotonic():
+        primary = preserve_failure(primary, error, outcome.errors, f"session record failed: {error}")
+    if primary or (reply and reply.status == "blocked"):
         executor.finalize()
     try:
         if not executor.worker_stopped:
             raise RunStopped("capture_unsafe_worker_running")
-        maintenance = executor.finalize_deadline is not None
+        maintenance = executor.preservation_mode()
+        previous = workspace.latest
         try:
             candidate = workspace.capture(outcome.sessions, maintenance=maintenance)
         except RunStopped as error:
@@ -58,44 +57,39 @@ def run_session(spec, executor, workspace, records, outcome, command, directory,
                 raise
             # Interruption can arrive between capture's Git commands. Restart once
             # against the same stopped workspace using the remaining finalization budget.
-            primary = primary or error
+            primary = preserve_failure(primary, error, outcome.errors)
             executor.finalize()
             candidate = workspace.capture(outcome.sessions, maintenance=True)
-        if candidate != outcome.latest_candidate_sha:
+        if candidate != previous:
             outcome.candidate_check_status = "unchecked"
-        outcome.latest_candidate_sha = candidate
     except RUN_ERRORS as error:
-        outcome.errors.append(f"candidate capture failed: {error}; artifacts cover only the last captured "
-                              f"revision {outcome.latest_candidate_sha}; uncaptured work remains in {workspace.path}")
-        if primary is None:
-            primary = error if isinstance(error, RunStopped) else RunStopped("candidate_capture_failed")
+        failure = error if isinstance(error, RunStopped) else RunStopped("candidate_capture_failed")
+        primary = preserve_failure(primary, failure, outcome.errors,
+            f"candidate capture failed: {error}; artifacts cover only the last captured "
+            f"revision {workspace.latest}; uncaptured work remains in {workspace.path}")
     else:
         try:
             records.emit("candidate.captured", session=outcome.sessions, candidate_sha=candidate)
         except RUN_ERRORS as error:
-            outcome.errors.append(f"candidate record failed: {error}")
-            primary = primary or error
+            primary = preserve_failure(primary, error, outcome.errors, f"candidate record failed: {error}")
     if primary:
         raise primary
     return reply, candidate
 
 
-def finish_run(executor, workspace, records, outcome):
+def finish_run(executor, workspace, records, outcome, failure):
     executor.finalize()
-    if workspace and outcome.base_revision:
+    if workspace:
+        outcome.base_revision = workspace.base
+        outcome.latest_candidate_sha = workspace.latest
+    if workspace and workspace.base:
         try:
             executor.guard(maintenance=True)
             outcome.artifacts.update(workspace.export(outcome.last_passing_candidate_sha))
         except RUN_ERRORS as error:
-            outcome.errors.append(f"artifact export failed: {error}")
-            if outcome.exit_code == 0:
-                outcome.status, outcome.stop_reason, outcome.exit_code = "failed", "artifact_export_failed", 1
-    outcome.errors.extend(executor.errors)
-    if executor.cancelled:
-        if outcome.stop_reason != "cancelled":
-            outcome.errors.append(f"cancelled while handling: {outcome.stop_reason}")
-        outcome.status, outcome.stop_reason = "cancelled", "cancelled"
-        outcome.exit_code = 128 + executor.cancelled
+            failure = preserve_failure(failure, RunStopped("artifact_export_failed"), outcome.errors,
+                                       f"artifact export failed: {error}")
+    outcome.finish(failure, cancellation=executor.cancellation)
     records.finish(outcome)
 
 
@@ -129,12 +123,13 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
     outcome = RunOutcome(records.run_id)
     outcome.artifacts = {"run_directory": str(records.directory),
                          "workspace": str(records.directory / "workspace")}
-    executor = Executor(spec, records.directory)
+    executor = Executor(spec, records.directory, errors=outcome.errors)
     previous_handlers = {}
     if threading.current_thread() is threading.main_thread():
         for sig in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[sig] = signal.signal(sig, executor.cancel)
     workspace = None
+    failure = RunStopped("startup_failed")
     try:
         atomic_json(records.directory / "spec.json", spec.to_dict())
         (records.directory / "task.txt").write_text(spec.task, encoding="utf-8")
@@ -145,8 +140,7 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
                      check_timeout=spec.check_timeout,
                      input_policy="Only the selected committed revision; source working files are not included.")
         workspace = Workspace(executor, records.directory)
-        outcome.base_revision = workspace.prepare(spec.source, spec.revision)
-        outcome.latest_candidate_sha = outcome.base_revision
+        workspace.prepare(spec.source, spec.revision)
         atomic_json(records.directory / "spec.json", {**spec.to_dict(), "revision": workspace.base})
         # Record the resolved input once; never resolve a branch again during this run.
         atomic_json(records.directory / "input.json", {"source": spec.source, "base_revision": workspace.base})
@@ -167,12 +161,11 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
             (inputs / "prompt.txt").write_text(prompt, encoding="utf-8")
             atomic_json(inputs / "reply.schema.json", REPLY_SCHEMA)
             command = adapter.build_command(SessionRequest(spec.model, spec.profile, bool(spec.agent_config)))
-            atomic_json(directory / "command.json", {"argv": command.argv, "stdin": command.stdin,
-                                                     "reply_path": command.reply_path})
+            atomic_json(directory / "command.json", asdict(command))
             records.emit("session.started", session=session, max_sessions=spec.max_sessions, logs=str(directory))
             reply, candidate = run_session(spec, executor, workspace, records, outcome, command, directory, inputs)
-            if executor.cancelled:
-                executor.guard()
+            if cancellation := executor.cancellation:
+                raise cancellation
             if reply.status == "blocked":
                 raise RunStopped("agent_blocked", 3)
             executor.guard()
@@ -181,19 +174,15 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
             # the single finalization allowance after that decision.
             executor.guard()
             if reply.status == "done" and passed:
-                outcome.status, outcome.stop_reason, outcome.exit_code = "checked_complete", "checked_complete", 0
+                failure = None
                 break
         else:
             raise RunStopped("session_limit", 2)
-    except RunStopped as error:
-        outcome.stop_reason, outcome.exit_code = error.reason, error.exit_code
-        outcome.status = {2: "incomplete", 3: "blocked", 130: "cancelled", 143: "cancelled"}.get(error.exit_code, "failed")
-    except (OSError, ValueError, KeyError) as error:
-        outcome.stop_reason, outcome.exit_code, outcome.status = "runtime_error", 1, "failed"
-        outcome.errors.append(f"{type(error).__name__}: {error}")
+    except RUN_ERRORS as error:
+        failure = error
     finally:
         try:
-            finish_run(executor, workspace, records, outcome)
+            finish_run(executor, workspace, records, outcome, failure)
         finally:
             for sig, handler in previous_handlers.items():
                 signal.signal(sig, handler)
