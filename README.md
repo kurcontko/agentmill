@@ -161,8 +161,12 @@ Repository-owned tests may be edited by the agent. Passing them is useful
 evidence, not independent proof of every requirement. `--check-dir` keeps the
 agent from editing those checks, but candidate code still runs beside them in the
 check container and can read or interfere with them: protected checks raise
-confidence; they do not prove correctness. Containers have network
-access. Filename exclusions are not a secret scanner; logs and retained work
+confidence; they do not prove correctness.
+
+**Containers have open network access, and workers can read the credential you
+select.** A prompt-injected agent could send the repository or that credential to
+any host. Use a dedicated, low-limit key, and read the
+[threat model](SECURITY.md#threat-model) before running on sensitive code. Filename exclusions are not a secret scanner; logs and retained work
 may contain sensitive data. Time/session limits are not universal billing,
 CPU, memory, or disk quotas. Read the [isolation and authentication reference](docs/runner-reference.md).
 
