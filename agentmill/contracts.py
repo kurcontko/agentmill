@@ -20,10 +20,11 @@ REPLY_SCHEMA = {
 
 
 class RunStopped(Exception):
-    def __init__(self, reason, exit_code=1):
+    def __init__(self, reason, exit_code=1, detail=None):
         super().__init__(reason)
         self.reason = reason
         self.exit_code = exit_code
+        self.detail = detail
 
 
 def preserve_failure(primary, error, diagnostics, message=None):

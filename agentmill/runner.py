@@ -111,8 +111,15 @@ def session_prompt(spec, outcome, baseline, previous):
 def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
     source_path = Path(spec.source).expanduser()
     storage = Path(runs_dir) if runs_dir else runs_root()
-    if source_path.is_dir() and storage.resolve().is_relative_to(source_path.resolve()):
-        raise ValueError("run directory must be outside the source checkout")
+    if source_path.is_dir():
+        git_dir = source_path / ".git"
+        if not git_dir.exists() and not git_dir.is_symlink():
+            raise ValueError(f"source is not the root of a Git checkout (no .git in {source_path})")
+        if git_dir.is_symlink() or not git_dir.is_dir():
+            raise ValueError("source .git is not a directory; linked worktrees and submodule "
+                             "checkouts are not supported, so use the main checkout or a Git URL")
+        if storage.resolve().is_relative_to(source_path.resolve()):
+            raise ValueError("run directory must be outside the source checkout")
     # Reject unusable native inputs before cloning, setup or baseline checks.
     # The executor rechecks before mounting in case a file disappears during a run.
     for field in ("agent_config", "auth_file"):
@@ -139,13 +146,14 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
                      setup_timeout=spec.setup_timeout, session_timeout=spec.session_timeout,
                      check_timeout=spec.check_timeout,
                      input_policy="Only the selected committed revision; source working files are not included.")
+        # Fail on a missing image or unreachable Docker before cloning the source.
+        outcome.environment = executor.inspect_image()
         workspace = Workspace(executor, records.directory)
         workspace.prepare(spec.source, spec.revision)
         atomic_json(records.directory / "spec.json", {**spec.to_dict(), "revision": workspace.base})
         # Record the resolved input once; never resolve a branch again during this run.
         atomic_json(records.directory / "input.json", {"source": spec.source, "base_revision": workspace.base})
         records.emit("candidate.captured", session=0, candidate_sha=workspace.base)
-        outcome.environment = executor.inspect_image()
         passed, previous = check_candidate(spec, executor, workspace, records, outcome, workspace.base)
         baseline = "passed" if passed else "failed"
         adapter = get_adapter(spec.agent)

@@ -17,6 +17,14 @@ source object store. Worker and check checkouts copy objects from the private
 snapshot store with `--local --no-hardlinks`: no repacking, shared object
 alternates, or writable hardlinks to the supervisor's store.
 
+Before cloning, the runner checks that the source directory is a checkout root
+and that Docker can inspect the selected image. A missing image stops with
+`image_unavailable` (build it with `./mill build`); an unreachable daemon stops
+with `docker_unavailable`. Other failed Docker or Git operations report
+`runtime_failed` with the tool's last error output and the operation log path.
+Docker Desktop and Colima only share some host directories with their VM; keep
+`--runs-dir` under a shared directory such as your home directory.
+
 The checkout's `./mill` launcher can load environment defaults from its own `.env`;
 the installed Python entrypoint does not. Both accept `CHECK_CMD` and
 `AGENTMILL_IMAGE` from their environment. Choose `--setup` explicitly for the

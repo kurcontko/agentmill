@@ -14,6 +14,44 @@ import uuid
 from .contracts import ProcessOutput, RunStopped, preserve_failure
 
 
+DOCKER_UNREACHABLE = ("cannot connect to the docker daemon", "failed to connect to the docker api",
+                      "is the docker daemon running")
+
+
+def stderr_tail(path, limit=600):
+    try:
+        with Path(path).open("rb") as stream:
+            stream.seek(max(0, Path(path).stat().st_size - limit))
+            text = stream.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    return " / ".join(line.strip() for line in text.splitlines() if line.strip())[-limit:]
+
+
+def command_name(argv):
+    """Name a tool invocation without its option values, e.g. `git clone`."""
+    words, skip = [Path(argv[0]).name], False
+    for word in argv[1:]:
+        if skip:
+            skip = False
+        elif word in ("-c", "-C", "--git-dir", "--work-tree"):
+            skip = True
+        elif not word.startswith("-"):
+            words.append(word)
+            break
+    return " ".join(words)
+
+
+def runtime_hint(detail):
+    text = (detail or "").lower()
+    if any(marker in text for marker in DOCKER_UNREACHABLE):
+        return ". Docker is not reachable: start Docker Desktop, Colima, or the Docker daemon"
+    if "bind source path does not exist" in text:
+        return (". Docker cannot see this host path: keep --runs-dir in a directory shared with "
+                "the Docker VM, such as one under your home directory")
+    return ""
+
+
 class Executor:
     def __init__(self, spec, directory, *, errors=None):
         self.spec = spec
@@ -127,11 +165,32 @@ class Executor:
         output = self.command(argv, folder / f"{self.operation:04d}.log",
                               folder / f"{self.operation:04d}.stderr.log", timeout,
                               maintenance=maintenance, env=env)
-        self.require(output, "runtime")
+        # Interruptions explain themselves; a failed or stalled tool needs its own words.
+        detail = None
+        if output.stop_reason == "timeout" or (output.returncode and output.stop_reason is None):
+            detail = stderr_tail(output.stderr)
+            status = "timed out" if output.stop_reason else f"exited {output.returncode}"
+            self.errors.append(f"{command_name(argv)} {status}: {detail or 'no error output'}"
+                               f" (log: {output.stderr}){runtime_hint(detail)}")
+        try:
+            self.require(output, "runtime")
+        except RunStopped as error:
+            error.detail = detail
+            raise
         return output.stdout.read_bytes()
 
     def inspect_image(self):
-        data = json.loads(self.control(["docker", "image", "inspect", self.spec.image]))
+        try:
+            data = json.loads(self.control(["docker", "image", "inspect", self.spec.image]))
+        except RunStopped as error:
+            text = (error.detail or "").lower()
+            if any(marker in text for marker in DOCKER_UNREACHABLE):
+                raise RunStopped("docker_unavailable") from error
+            if "no such image" in text or "no such object" in text:
+                self.errors.append(f"image {self.spec.image} is not available locally; build it with "
+                                   "`mill build` from the AgentMill checkout, or select one with --image")
+                raise RunStopped("image_unavailable") from error
+            raise
         self.image = data[0]["Id"]
         return {"image": self.spec.image, "image_id": self.image,
                 "repo_digests": data[0].get("RepoDigests", []),

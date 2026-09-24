@@ -385,6 +385,17 @@ class BasicLoopTests(unittest.TestCase):
                     self.assertIsNone(outcome.agent_reply)
                     self.assertIsNone(outcome.last_passing_candidate_sha)
                     self.assertTrue(Path(outcome.artifacts['patch']).stat().st_size)
+    def test_source_must_be_a_checkout_root_before_any_run_is_created(self):
+        plain = self.root / 'plain'
+        plain.mkdir()
+        linked = self.root / 'linked'
+        linked.mkdir()
+        (linked / '.git').write_text('gitdir: elsewhere\n')
+        for source, message in ((plain, 'not the root of a Git checkout'), (linked, 'linked worktrees')):
+            with self.subTest(source=source.name), self.assertRaisesRegex(ValueError, message):
+                self.launch(source=str(source))
+        self.assertFalse((self.root / 'runs').exists())
+
 
     def test_checks_have_no_host_credentials_and_setup_runs_per_candidate(self):
         self.set_mode('done')

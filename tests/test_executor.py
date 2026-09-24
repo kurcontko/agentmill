@@ -188,6 +188,39 @@ class ExecutorTests(unittest.TestCase):
                 self.executor.require(ProcessOutput(1,self.root/'out',self.root/'err',0,reason),phase)
             self.assertEqual(caught.exception.exit_code,expected)
 
+    def failing_control(self, stderr, returncode=1, stop_reason=None):
+        def command(argv, stdout, stderr_path, timeout, **kwargs):
+            stdout.parent.mkdir(parents=True, exist_ok=True)
+            stdout.write_bytes(b'')
+            stderr_path.write_text(stderr)
+            return ProcessOutput(returncode, stdout, stderr_path, 0, stop_reason)
+        return patch.object(self.executor, 'command', command)
+
+    def test_runtime_failures_report_the_tool_error_and_a_hint(self):
+        cases = (('Error response from daemon: No such image: agentmill:latest', 'image_unavailable', 'mill build'),
+                 ('failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is '
+                  'correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file '
+                  'or directory', 'docker_unavailable', 'Docker is not reachable'),
+                 ('Error: No such object: agentmill:latest', 'image_unavailable', 'mill build'),
+                 ('permission denied while trying to connect', 'runtime_failed', 'permission denied'))
+        for stderr, reason, message in cases:
+            self.executor.errors.clear()
+            with self.subTest(reason=reason), self.failing_control(stderr), self.assertRaises(RunStopped) as caught:
+                self.executor.inspect_image()
+            self.assertEqual(caught.exception.reason, reason)
+            self.assertIn(message, ' '.join(self.executor.errors))
+            self.assertIn('docker image exited 1', self.executor.errors[0])
+
+    def test_runtime_timeouts_and_unshared_mounts_are_explained(self):
+        with self.failing_control('', None, 'timeout'), self.assertRaises(RunStopped):
+            self.executor.control(['git', '-c', 'core.hooksPath=/dev/null', '--git-dir', '/x', 'clone', 'src'])
+        self.assertIn('git clone timed out: no error output', self.executor.errors[-1])
+        with self.failing_control('invalid mount config: bind source path does not exist: /tmp/x'), \
+             self.assertRaises(RunStopped) as caught:
+            self.executor.control(['docker', 'create', '--name', 'x'])
+        self.assertIn('shared with the Docker VM', self.executor.errors[-1])
+        self.assertEqual(caught.exception.reason, 'runtime_failed')
+
     def test_mount_rejects_ambiguous_paths_and_config_requires_file(self):
         with self.assertRaises(ValueError):
             Executor.mount(self.root/'path,with,commas','/workspace')
