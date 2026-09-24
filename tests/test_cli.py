@@ -206,7 +206,7 @@ with patch('agentmill.runner.Workspace.prepare', wait_for_cancel):
             if line.startswith(('Show: ', 'Diff: ')):
                 name, command = line.split(': ', 1)
                 args = shlex.split(command)
-                self.assertEqual(args[0], 'mill')
+                self.assertEqual(args[0], 'agentmill')
                 self.assertIn(str(root.resolve()), args)
                 commands[name] = args[1:]
         self.assertEqual(set(commands), {'Show', 'Diff'})

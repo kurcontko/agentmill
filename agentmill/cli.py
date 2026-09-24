@@ -9,7 +9,7 @@ import re
 import shlex
 import sys
 
-from .contracts import RunSpec
+from .contracts import DEFAULT_IMAGE, RunSpec
 from .output import OutputSink
 from .records import runs_root
 from .runner import run
@@ -26,7 +26,7 @@ def duration(value):
 
 
 def parser():
-    root = argparse.ArgumentParser(prog="mill", description="A bounded, checked native coding-agent runner.")
+    root = argparse.ArgumentParser(prog="agentmill", description="A bounded, checked native coding-agent runner.")
     commands = root.add_subparsers(dest="command", required=True)
     launch = commands.add_parser("run", help="run one task in a private checkout")
     launch.add_argument("source", nargs="?")
@@ -61,7 +61,7 @@ def parser():
     return root
 
 
-def human_result(value, directory, launcher=("mill",)):
+def human_result(value, directory, launcher=("agentmill",)):
     directory = Path(directory).resolve()
     candidate = value.get("latest_candidate_sha")
     check_status = value.get("candidate_check_status", "unknown (see recorded checks)")
@@ -98,7 +98,7 @@ def human_result(value, directory, launcher=("mill",)):
     return "\n".join(lines)
 
 
-def human_event(event, sink=None, launcher=("mill",)):
+def human_event(event, sink=None, launcher=("agentmill",)):
     kind = event["event"]
     if kind == "run.started":
         message = (f"Run:       {event['run_id']}\nSource:    {event['source']} @ {event['revision']}\n"
@@ -137,7 +137,7 @@ def make_spec(args):
         if value is not None:
             values[name] = value
     values.setdefault("source", os.environ.get("REPO_PATH", str(Path.cwd())))
-    values.setdefault("image", os.environ.get("AGENTMILL_IMAGE", "agentmill:latest"))
+    values.setdefault("image", os.environ.get("AGENTMILL_IMAGE", DEFAULT_IMAGE))
     if not isinstance(values["source"], str) or not values["source"].strip():
         raise ValueError("source must be a nonempty string")
     if args.task_file:
@@ -214,7 +214,7 @@ def main(argv=None, *, launcher=None):
         return outcome.exit_code
     except (OSError, ValueError) as error:
         with suppress(OSError):
-            diagnostics.write(f"mill: {error}")
+            diagnostics.write(f"agentmill: {error}")
         return 1
 
 

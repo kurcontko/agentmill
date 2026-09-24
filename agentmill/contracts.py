@@ -5,6 +5,11 @@ import math
 from pathlib import Path
 import re
 
+from . import __version__
+
+# Installed CLIs and the Python API use the published image for this version;
+# the source checkout's ./mill launcher selects its locally built agentmill:latest.
+DEFAULT_IMAGE = f"ghcr.io/kurcontko/agentmill:{__version__}"
 
 REPLY_SCHEMA = {
     "type": "object",
@@ -49,7 +54,7 @@ class RunSpec:
     setup_timeout: float = 300
     session_timeout: float = 900
     check_timeout: float = 300
-    image: str = "agentmill:latest"
+    image: str = DEFAULT_IMAGE
     credential_env: tuple[str, ...] | None = None
     agent_config: str | None = None
     auth_file: str | None = None

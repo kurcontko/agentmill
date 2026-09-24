@@ -20,6 +20,7 @@ cat > "$scratch_dir/bin/python3" <<'SH'
 set -euo pipefail
 printf '%s\n' "$@" > "$CALL_LOG"
 printf '%s\n' "${REPO_PATH:-}" > "$ENV_LOG"
+printf '%s\n' "${AGENTMILL_IMAGE:-}" > "$ENV_LOG.image"
 SH
 chmod +x "$scratch_dir/bin/docker" "$scratch_dir/bin/python3"
 
@@ -41,6 +42,10 @@ run_mill run --task 'Fix retry handling' --check true
 printf '%s\n' -I "$install_dir/basic_loop.py" run --task 'Fix retry handling' --check true > "$scratch_dir/expected"
 cmp "$scratch_dir/call" "$scratch_dir/expected"
 [[ "$(cat "$scratch_dir/env")" == "$scratch_dir/default repo" ]]
+# The checkout runs its locally built image; an explicit selection wins.
+[[ "$(cat "$scratch_dir/env.image")" == agentmill:latest ]]
+AGENTMILL_IMAGE=custom:tag run_mill run --task 'Fix retry handling' --check true
+[[ "$(cat "$scratch_dir/env.image")" == custom:tag ]]
 REPO_PATH="$scratch_dir/selected repo" run_mill show r_1111111111111111 --runs-dir "$scratch_dir/runs"
 printf '%s\n' -I "$install_dir/basic_loop.py" show r_1111111111111111 --runs-dir "$scratch_dir/runs" > "$scratch_dir/expected"
 cmp "$scratch_dir/call" "$scratch_dir/expected"

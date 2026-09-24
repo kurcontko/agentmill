@@ -13,7 +13,7 @@ the public contract and docs/runner-reference.md for detailed interfaces.
 - `agentmill/records.py`: versioned events and atomic terminal outcome.
 - `agentmill/adapters/`: native command construction and final-result parsing only.
 - `agentmill/cli.py`: run, show and diff.
-- `mill`: checkout launcher, image build, and optional mission init.
+- `mill`: checkout launcher (installed CLI is `agentmill`), image build, optional mission init.
 - `basic_loop.py`: isolated Python launcher for the evolved checked loop.
 
 The supervisor runs on the host. Workers never receive a writable mount of its

@@ -173,14 +173,15 @@ To install the Python entrypoint into a virtual environment, from this checkout:
 python3 -m venv "$HOME/.venvs/agentmill"
 source "$HOME/.venvs/agentmill/bin/activate"
 python -m pip install .
-mill --help
+agentmill --help
 ```
 
-The installed `mill` provides **run, show, and diff** with standard-library runtime
-dependencies. The checkout also provides `build`, `init`, and a `.env` loader.
-Build the image with the checkout's `./mill build` (or
-`docker build -t agentmill:latest /path/to/checkout`), then use the installed CLI
-from any directory. `--image` selects a custom local image; runs record its resolved ID.
+The installed `agentmill` provides **run, show, and diff** with standard-library runtime
+dependencies and defaults to the published image for its version,
+`ghcr.io/kurcontko/agentmill:<version>` (`docker pull` it once). The checkout's
+`./mill` launcher runs the same CLI against its locally built `agentmill:latest`
+and also provides `build`, `init`, and a `.env` loader. `--image` or
+`AGENTMILL_IMAGE` selects another image; runs record its resolved ID.
 
 - [Native config/auth inputs, JSON specs/events, Python API, and retained records](docs/runner-reference.md)
 

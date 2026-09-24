@@ -13,7 +13,7 @@ unset self link
 
 usage() {
     cat <<'EOF'
-mill — a bounded, checked native coding-agent runner
+mill — AgentMill's source-checkout launcher (the installed CLI is `agentmill`)
 
 Usage:
   mill build [--platform PLAT]      Build the image
@@ -47,6 +47,8 @@ load_env() {
 }
 
 cmd_run() {
+    # The checkout runs its own locally built image unless one is selected.
+    export AGENTMILL_IMAGE="${AGENTMILL_IMAGE:-agentmill:latest}"
     exec python3 -I "$MILL_DIR/basic_loop.py" run "$@"
 }
 

@@ -6,7 +6,7 @@ record layouts are experimental.
 
 ## Launch inputs and defaults
 
-`mill run --help` lists the supported flags. Source defaults to `REPO_PATH`, then
+`agentmill run --help` lists the supported flags. Source defaults to `REPO_PATH`, then
 the current directory, and may be a regular checkout, Git URL, or exported bundle.
 The selected revision is resolved once and retained. Uncommitted source changes
 are never imported. Explicit flags override fields in `--spec`.
@@ -19,7 +19,8 @@ alternates, or writable hardlinks to the supervisor's store.
 
 Before cloning, the runner checks that the source directory is a checkout root
 and that Docker can inspect the selected image. A missing image stops with
-`image_unavailable` (build it with `./mill build`); an unreachable daemon stops
+`image_unavailable` (`docker pull` the published image, or `./mill build` in a
+checkout); an unreachable daemon stops
 with `docker_unavailable`. Other failed Docker or Git operations report
 `runtime_failed` with the tool's last error output and the operation log path.
 Docker Desktop and Colima only share some host directories with their VM; keep
@@ -189,5 +190,5 @@ outcome = run(RunSpec(
 ```
 
 The Python package has no runtime dependencies and can be installed with
-`pip install .`; its `mill` entrypoint provides `run`, `show`, and `diff`. Image
-building and optional `init` convenience live in the checkout's `./mill`.
+`pip install .`; its `agentmill` entrypoint provides `run`, `show`, and `diff`. Image
+building and optional `init` convenience live in the checkout's `./mill` launcher.

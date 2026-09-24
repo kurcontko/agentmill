@@ -209,11 +209,12 @@ class ExecutorTests(unittest.TestCase):
         return patch.object(self.executor, 'command', command)
 
     def test_runtime_failures_report_the_tool_error_and_a_hint(self):
-        cases = (('Error response from daemon: No such image: agentmill:latest', 'image_unavailable', 'mill build'),
+        cases = (('Error response from daemon: No such image: agentmill:0.1.0', 'image_unavailable',
+                  'docker pull ghcr.io/kurcontko/agentmill:'),
                  ('failed to connect to the docker API at unix:///var/run/docker.sock; check if the path is '
                   'correct and if the daemon is running: dial unix /var/run/docker.sock: connect: no such file '
                   'or directory', 'docker_unavailable', 'Docker is not reachable'),
-                 ('Error: No such object: agentmill:latest', 'image_unavailable', 'mill build'),
+                 ('Error: No such object: agentmill:0.1.0', 'image_unavailable', 'docker pull'),
                  ('permission denied while trying to connect', 'runtime_failed', 'permission denied'))
         for stderr, reason, message in cases:
             self.executor.errors.clear()
@@ -222,6 +223,11 @@ class ExecutorTests(unittest.TestCase):
             self.assertEqual(caught.exception.reason, reason)
             self.assertIn(message, ' '.join(self.executor.errors))
             self.assertIn('docker image exited 1', self.executor.errors[0])
+        local = Executor(RunSpec(str(self.workspace), 'task', ('true',), image='agentmill:latest'), self.root)
+        with patch.object(local, 'command', self.failing_control('No such image: agentmill:latest').new), \
+             self.assertRaises(RunStopped):
+            local.inspect_image()
+        self.assertIn('./mill build', local.errors[-1])
 
     def test_runtime_timeouts_and_unshared_mounts_are_explained(self):
         with self.failing_control('', None, 'timeout'), self.assertRaises(RunStopped):

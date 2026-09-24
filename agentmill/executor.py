@@ -187,8 +187,10 @@ class Executor:
             if any(marker in text for marker in DOCKER_UNREACHABLE):
                 raise RunStopped("docker_unavailable") from error
             if "no such image" in text or "no such object" in text:
-                self.errors.append(f"image {self.spec.image} is not available locally; build it with "
-                                   "`mill build` from the AgentMill checkout, or select one with --image")
+                image = self.spec.image
+                fix = (f"pull it with `docker pull {image}`" if "/" in image
+                       else "build it with `./mill build` from an AgentMill checkout")
+                self.errors.append(f"image {image} is not available locally; {fix}, or select one with --image")
                 raise RunStopped("image_unavailable") from error
             raise
         self.image = data[0]["Id"]
