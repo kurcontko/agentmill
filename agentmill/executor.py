@@ -48,7 +48,8 @@ def runtime_hint(detail):
         return ". Docker is not reachable: start Docker Desktop, Colima, or the Docker daemon"
     if "bind source path does not exist" in text:
         return (". Docker cannot see this host path: keep --runs-dir in a directory shared with "
-                "the Docker VM, such as one under your home directory")
+                "the Docker VM, such as one under your home directory. AgentMill needs a local "
+                "daemon; a remote DOCKER_HOST or Docker context cannot mount local paths")
     return ""
 
 

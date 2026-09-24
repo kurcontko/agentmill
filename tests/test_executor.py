@@ -237,6 +237,7 @@ class ExecutorTests(unittest.TestCase):
              self.assertRaises(RunStopped) as caught:
             self.executor.control(['docker', 'create', '--name', 'x'])
         self.assertIn('shared with the Docker VM', self.executor.errors[-1])
+        self.assertIn('remote DOCKER_HOST or Docker context', self.executor.errors[-1])
         self.assertEqual(caught.exception.reason, 'runtime_failed')
 
     def test_mount_rejects_ambiguous_paths_and_config_requires_file(self):

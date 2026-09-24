@@ -24,7 +24,9 @@ checkout); an unreachable daemon stops
 with `docker_unavailable`. Other failed Docker or Git operations report
 `runtime_failed` with the tool's last error output and the operation log path.
 Docker Desktop and Colima only share some host directories with their VM; keep
-`--runs-dir` under a shared directory such as your home directory.
+`--runs-dir` under a shared directory such as your home directory. AgentMill
+bind-mounts local paths, so it needs a local daemon: a remote `DOCKER_HOST` or
+Docker context (for example over SSH) fails with the same unshared-path error.
 
 The checkout's `./mill` launcher can load environment defaults from its own `.env`;
 the installed Python entrypoint does not. Both accept `CHECK_CMD` and
