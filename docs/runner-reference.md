@@ -1,6 +1,6 @@
 # Runner reference
 
-See the [quick start](../README.md) for the ordinary run/inspect workflow.
+See the [README](../README.md) for the quick start and the ordinary run/inspect workflow.
 These interfaces support the same single-run contract; the Python API and internal
 record layouts are experimental.
 
@@ -139,6 +139,84 @@ user or ADE actions. For example, inspect a result in another directory:
 git clone -b agentmill-candidate /path/to/result.bundle /tmp/review-result
 ```
 
+## Completion, failures and deadlines
+
+`checked_complete` requires a successful native terminal envelope, a validated
+`done` claim, and every configured check passing on the latest captured
+candidate. Required cleanup, capture, and export must also succeed. An earlier
+passing revision never establishes completion of newer work.
+
+A failing baseline can be repaired. Ordinary failing checks become feedback for
+another bounded session; partial work is retained. A valid `blocked` reply stops
+after cleanup and capture, without starting another check environment. Its
+changed candidate is unchecked, and its question is preserved. An unchanged
+candidate retains its historical check evidence; no new checks run for blocked
+work.
+
+A native session that exits with an error, ends without a valid reply, or reaches
+`--session-timeout` still has its work captured. If sessions remain, that work is
+checked when it changed and seeds the next session, which is told why the previous
+one ended. A second consecutive failure, or one in the final session, stops the run
+with that failure (exit 2 for a timeout, otherwise 1). A failed session can never
+complete a run. Missing executables, Docker or image problems, and setup/check
+infrastructure faults stop the run immediately. Check exits 126/127 mean
+unavailable commands; other nonzero exits are repair feedback. There is no
+infrastructure retry or resume.
+
+An execution failure stays primary when capture or export also fails; secondary
+diagnostics remain visible. Cancellation retains its signal-derived exit code,
+including a signal during export after an in-budget success decision; already
+captured artifacts and passing-check evidence remain available. Capture requires
+confirmed worker shutdown. If capture fails, artifacts describe only the last
+successfully captured revision; uncaptured work remains in the workspace and is
+identified in diagnostics.
+
+Normal work and the success decision must fit within the run deadline. A single,
+nonrenewing finalization allowance of up to 30 seconds permits cleanup, capture,
+and export after stopping, or export after an in-budget success decision. If the
+run deadline or cancellation interrupts capture, one retry may use that same
+finalization allowance, after confirmed worker shutdown. Expired finalization
+admits no new subprocess, including Git export. These are supervisor policies,
+not strict wall-clock guarantees under kernel/filesystem stalls or a dead Docker
+daemon. Cleanup uncertainty is reported, never treated as success.
+
+Host Git operations use the remaining run budget, without a separate 30-second
+command cap. Finalization still has the single 30-second allowance. The bundle is
+self-contained and includes history; a sufficiently large export can exceed that
+allowance. Required export failure prevents checked completion and leaves the
+captured candidate and workspace available for inspection.
+
+## Inspecting runs
+
+Storage defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/agentmill/runs/`.
+`--runs-dir DIR` selects another location outside the source checkout; the printed
+inspection commands preserve that location and quote paths. Human summaries go
+to stderr. `list` prints one run per line to stdout (`--json` for objects);
+`show --json` returns the outcome; `diff` writes the exported patch to stdout.
+`show` and `diff` accept `latest`. `run --json` writes supervisor events to stdout
+and retains native output separately. A slow display is detached; the event file
+and atomic outcome remain authoritative. Missing `outcome.json` means
+unknown/interrupted, never success. Runs are never deleted automatically; remove a
+run's directory to reclaim its space.
+
+Review an exported bundle in a clean checkout, then run the relevant setup and
+checks there:
+
+```bash
+git clone --branch agentmill-candidate -- "/path/to/result.bundle" "/path/to/new-review"
+```
+
+Do not run host Git against the retained worker workspace's `.git`: the worker
+could have changed its configuration or hooks. Importing, applying, merging, and
+pushing are your explicit actions. AgentMill does none of them automatically.
+
+Setup runs in fresh containers: once for the baseline, once per worker session,
+and once per non-blocked candidate check, so a three-session run can execute
+setup seven times. Exported setup variables carry into later commands in that
+container; dependencies and environment state are not shared across containers.
+Setup and check commands must not change tracked candidate files; ignored build
+products are allowed.
+
 ## Machine and Python interfaces
 
 ```bash
@@ -175,7 +253,7 @@ candidate (`unchecked`, `passed`, `failed`, or `error`); a partial check set can
 establish a pass. A blocked reply leaves a changed capture unchecked. An unchanged
 capture retains the same revision's historical check evidence; non-blocked replies
 still trigger fresh checks, even for an unchanged revision. Run completion requires the full
-completion contract in the README, including cleanup and export.
+completion rules above, including cleanup and export.
 The CLI detaches a closed or stalled output stream after a bounded write attempt
 (100 ms per message). A detached JSON stream may end with a partial line. Read
 `events.jsonl` for the complete event sequence; slow consumers do not stop a run.
