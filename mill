@@ -13,17 +13,20 @@ unset self link
 
 usage() {
     cat <<'EOF'
-mill — a checked Claude loop in Docker
+mill — AgentMill's source-checkout launcher (the installed CLI is `agentmill`)
 
 Usage:
   mill build [--platform PLAT]      Build the image
   mill init [repo]                  Create a MILL.md mission
-  mill run [repo] --check CMD [--iterations N] [--timeout S] [--model M]
-  mill legacy COMMAND              Access the old Compose runtime
+  mill run [repo] --agent codex|claude --task TEXT --check CMD
+  mill run --spec run.json --json
+  mill list                         List retained runs, newest first
+  mill show RUN_ID|latest           Inspect a retained run
+  mill diff RUN_ID|latest           Print its final candidate patch
 
-Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in your environment or .env.
+Set CODEX_API_KEY, ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in your environment.
 Repo defaults to REPO_PATH, then the current directory.
-Run defaults: 5 sessions, 1800 seconds per setup/session/check.
+Run defaults: 3 sessions, 30 minutes total. See mill run --help.
 EOF
     exit "${1:-0}"
 }
@@ -45,64 +48,9 @@ load_env() {
 }
 
 cmd_run() {
-    local repo="${REPO_PATH:-$PWD}" iterations=5 timeout=1800 model="${MODEL:-}"
-    local check="${CHECK_CMD:-}" run_dir state_root status
-    [[ $# -gt 0 && "${1:0:1}" != "-" ]] && { repo="$1"; shift; }
-    while [[ $# -gt 0 ]]; do
-        case "$1" in
-            -h|--help) usage 0 ;;
-            --check|--iterations|--timeout|--model)
-                [[ $# -ge 2 && -n "$2" ]] || { echo "Missing value for $1" >&2; return 1; }
-                case "$1" in
-                    --check) check="$2" ;;
-                    --iterations) iterations="$2" ;;
-                    --timeout) timeout="$2" ;;
-                    --model) model="$2" ;;
-                esac
-                shift 2 ;;
-            *) echo "Unknown run argument: $1" >&2; return 1 ;;
-        esac
-    done
-    [[ "$iterations" =~ ^[1-9][0-9]{0,5}$ && "$timeout" =~ ^[1-9][0-9]{0,5}$ ]] || {
-        echo "Iterations and timeout must be positive integers (at most six digits)." >&2; return 1;
-    }
-    [[ -n "$check" ]] || { echo "Runs require --check CMD or CHECK_CMD." >&2; return 1; }
-    repo="$(cd "$repo" && pwd -P)" || return 1
-    [[ -d "$repo/.git" && ! -L "$repo/.git" ]] || {
-        echo "Runs need a regular git checkout (no linked worktrees)." >&2; return 1;
-    }
-    [[ -f "$repo/MILL.md" ]] || {
-        printf 'Missing MILL.md. Create a mission with: mill init %q\n' "$repo" >&2; return 1;
-    }
-    status="$(git -C "$repo" status --porcelain --untracked-files=all)" || return 1
-    [[ -z "$status" ]] || {
-        echo "Commit or stash your changes before starting a run." >&2; return 1;
-    }
-    [[ "$(id -u)" != 0 ]] || { echo "Run mill as a non-root user." >&2; return 1; }
-    state_root="${XDG_STATE_HOME:-$HOME/.local/state}/agentmill/runs"
-    mkdir -p "$state_root"
-    state_root="$(cd "$state_root" && pwd -P)"
-    [[ "$state_root" != "$repo" && "$state_root" != "$repo/"* ]] || {
-        echo "XDG_STATE_HOME must put run logs outside the checkout." >&2; return 1;
-    }
-    # Docker --mount uses commas as delimiters; reject ambiguous source paths.
-    [[ "$repo$state_root" != *,* ]] || { echo "Mount paths cannot contain commas." >&2; return 1; }
-    run_dir="$(mktemp -d "$state_root/run-XXXXXXXX")"
-    printf 'Run: %s\nLogs: %s\n' "${run_dir##*/}" "$run_dir"
-    export CHECK_CMD="$check"
-    exec docker run --rm --init --name "agentmill-${run_dir##*/}" --stop-timeout 5 \
-        --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges \
-        --mount "type=bind,src=$repo,dst=/workspace" \
-        --mount "type=bind,src=$run_dir,dst=/logs" \
-        --workdir /workspace --env HOME=/tmp/agentmill-home \
-        --env ANTHROPIC_API_KEY --env CLAUDE_CODE_OAUTH_TOKEN --env CHECK_CMD \
-        --env AUTO_SETUP --env REPO_SETUP_COMMAND --env EXTRA_PYTHON_TOOLS \
-        --env GIT_CONFIG_COUNT=1 --env GIT_CONFIG_KEY_0=safe.directory \
-        --env GIT_CONFIG_VALUE_0=/workspace \
-        --env GIT_AUTHOR_NAME=AgentMill --env GIT_AUTHOR_EMAIL=agentmill@localhost \
-        --env GIT_COMMITTER_NAME=AgentMill --env GIT_COMMITTER_EMAIL=agentmill@localhost \
-        --entrypoint python3 "${AGENTMILL_IMAGE:-agentmill}" -I /basic_loop.py \
-        --iterations "$iterations" --timeout "$timeout" --model "$model"
+    # The checkout runs its own locally built image unless one is selected.
+    export AGENTMILL_IMAGE="${AGENTMILL_IMAGE:-agentmill:latest}"
+    exec python3 -I "$MILL_DIR/basic_loop.py" run "$@"
 }
 
 cmd_init() {
@@ -129,9 +77,9 @@ MISSION
         ) || return 1
         printf 'Created %s/MILL.md\n' "$repo"
     fi
-    echo "Edit MILL.md, then commit it and any other checkout changes before running."
+    echo "Edit MILL.md, or pass --task / --task-file directly. Source input is committed HEAD."
     echo "Set ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN in your environment or AgentMill's .env."
-    printf "Next: mill run %q --check 'your test command'\n" "$repo"
+    printf "Next: mill run %q --agent claude --check 'your test command'\n" "$repo"
 }
 
 cmd_build() {
@@ -149,14 +97,12 @@ cmd_build() {
     fi
 }
 
-case "${1:-}" in
-    legacy) shift; exec bash "$MILL_DIR/legacy/mill" "$@" ;;
-esac
 load_env
 case "${1:-}" in
     run) shift; cmd_run "$@" ;;
+    list|show|diff) exec python3 -I "$MILL_DIR/basic_loop.py" "$@" ;;
     init) shift; cmd_init "$@" ;;
     build) shift; cmd_build "$@" ;;
     ""|-h|--help|help) usage 0 ;;
-    *) echo "Unknown command: $1 (old commands are under 'mill legacy')." >&2; usage 1 ;;
+    *) echo "Unknown command: $1." >&2; usage 1 ;;
 esac

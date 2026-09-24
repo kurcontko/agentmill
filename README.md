@@ -1,62 +1,146 @@
 # AgentMill
 
-Give Claude a mission and a check command. AgentMill runs fresh sessions in Docker until Claude claims completion and the check passes.
+**A checked, unattended run of `claude -p` or `codex exec`.** Give AgentMill a
+repository, a task, and the checks that define "done". It runs the agent in a
+container on a private clone, checks the result in a clean container, and returns
+a verdict your scripts and CI can act on, with the patch, a Git bundle and the
+full record. It never touches your checkout and never pushes.
+
+```text
+$ agentmill run . --agent claude --task "Make the retry tests pass" --check "uv run pytest -q"
+Baseline: failed — uv run pytest -q
+
+Session 1/3
+  Agent claim: done
+  Check: failed — uv run pytest -q        # the agent's "done" is only a claim
+
+Session 2/3
+  Agent claim: done
+  Check: passed — uv run pytest -q
+
+Result: checked_complete (checked_complete)
+Candidate: a0ba02aaeaa2 (checks passed); last passing: a0ba02aaeaa2
+Diff: agentmill diff r_3ad7c03c9b33412d
+```
+
+*(Abridged output.)*
+
+## Why AgentMill
+
+- **"Done" is verified, not trusted.** Completion requires a valid native result,
+  a `done` reply, and every check passing on the captured snapshot, run in a fresh
+  container with no agent credentials. Failing checks become feedback for the next
+  session, within your session and time budget.
+- **Your machine and checkout stay out of it.** The agent works on a private clone
+  of a committed revision inside a container. Host Git never runs against the
+  agent's `.git`, so hooks or `core.fsmonitor` settings it writes never execute on
+  your machine.
+- **Every outcome is explicit and recoverable.** Exit codes separate complete,
+  incomplete, blocked and failed. The latest and last-passing versions are both
+  kept, and crashed or timed-out sessions keep their captured work.
+- **Held-out checks.** `--check-dir` gives checks files the agent never receives.
+
+Loops that re-run an agent until it prints a completion promise trust the agent
+and run on your host. Sandboxes isolate an agent but don't decide whether the task
+is done. AgentMill is the bounded run with an independent verdict in between. It
+is one command, not a platform: no scheduler, agent team or daemon.
 
 ## Quick start
 
-Requires Git, a running Docker daemon, and `ANTHROPIC_API_KEY` or
-`CLAUDE_CODE_OAUTH_TOKEN` in your environment (or the AgentMill installation's
-`.env`). Run these commands from the AgentMill checkout:
+You need a local Docker daemon and Python 3.11+.
 
 ```bash
-./mill build
-./mill init /path/to/repo
-${EDITOR:-vi} /path/to/repo/MILL.md && git -C /path/to/repo add MILL.md && git -C /path/to/repo commit -m "Describe mission"
-./mill run /path/to/repo --check 'pytest'
+docker pull ghcr.io/kurcontko/agentmill:0.1.0
+export ANTHROPIC_API_KEY=...   # or CLAUDE_CODE_OAUTH_TOKEN; CODEX_API_KEY with --agent codex
+uvx agentmill run /path/to/repo --agent claude \
+  --task "Fix retry handling without changing the public API." \
+  --setup "uv sync --frozen" --check "uv run pytest -q"
 ```
 
-Use a check appropriate to your project. Python dependency setup runs automatically
-before the baseline check, including declared `dev` dependencies. uv projects use a
-container-local virtualenv, leaving the host's `.venv` alone. For other stacks,
-set `REPO_SETUP_COMMAND` (for example, `npm ci`). Set `AUTO_SETUP=false` to skip setup.
-Setup output is saved in the printed run directory.
+`pipx install agentmill` or `pip install agentmill` work too. Then inspect and
+review the result:
 
-## How it decides success
+```bash
+agentmill list
+agentmill show latest
+agentmill diff latest > result.patch
+git clone --branch agentmill-candidate -- /path/to/result.bundle review   # path printed by the run
+```
 
-The baseline must pass before Claude starts. Each fresh `claude -p` session reads
-`MILL.md` and uses committed `PROGRESS.md` and Git history as its handoff. It must
-commit its work and return a structured completion claim. The same check runs
-after every session; success means a completion claim plus a passing check on a
-clean, unchanged commit. This verifies your check, not an independent review of
-the mission. Review the resulting diff.
+From a source checkout, `./mill build` builds `agentmill:latest` and `./mill run`
+takes the same flags.
 
-`--iterations` defaults to 5 and `--timeout` to 1800 seconds per setup, session, or
-check. Use `--model` to select a model. The repo defaults to `REPO_PATH`, then the
-current directory; `CHECK_CMD` can supply the check instead of `--check`.
+## How a run works
 
-## Stopping and inspecting a run
+1. Clone the committed revision (`HEAD` by default) into private storage. Staged,
+   unstaged, untracked and ignored files in your checkout are not included.
+2. Run setup and your checks once, as a baseline. A failing baseline can be repaired.
+3. Run up to `--max-sessions` native sessions (default 3) within `--max-duration`
+   (default 30m). After each session: stop the container, capture the changes, run
+   the checks on that snapshot in a fresh container, and feed the results into the
+   next session.
+4. Stop on `done` with all checks passing, a `blocked` reply, a limit, or a
+   failure, then export `result.patch` and `result.bundle`.
 
-Ctrl-C stops the foreground run. Failures and timeouts stop immediately; there
-is no automatic restart, reset, WIP commit, or push. Commits and unfinished work
-remain in your checkout for inspection.
+| Exit | Meaning |
+| --- | --- |
+| 0 | Checked completion |
+| 1 | Execution, Docker/image, setup/check infrastructure, protocol, capture, or artifact failure |
+| 2 | Incomplete at a session count, session timeout, or total time limit |
+| 3 | Blocked; the agent needs outside input (its question is in the summary) |
+| 130 / 143 | Cancelled by SIGINT / SIGTERM |
 
-Each invocation prints its directory under
-`${XDG_STATE_HOME:-$HOME/.local/state}/agentmill/runs/`. It contains setup/check
-output, session JSON, separate stderr logs, and `outcome.json` with the stop reason
-and checked commit. Exit codes: `0` checked completion, `2` iteration limit,
-`1` failure, `130`/`143` interrupted/terminated. Docker startup failures retain
-Docker's status; an abrupt kill may leave no outcome.
+A session that crashes, returns no valid reply, or times out keeps its captured
+work and seeds the next session; two failures in a row stop the run. Missing
+`outcome.json` means unknown or interrupted, never success. The
+[runner reference](https://github.com/kurcontko/agentmill/blob/main/docs/runner-reference.md#completion-failures-and-deadlines)
+has the exact rules.
 
-Use one run per regular checkout, as a non-root user. Commit or stash changes
-first and ignore generated artifacts. Linked worktrees are not supported yet.
-Claude runs with automatic tool approval and can modify the checkout and logs;
-logs are not tamper-proof evidence. Only the checkout and run directory are
-mounted—no host Claude configuration or Docker socket. Authentication is supplied
-to the container, which has network access.
+## Options you will use
 
-## Legacy users
+- `--task TEXT` or `--task-file FILE`. Without either, a `MILL.md` in the source is
+  used; `./mill init` creates one.
+- `--check CMD`, repeatable and required. Exit 126/127 means the command is
+  unavailable and stops the run; any other failure is feedback.
+- `--setup CMD` runs in every fresh container: the baseline, each session and each
+  check. A three-session run can run it seven times, so keep it fast.
+- `--check-dir DIR` snapshots held-out checks and mounts them read-only at
+  `/checks` in check containers only.
+- `--max-sessions`, `--max-duration`, `--setup-timeout`, `--session-timeout`,
+  `--check-timeout`. Durations accept seconds or `s`, `m`, `h`.
+- `--json` streams AgentMill events as JSONL; `--spec run.json` takes all fields
+  from a file.
 
-The former Compose commands are available only through `mill legacy`, such as
-`mill legacy run`, `mill legacy watch`, and `mill legacy stop`.
-See [legacy documentation](docs/legacy.md). The default `init` writes only
-`MILL.md`; the default `run` never starts Compose.
+`agentmill run --help` lists everything. Authentication options, native
+configuration files, the JSON event vocabulary, retained records and the
+experimental Python API are in the
+[runner reference](https://github.com/kurcontko/agentmill/blob/main/docs/runner-reference.md).
+
+## Security
+
+**Containers have open network access, and workers can read the credential you
+select.** A prompt-injected agent could send the repository or that credential to
+any host. Use a dedicated, low-limit key, and read the
+[threat model](https://github.com/kurcontko/agentmill/blob/main/SECURITY.md#threat-model)
+before running AgentMill on sensitive code.
+
+Repository tests can be edited by the agent, so passing them is evidence, not
+proof. `--check-dir` keeps checks out of the agent's reach, but candidate code
+still runs beside them and can read or interfere with them: protected checks raise
+confidence; they do not prove correctness.
+
+## Limits
+
+- Requires a local Docker daemon; remote Docker hosts and contexts cannot mount
+  local paths. Validated on macOS arm64 with Colima and Linux amd64 in CI.
+- Linked worktrees and submodules are not supported as sources.
+- No CPU, memory, disk or spend quotas; time and session limits are enforced.
+- The Python API and record layouts are experimental.
+
+## Documentation
+
+- [Runner reference](https://github.com/kurcontko/agentmill/blob/main/docs/runner-reference.md)
+- [Security policy and threat model](https://github.com/kurcontko/agentmill/blob/main/SECURITY.md)
+- [Changelog](https://github.com/kurcontko/agentmill/blob/main/CHANGELOG.md)
+
+MIT licensed.

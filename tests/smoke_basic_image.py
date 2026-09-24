@@ -1,110 +1,139 @@
-"""Exercise mill -> packaged Docker entrypoint, without provider credentials."""
+"""Test the public CLI with real Docker and both deterministic native adapters.
 
+No provider credentials or paid model calls. Set AGENTMILL_SMOKE_IMAGE to the
+built image. All Docker resources created here have unique names.
+"""
 import json
 import os
 from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
 
-from test_basic_loop import FAKE_CLAUDE, ROOT
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def command(*args, **kwargs):
+    return subprocess.run(list(args), check=True, **kwargs)
 
 
 def main():
-    image = f"agentmill-basic-test:{uuid.uuid4().hex}"
-    with tempfile.TemporaryDirectory() as directory:
+    image = f'agentmill-contract-test:{uuid.uuid4().hex}'
+    base = os.environ.get('AGENTMILL_SMOKE_IMAGE', 'agentmill:ci')
+    launcher = ([os.environ['AGENTMILL_SMOKE_CLI']] if os.environ.get('AGENTMILL_SMOKE_CLI')
+                else [sys.executable, '-I', str(ROOT / 'basic_loop.py')])
+    # Keep bind mounts in a shared host directory on Docker Desktop and Colima.
+    with tempfile.TemporaryDirectory(prefix='agentmill-smoke-', dir=ROOT / 'tests') as directory:
         root = Path(directory)
-        # Exercise the launcher without loading the developer's real .env.
-        shutil.copy(ROOT / "mill", root / "mill")
-        fake = FAKE_CLAUDE.replace('os.environ.get("FAKE_MODE", "done")',
-                                  'pathlib.Path("mode").read_text().strip()')
-        fake = fake.replace('os.environ["FAKE_STARTED"]', '"/logs/started"')
-        fake = fake.replace('os.environ["FAKE_CHILD"]', '"/logs/child"')
-        (root / "claude").write_text(fake)
-        (root / "claude").chmod(0o755)
-        base_image = os.environ.get("AGENTMILL_SMOKE_IMAGE", "agentmill:ci")
-        (root / "Dockerfile").write_text(f"FROM {base_image}\nCOPY claude /usr/local/bin/claude\n")
-        subprocess.run(["docker", "build", "-t", image, str(root)], check=True)
+        shutil.copy(ROOT / 'tests/fixtures/native_cli.py', root / 'native_cli.py')
+        (root / 'Dockerfile').write_text(
+            f'FROM {base}\nUSER root\nCOPY native_cli.py /opt/fixture/native_cli.py\n'
+            'RUN chmod +x /opt/fixture/native_cli.py && rm /usr/local/bin/claude /usr/local/bin/codex '
+            '&& ln -s /opt/fixture/native_cli.py /usr/local/bin/claude '
+            '&& ln -s /opt/fixture/native_cli.py /usr/local/bin/codex\nUSER agent\n')
+        command('docker','build','-q','-t',image,str(root))
         try:
-            setup_repo = root / "setup-checkout"
-            (setup_repo / ".venv").mkdir(parents=True)
-            marker = setup_repo / ".venv/host-marker"
-            marker.write_text("keep host environment")
-            (setup_repo / "pyproject.toml").write_text(
-                '[project]\nname="fixture"\nversion="0.1.0"\nrequires-python=">=3.11"\n'
-                '[project.optional-dependencies]\ndev=[]\n[dependency-groups]\nci=[]\n'
-            )
-            subprocess.run([
-                "docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
-                "--mount", f"type=bind,src={setup_repo},dst=/workspace",
-                "--env", "HOME=/tmp/setup-home", "--workdir", "/workspace",
-                "--entrypoint", "bash", image, "-ec",
-                'uv lock --offline; . /setup-repo-env.sh "$PWD"; '
-                'test "$(command -v python)" = "$UV_PROJECT_ENVIRONMENT/bin/python"',
-            ], check=True)
-            assert marker.read_text() == "keep host environment"
-            repo = root / "checkout"
+            repo = root / 'source with spaces'
             repo.mkdir()
-            for name in ("pyproject.toml", "uv.lock"):
-                shutil.copy(setup_repo / name, repo / name)
-            (repo / ".gitignore").write_text(".venv/\n")
-            (repo / ".venv").mkdir()
-            host_marker = repo / ".venv/host-marker"
-            host_marker.write_text("keep host environment")
-            for args in (("init", "-q", "-b", "main"), ("config", "user.name", "Test"),
-                         ("config", "user.email", "test@example.com")):
-                subprocess.run(["git", "-C", str(repo), *args], check=True)
-            (repo / "MILL.md").write_text("Test mission: update the handoff and commit.\n")
-            env = {**os.environ, "AGENTMILL_IMAGE": image, "XDG_STATE_HOME": str(root / "state"),
-                   "AUTO_SETUP": "true", "REPO_SETUP_COMMAND": "", "EXTRA_PYTHON_TOOLS": "",
-                   "ANTHROPIC_API_KEY": "", "CLAUDE_CODE_OAUTH_TOKEN": ""}
-            for mode, expected in (("done", 0), ("hang", 143), ("bad_check", 1)):
-                (repo / "mode").write_text(mode)
-                subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
-                subprocess.run(["git", "-C", str(repo), "commit", "-qm", mode], check=True)
-                command = ["bash", str(root / "mill"), "run", str(repo),
-                           "--check", 'test "$(command -v python)" = "$UV_PROJECT_ENVIRONMENT/bin/python" && test ! -f fail',
-                           "--iterations", "2", "--timeout", "15"]
-                process = subprocess.Popen(command, env=env)
-                try:
-                    if mode == "hang":
-                        deadline = time.monotonic() + 20
-                        while not list((root / "state").glob("agentmill/runs/*/child")):
-                            if process.poll() is not None or time.monotonic() > deadline:
-                                raise AssertionError("packaged worker did not start")
-                            time.sleep(0.1)
-                        process.send_signal(signal.SIGTERM)
-                    assert process.wait(timeout=30) == expected, mode
-                finally:
-                    if process.poll() is None:
-                        process.kill()
-                    process.wait()
-                outcomes = list((root / "state").glob("agentmill/runs/*/outcome.json"))
-                latest = max(outcomes, key=lambda path: path.stat().st_mtime_ns)
-                outcome = json.loads(latest.read_text())
-                assert outcome["exit_code"] == expected, outcome
-                assert host_marker.read_text() == "keep host environment"
-                assert "uv sync --frozen --extra dev" in (latest.parent / "setup.log").read_text()
-                if mode == "done":
-                    head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
-                    assert outcome["checked_commit"] == head, outcome
-                container = f"agentmill-{latest.parent.name}"
-                exists = subprocess.run(["docker", "inspect", container], capture_output=True)
-                assert exists.returncode != 0, "run container survived exit"
-            assert len(outcomes) == 3, "runs overwrote each other's evidence"
-            assert (repo / "fail").exists(), "failed candidate was discarded"
-            print("Packaged basic-loop completion, rejection, and cancellation passed.")
+            for args in (('init','-q','-b','main'), ('config','user.name','Test'),
+                         ('config','user.email','test@example.com')):
+                command('git','-C',str(repo),*args)
+            (repo / '.gitignore').write_text('ignored.tmp\n')
+            (repo / 'expect-setup').write_text('prepared')
+            (repo / 'expect-auth').write_text('fixture-only')
+            runs = root / 'runs with spaces'
+            for backend in ('codex','claude'):
+                for mode, expected in (('repair',0), ('regress',2), ('blocked',3), ('missing_terminal',1), ('hang',2), ('hang',143)):
+                    auth_args = []
+                    for flag in ('expect-auth-name', 'expect-auth-file'):
+                        (repo / flag).unlink(missing_ok=True)
+                    if mode == 'blocked' and backend == 'codex':
+                        auth = root / 'native auth.json'
+                        auth.write_text(json.dumps({'OPENAI_API_KEY': 'fixture-only'}))
+                        (repo / 'expect-auth-file').touch()
+                        auth_args = ['--auth-file', str(auth), '--credential-env', 'UNSET_FIXTURE_KEY']
+                    elif mode == 'blocked':
+                        (repo / 'expect-auth-name').write_text('CLAUDE_CODE_OAUTH_TOKEN')
+                        auth_args = ['--credential-env', 'CLAUDE_CODE_OAUTH_TOKEN']
+                    (repo / 'mode').write_text(mode)
+                    (repo / 'value').write_text('broken\n')
+                    command('git','-C',str(repo),'add','.')
+                    command('git','-C',str(repo),'commit','--allow-empty','-qm',f'{backend}-{mode}')
+                    head = subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()
+                    (repo / 'value').write_text('keep my unstaged changes\n')
+                    (repo / 'staged').write_text('keep my staged file\n')
+                    command('git','-C',str(repo),'add','staged')
+                    index = (repo / '.git/index').read_bytes()
+                    before = set(runs.glob('r_*')) if runs.exists() else set()
+                    argv = [*launcher, 'run',str(repo),
+                            '--agent',backend,'--task','Repair value.','--setup','export AGENTMILL_SETUP_FLAG=prepared','--check',
+                            'test "$AGENTMILL_SETUP_FLAG" = prepared; test -z "${CODEX_API_KEY:-}${ANTHROPIC_API_KEY:-}${CLAUDE_CODE_OAUTH_TOKEN:-}"; test "$(cat value)" = fixed',
+                            '--max-sessions','2','--max-duration','90s','--session-timeout','1s' if expected==2 and mode=='hang' else '20s',
+                            '--image',image,'--runs-dir',str(runs),'--json', *auth_args]
+                    stdout = root / 'stdout.jsonl'
+                    stderr = root / 'stderr.log'
+                    with stdout.open('w') as out, stderr.open('w') as err:
+                        env = {**os.environ, 'CODEX_API_KEY':'fixture-only', 'ANTHROPIC_API_KEY':'fixture-only',
+                               'CLAUDE_CODE_OAUTH_TOKEN':'fixture-only', 'PYTHONPATH':''}
+                        process = subprocess.Popen(argv,stdout=out,stderr=err, env=env, cwd=tempfile.gettempdir())
+                        try:
+                            if mode == 'hang' and expected == 143:
+                                deadline = time.monotonic()+60
+                                while not any((path / 'workspace/started').exists() for path in set(runs.glob('r_*'))-before):
+                                    if process.poll() is not None or time.monotonic() >= deadline:
+                                        raise AssertionError('worker did not start: '+stderr.read_text()+stdout.read_text())
+                                    time.sleep(0.05)
+                                process.send_signal(signal.SIGTERM)
+                            actual = process.wait(timeout=100)
+                            assert actual == expected, (backend,mode,actual,stderr.read_text(),stdout.read_text())
+                        finally:
+                            if process.poll() is None:
+                                process.kill()
+                            process.wait()
+                    created = set(runs.glob('r_*'))-before
+                    assert len(created)==1
+                    run_dir = created.pop()
+                    outcome = json.loads((run_dir / 'outcome.json').read_text())
+                    events = [json.loads(line) for line in stdout.read_text().splitlines()]
+                    assert events[-1]['event']=='run.finished'
+                    assert outcome['exit_code']==expected, outcome
+                    assert subprocess.check_output(['git','-C',str(repo),'rev-parse','HEAD'],text=True).strip()==head
+                    assert (repo / 'value').read_text()=='keep my unstaged changes\n'
+                    assert (repo / '.git/index').read_bytes()==index
+                    assert (repo / 'staged').read_text()=='keep my staged file\n'
+                    assert not (repo / 'new.txt').exists()
+                    containers = subprocess.check_output(['docker','ps','-aq','--filter',f'label=agentmill.run={run_dir.name}'],text=True)
+                    assert not containers.strip(), 'execution container survived'
+                    patch = Path(outcome['artifacts']['patch'])
+                    assert patch.stat().st_size > 0
+                    shown = subprocess.check_output([*launcher,'show',run_dir.name,'--runs-dir',str(runs),'--json'],
+                                                    text=True, cwd=tempfile.gettempdir(), env=env)
+                    assert json.loads(shown)==outcome
+                    diff = subprocess.check_output([*launcher,'diff',run_dir.name,'--runs-dir',str(runs)],
+                                                   cwd=tempfile.gettempdir(), env=env)
+                    assert diff==patch.read_bytes()
+                    if mode == 'repair':
+                        assert outcome['sessions']==2
+                        assert [c['status'] for c in outcome['checks']]==['failed','failed','passed']
+                        assert outcome['latest_candidate_sha']==outcome['last_passing_candidate_sha']
+                    elif mode == 'regress':
+                        assert outcome['last_passing_candidate_sha'] is not None
+                        assert outcome['last_passing_candidate_sha']!=outcome['latest_candidate_sha']
+                    elif mode == 'blocked':
+                        assert outcome['agent_reply']['question']
+                        assert [c['session'] for c in outcome['checks']] == [0]
+                        assert not (run_dir / 'checks/0001').exists()
+                    print(f'PASS Docker {backend}: {mode} (exit {expected})', flush=True)
         finally:
-            # These resources belong only to this fixture image.
-            containers = subprocess.check_output(
-                ["docker", "ps", "-aq", "--filter", f"ancestor={image}"], text=True).split()
+            containers = subprocess.check_output(['docker','ps','-aq','--filter',f'ancestor={image}'],text=True).split()
             if containers:
-                subprocess.run(["docker", "rm", "-f", *containers], check=True)
-            subprocess.run(["docker", "image", "rm", image], check=True)
+                command('docker','rm','-f',*containers)
+            command('docker','image','rm',image)
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
