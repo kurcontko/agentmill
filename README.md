@@ -89,9 +89,16 @@ another bounded session; partial work is retained. A valid `blocked` reply stops
 after cleanup and capture, without starting another check environment. Its
 changed candidate is unchecked, and its question is preserved. An unchanged
 candidate retains its historical check evidence; no new checks run for blocked
-work. Missing executables, setup/check infrastructure faults, or malformed native replies stop the run.
+work.
+
+A native session that exits with an error or ends without a valid reply still has
+its work captured. If sessions remain, that work is checked when it changed and
+seeds the next session, which is told the previous one failed. A second
+consecutive failure, or one in the final session, stops the run with that failure.
+A failed session can never complete a run. Missing executables, Docker or image
+problems, and setup/check infrastructure faults stop the run immediately.
 Check exits 126/127 mean unavailable commands; other nonzero exits are repair
-feedback. There is no automatic infrastructure retry or resume.
+feedback. There is no infrastructure retry or resume.
 
 | Exit | Meaning |
 | --- | --- |

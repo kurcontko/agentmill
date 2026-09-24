@@ -15,11 +15,22 @@ from .workspace import Workspace
 
 
 RUN_ERRORS = (RunStopped, OSError, ValueError, KeyError)
+# A native session that ended without a valid reply. Its captured work can seed
+# one more session; a second consecutive failure (for example, bad credentials) stops.
+NATIVE_FAILURES = frozenset({
+    "session_failed", "invalid_native_output", "invalid_native_terminal",
+    "output_after_native_terminal", "native_turn_failed", "multiple_native_turns",
+    "invalid_agent_reply"})
 
 
 def run_session(spec, executor, workspace, records, outcome, command, directory, inputs):
-    """Stop the worker before capture; preservation must not replace its failure."""
+    """Stop the worker before capture; preservation must not replace its failure.
+
+    Returns (reply, candidate, native_failure). A native failure is returned rather
+    than raised only after its work was captured and recorded.
+    """
     output = reply = primary = None
+    captured = False
     try:
         with executor.container(workspace.path, inputs=inputs, worker=True) as container:
             container.setup(directory / "worker")
@@ -43,7 +54,8 @@ def run_session(spec, executor, workspace, records, outcome, command, directory,
                      agent_status=(outcome.agent_reply or {}).get("status"))
     except RUN_ERRORS as error:
         primary = preserve_failure(primary, error, outcome.errors, f"session record failed: {error}")
-    if primary or (reply and reply.status == "blocked"):
+    native = isinstance(primary, RunStopped) and primary.reason in NATIVE_FAILURES
+    if (primary and not native) or (reply and reply.status == "blocked"):
         executor.finalize()
     try:
         if not executor.worker_stopped:
@@ -70,11 +82,12 @@ def run_session(spec, executor, workspace, records, outcome, command, directory,
     else:
         try:
             records.emit("candidate.captured", session=outcome.sessions, candidate_sha=candidate)
+            captured = True
         except RUN_ERRORS as error:
             primary = preserve_failure(primary, error, outcome.errors, f"candidate record failed: {error}")
-    if primary:
+    if primary and not (native and captured):
         raise primary
-    return reply, candidate
+    return reply, candidate, primary
 
 
 def finish_run(executor, workspace, records, outcome, failure):
@@ -93,8 +106,14 @@ def finish_run(executor, workspace, records, outcome, failure):
     records.finish(outcome)
 
 
-def session_prompt(spec, outcome, baseline, previous):
-    handoff = json.dumps(outcome.agent_reply) if outcome.agent_reply else "No previous session."
+def session_prompt(spec, outcome, baseline, previous, failure=None):
+    if outcome.agent_reply:
+        handoff = json.dumps(outcome.agent_reply)
+    elif failure:
+        handoff = (f"The previous session ended without a valid reply ({failure.reason}). "
+                   "Its file changes were kept in this workspace.")
+    else:
+        handoff = "No previous session."
     return (
         "Complete the task below in this private workspace. Make changes directly; AgentMill captures "
         "them after you exit. Commits are optional. Do not push. Do not weaken checks to claim success. "
@@ -157,13 +176,14 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
         passed, previous = check_candidate(spec, executor, workspace, records, outcome, workspace.base)
         baseline = "passed" if passed else "failed"
         adapter = get_adapter(spec.agent)
+        retried = None
         for session in range(1, spec.max_sessions + 1):
             executor.guard()
             outcome.sessions = session
             directory = records.directory / "sessions" / f"{session:04d}"
             inputs = directory / "inputs"
             inputs.mkdir(parents=True)
-            prompt = session_prompt(spec, outcome, baseline, previous)
+            prompt = session_prompt(spec, outcome, baseline, previous, retried)
             outcome.agent_reply = None
             (directory / "prompt.txt").write_text(prompt, encoding="utf-8")
             (inputs / "prompt.txt").write_text(prompt, encoding="utf-8")
@@ -171,9 +191,23 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
             command = adapter.build_command(SessionRequest(spec.model, spec.profile, bool(spec.agent_config)))
             atomic_json(directory / "command.json", asdict(command))
             records.emit("session.started", session=session, max_sessions=spec.max_sessions, logs=str(directory))
-            reply, candidate = run_session(spec, executor, workspace, records, outcome, command, directory, inputs)
+            reply, candidate, native_failure = run_session(
+                spec, executor, workspace, records, outcome, command, directory, inputs)
             if cancellation := executor.cancellation:
                 raise cancellation
+            if native_failure:
+                if retried or session == spec.max_sessions:
+                    raise native_failure
+                retried = native_failure
+                outcome.errors.append(f"session {session} ended without a valid reply "
+                                      f"({retried.reason}); its captured work seeds the next session")
+                executor.guard()
+                # Check changed work for feedback and last-passing evidence; it cannot complete the run.
+                if not previous or previous[0]["candidate_sha"] != candidate:
+                    passed, previous = check_candidate(spec, executor, workspace, records, outcome,
+                                                       candidate, session)
+                continue
+            retried = None
             if reply.status == "blocked":
                 raise RunStopped("agent_blocked", 3)
             executor.guard()

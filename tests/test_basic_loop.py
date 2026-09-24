@@ -379,12 +379,39 @@ class BasicLoopTests(unittest.TestCase):
             self.set_mode(mode)
             for backend in ('codex', 'claude'):
                 with self.subTest(mode=mode, backend=backend):
+                    # One retry from captured work; the second consecutive failure stops.
                     outcome = self.launch(backend)
-                    self.assertEqual((outcome.status, outcome.sessions), ('failed', 1), outcome.to_dict())
+                    self.assertEqual((outcome.status, outcome.sessions), ('failed', 2), outcome.to_dict())
+                    self.assertEqual(outcome.exit_code, 1)
+                    self.assertIn('session 1 ended without a valid reply', ' '.join(outcome.errors))
                     self.assertNotEqual(outcome.latest_candidate_sha, outcome.base_revision)
                     self.assertIsNone(outcome.agent_reply)
-                    self.assertIsNone(outcome.last_passing_candidate_sha)
+                    # Session 1's work was checked for feedback and evidence; the final failed
+                    # session's work is captured but unchecked, and never completes a run.
+                    self.assertIsNotNone(outcome.last_passing_candidate_sha)
+                    self.assertNotEqual(outcome.last_passing_candidate_sha, outcome.latest_candidate_sha)
+                    self.assertEqual(outcome.candidate_check_status, 'unchecked')
                     self.assertTrue(Path(outcome.artifacts['patch']).stat().st_size)
+
+    def test_native_failure_on_final_session_is_not_retried(self):
+        self.set_mode('crash')
+        outcome = self.launch(max_sessions=1)
+        self.assertEqual((outcome.stop_reason, outcome.exit_code, outcome.sessions), ('session_failed', 1, 1))
+        self.assertFalse(any('ended without a valid reply' in error for error in outcome.errors))
+
+    def test_both_adapters_continue_from_work_captured_before_a_native_crash(self):
+        self.set_mode('crash_once')
+        for backend in ('codex', 'claude'):
+            with self.subTest(backend=backend):
+                outcome = self.launch(backend, max_sessions=3)
+                self.assertEqual((outcome.status, outcome.sessions), ('checked_complete', 2), outcome.to_dict())
+                self.assertEqual(outcome.latest_candidate_sha, outcome.last_passing_candidate_sha)
+                # The crashed session's changed work was checked, then carried into session 2.
+                self.assertEqual([c['session'] for c in outcome.checks], [0, 1, 2])
+                prompt = (self.run_dir / 'sessions/0002/prompt.txt').read_text()
+                self.assertIn('ended without a valid reply (session_failed)', prompt)
+                self.assertIn('session 1 ended without a valid reply', ' '.join(outcome.errors))
+
     def test_source_must_be_a_checkout_root_before_any_run_is_created(self):
         plain = self.root / 'plain'
         plain.mkdir()

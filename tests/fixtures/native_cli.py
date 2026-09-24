@@ -61,7 +61,7 @@ if mode == 'hang':
     Path('child.pid').write_text(str(child.pid))
     Path('started').touch()
     time.sleep(120)
-if mode == 'crash':
+if mode == 'crash' or (mode == 'crash_once' and iteration == 1):
     raise SystemExit(7)
 if mode == 'deep_json':
     print('[' * 2000 + '0' + ']' * 2000)
