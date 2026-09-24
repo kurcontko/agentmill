@@ -53,11 +53,13 @@ class FixtureContainer:
     def check(self, command, directory, number):
         return self.execute(command, directory, f'check-{number:02d}', self.executor.spec.check_timeout)
 
-    def session(self, command, directory):
-        return self.executor.command([sys.executable, str(FIXTURE), *command.argv],
-                                     directory / 'native.jsonl', directory / 'native.stderr.log',
-                                     self.executor.spec.session_timeout, cwd=self.workspace,
-                                     env=self.env, stdin=self.inputs / 'prompt.txt')
+    def session(self, command, directory, progress=None):
+        result = self.executor.command([sys.executable, str(FIXTURE), *command.argv],
+                                       directory / 'native.log', directory / 'native.stderr.log',
+                                       self.executor.spec.session_timeout, cwd=self.workspace,
+                                       env=self.env, stdin=self.inputs / 'prompt.txt', progress=progress)
+        result.stdout = result.stdout.rename(directory / 'native.jsonl')
+        return result
 
 
 @contextmanager
@@ -488,6 +490,22 @@ class BasicLoopTests(unittest.TestCase):
                 self.assertIn('(session_timeout)', ' '.join(outcome.errors))
                 self.assertIn('(session_timeout)', (self.run_dir / 'sessions/0002/prompt.txt').read_text())
                 self.assert_child_stopped()
+
+    def test_long_sessions_report_progress_without_affecting_the_run(self):
+        self.set_mode('hang_once')
+        with patch.object(Executor, 'progress_interval', 0.1):
+            outcome = self.launch(session_timeout=0.6)
+        self.assertEqual(outcome.status, 'checked_complete', outcome.to_dict())
+        progress = [e for e in self.events if e['event'] == 'session.progress']
+        self.assertTrue(progress)
+        self.assertEqual({e['session'] for e in progress}, {1})
+        self.assertTrue(all(isinstance(e['native_events'], int) for e in progress))
+        with patch.object(Executor, 'progress_interval', 0.1), \
+             patch.object(Records, 'emit', side_effect=OSError('events unavailable')):
+            output = Executor(self.spec, self.root).command(
+                [sys.executable, '-c', 'import time; time.sleep(0.4)'], self.root / 'out', self.root / 'err', 5,
+                progress=lambda elapsed: Records.emit(None, 'session.progress'))
+        self.assertEqual((output.returncode, output.stop_reason), (0, None))
 
     def test_total_duration_bounds_setup(self):
         outcome = self.launch(setup='sleep 10', setup_timeout=20, max_duration=1.5)

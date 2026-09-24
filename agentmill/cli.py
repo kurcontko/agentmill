@@ -1,4 +1,4 @@
-"""The small command-line surface: run, show and diff."""
+"""The small command-line surface: run, list, show and diff."""
 
 import argparse
 from contextlib import suppress
@@ -25,75 +25,101 @@ def duration(value):
     return seconds
 
 
+RUN_EXAMPLES = """examples:
+  agentmill run . --agent claude --task "Fix the flaky retry test" --check "uv run pytest -q"
+  agentmill run ../api --agent codex --task-file task.md --setup "npm ci" --check "npm test"
+  agentmill run . --agent claude --task-file task.md --check "pytest -q /checks" --check-dir ./acceptance
+
+exit codes: 0 checked complete, 1 failure, 2 incomplete at a limit, 3 blocked, 130/143 cancelled"""
+
+
 def parser():
-    root = argparse.ArgumentParser(prog="agentmill", description="A bounded, checked native coding-agent runner.")
+    root = argparse.ArgumentParser(
+        prog="agentmill", description="Run codex exec or claude -p on one task in a private checkout, "
+        "check the result in a clean container, and return an explicit verdict.")
     commands = root.add_subparsers(dest="command", required=True)
-    launch = commands.add_parser("run", help="run one task in a private checkout")
-    launch.add_argument("source", nargs="?")
+    launch = commands.add_parser("run", help="run one task in a private checkout",
+                                 description="Run one task from a committed revision. Your checkout is never "
+                                 "modified; results are exported as a patch and a Git bundle.",
+                                 epilog=RUN_EXAMPLES, formatter_class=argparse.RawDescriptionHelpFormatter)
+    launch.add_argument("source", nargs="?", help="Git checkout root, Git URL or bundle "
+                        "(default: $REPO_PATH, then the current directory)")
     launch.add_argument("--spec", type=Path, help="JSON object with RunSpec fields; explicit flags override it")
-    launch.add_argument("--revision")
+    launch.add_argument("--revision", help="committed revision to start from (default: HEAD)")
     task = launch.add_mutually_exclusive_group()
-    task.add_argument("--task")
-    task.add_argument("--task-file", type=Path)
-    launch.add_argument("--agent", choices=("codex", "claude"))
-    launch.add_argument("--model")
+    task.add_argument("--task", help="task text (default: MILL.md in the source, if present)")
+    task.add_argument("--task-file", type=Path, help="read the task text from a file")
+    launch.add_argument("--agent", choices=("codex", "claude"), help="native CLI to run (default: codex)")
+    launch.add_argument("--model", help="model name or alias passed to the native CLI")
     launch.add_argument("--profile", help="Codex profile name, used with --agent-config")
     launch.add_argument("--agent-config", help="explicit native config file (Codex TOML or Claude settings JSON)")
     launch.add_argument("--auth-file", help="explicit Codex auth.json; never exposed to checks")
-    launch.add_argument("--credential-env", action="append", help="native environment variable NAME, never its value")
-    launch.add_argument("--setup")
-    launch.add_argument("--check", action="append", dest="checks")
+    launch.add_argument("--credential-env", action="append", metavar="NAME",
+                        help="forward this environment variable to the worker instead of the defaults "
+                        "(CODEX_API_KEY; ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN); repeatable")
+    launch.add_argument("--setup", help="shell command run in every fresh container before work or checks "
+                        "(default: true)")
+    launch.add_argument("--check", action="append", dest="checks", metavar="CMD",
+                        help="check command that must pass on the captured result; repeatable, at least one "
+                        "(default: $CHECK_CMD)")
     launch.add_argument("--check-dir", help="held-out check files, mounted read-only at /checks "
                         "in check containers only; the worker never receives them")
-    launch.add_argument("--max-sessions", "--iterations", type=int, dest="max_sessions")
-    launch.add_argument("--max-duration", type=duration)
-    for phase in ("setup", "session", "check"):
-        launch.add_argument(f"--{phase}-timeout", type=duration)
-    launch.add_argument("--image")
+    launch.add_argument("--max-sessions", "--iterations", type=int, dest="max_sessions",
+                        help="native CLI invocations to allow (default: 3)")
+    launch.add_argument("--max-duration", type=duration, metavar="DURATION",
+                        help="total run budget, e.g. 45m (default: 30m)")
+    for phase, default in (("setup", "5m"), ("session", "15m"), ("check", "5m")):
+        launch.add_argument(f"--{phase}-timeout", type=duration, metavar="DURATION",
+                            help=f"limit for each {phase} (default: {default})")
+    launch.add_argument("--image", help=f"runtime image (default: $AGENTMILL_IMAGE, then {DEFAULT_IMAGE})")
     launch.add_argument("--json", action="store_true", help="emit only AgentMill JSONL events on stdout")
-    launch.add_argument("--runs-dir", type=Path, help="override the private run storage directory")
-    for name in ("show", "diff"):
-        inspect = commands.add_parser(name)
-        inspect.add_argument("run_id")
-        inspect.add_argument("--runs-dir", type=Path)
+    launch.add_argument("--runs-dir", type=Path, help="run storage directory "
+                        "(default: $XDG_STATE_HOME/agentmill/runs or ~/.local/state/agentmill/runs)")
+    listing = commands.add_parser("list", help="list retained runs, newest first")
+    listing.add_argument("--runs-dir", type=Path, help="run storage directory")
+    listing.add_argument("--limit", type=int, default=20, help="number of runs to show (default: 20)")
+    listing.add_argument("--json", action="store_true", help="one JSON object per run")
+    for name, text in (("show", "summarize a run's outcome"), ("diff", "print a run's exported patch")):
+        inspect = commands.add_parser(name, help=text)
+        inspect.add_argument("run_id", help="run ID, or `latest`")
+        inspect.add_argument("--runs-dir", type=Path, help="run storage directory")
         if name == "show":
-            inspect.add_argument("--json", action="store_true")
+            inspect.add_argument("--json", action="store_true", help="print outcome.json")
     return root
+
+
+def short(sha):
+    return sha[:12] if sha else "none"
 
 
 def human_result(value, directory, launcher=("agentmill",)):
     directory = Path(directory).resolve()
-    candidate = value.get("latest_candidate_sha")
     check_status = value.get("candidate_check_status", "unknown (see recorded checks)")
     lines = [f"Run: {value['run_id']}", f"Result: {value['status']} ({value['stop_reason']})"]
     reply = value.get("agent_reply") or {}
     for field, label in (("summary", "Agent summary"), ("question", "Question"), ("next_step", "Next step")):
         if reply.get(field):
             lines.append(f"{label}: {reply[field]}")
-    lines += [f"Latest captured candidate: {candidate or 'none'}",
-              f"Candidate checks: {check_status}",
-              f"Last passing candidate: {value.get('last_passing_candidate_sha') or 'none'}",
-              f"Outcome: {directory / 'outcome.json'}", f"Run files/logs: {directory}"]
-    for label, path in (("Baseline logs", directory / "baseline"),
-                        ("Session logs", directory / "sessions" / f"{value.get('sessions', 0):04d}"),
-                        ("Execution logs", directory / "operations")):
-        if path.is_dir():
-            lines.append(f"{label}: {path}")
+    lines += [f"Candidate: {short(value.get('latest_candidate_sha'))} (checks {check_status}); "
+              f"last passing: {short(value.get('last_passing_candidate_sha'))}",
+              f"Run files: {directory} (outcome.json, sessions/, operations/)"]
     artifacts = value.get("artifacts", {})
     if artifacts.get("workspace"):
         lines.append(f"Retained workspace: {artifacts['workspace']}")
     def inspect_command(command):
         return shlex.join([*launcher, command, value["run_id"], "--runs-dir", str(directory.parent)])
     lines.append(f"Show: {inspect_command('show')}")
-    if artifacts.get("patch") and Path(artifacts["patch"]).is_file():
-        lines += [f"Patch: {artifacts['patch']}", f"Diff: {inspect_command('diff')}"]
+    patch = Path(artifacts["patch"]) if artifacts.get("patch") else None
+    if patch and patch.is_file() and patch.stat().st_size:
+        lines += [f"Patch: {patch}", f"Diff: {inspect_command('diff')}"]
+        if artifacts.get("bundle") and Path(artifacts["bundle"]).is_file():
+            command = shlex.join(["git", "clone", "--branch", "agentmill-candidate", "--",
+                                  artifacts["bundle"], f"./review-{value['run_id']}"])
+            lines.append(f"Clean review checkout: {command}")
+    elif patch and patch.is_file():
+        lines.append("No changes from the base revision.")
     else:
         lines.append("No exported patch; inspect retained work and diagnostics.")
-    if artifacts.get("bundle") and Path(artifacts["bundle"]).is_file():
-        lines.append(f"Bundle: {artifacts['bundle']}")
-        command = shlex.join(["git", "clone", "--branch", "agentmill-candidate", "--",
-                              artifacts["bundle"], f"./review-{value['run_id']}"])
-        lines.append(f"Clean review checkout: {command}")
     lines.extend(f"Diagnostic: {error}" for error in value.get("errors", []))
     return "\n".join(lines)
 
@@ -111,8 +137,13 @@ def human_event(event, sink=None, launcher=("agentmill",)):
         message = f"\nSession {event['session']}/{event['max_sessions']}"
         if event.get("logs"):
             message += f"\n  Session logs: {event['logs']}"
+    elif kind == "session.progress":
+        minutes, seconds = divmod(int(event["elapsed_seconds"]), 60)
+        message = f"  … {minutes}m{seconds:02d}s elapsed, {event['native_events']} native events"
     elif kind == "session.finished" and event.get("agent_status"):
         message = f"  Agent claim: {event['agent_status']}"
+    elif kind == "session.finished" and event.get("stop_reason"):
+        message = f"  Session ended: {event['stop_reason']}"
     elif kind == "candidate.captured":
         label = "Base revision" if event["session"] == 0 else "  Candidate captured"
         message = f"{label}: {event['candidate_sha']}"
@@ -163,10 +194,49 @@ def make_spec(args):
         raise ValueError(str(error)) from error
 
 
+def retained_runs(root):
+    """Runs newest first, ordered by their recorded start rather than directory times."""
+    runs = []
+    for directory in Path(root).glob("r_*"):
+        if not re.fullmatch(r"r_[a-f0-9]{16}", directory.name) or not directory.is_dir():
+            continue
+        started = ""
+        with suppress(OSError, ValueError, KeyError):
+            with (directory / "events.jsonl").open(encoding="utf-8") as stream:
+                started = json.loads(stream.readline())["timestamp"]
+        runs.append((started, directory))
+    return [directory for _, directory in sorted(runs, reverse=True)]
+
+
+def list_runs(args):
+    for directory in retained_runs(args.runs_dir or runs_root())[:max(args.limit, 0)]:
+        value = {"run_id": directory.name, "status": "unknown", "stop_reason": "no_terminal_outcome"}
+        with suppress(OSError, ValueError):
+            value = json.loads((directory / "outcome.json").read_text())
+        started = source = ""
+        with suppress(OSError, ValueError, KeyError):
+            with (directory / "events.jsonl").open(encoding="utf-8") as stream:
+                first = json.loads(stream.readline())
+            started, source = first["timestamp"], first.get("source", "")
+        if args.json:
+            print(json.dumps({"run_id": directory.name, "started": started, "source": source,
+                              "status": value["status"], "stop_reason": value["stop_reason"],
+                              "sessions": value.get("sessions")}))
+        else:
+            print(f"{directory.name}  {started[:19]}  {value['status']:<16} {value['stop_reason']:<26} {source}")
+    return 0
+
+
 def inspect_run(args, launcher):
+    root = args.runs_dir or runs_root()
+    if args.run_id == "latest":
+        runs = retained_runs(root)
+        if not runs:
+            raise ValueError(f"no runs in {root}")
+        args.run_id = runs[0].name
     if not re.fullmatch(r"r_[a-f0-9]{16}", args.run_id):
         raise ValueError("invalid run ID")
-    directory = (args.runs_dir or runs_root()) / args.run_id
+    directory = root / args.run_id
     if not directory.is_dir():
         raise ValueError("run not found")
     path = directory / "outcome.json"
@@ -198,6 +268,8 @@ def main(argv=None, *, launcher=None):
         # Reserve exit 2 for a real run stopped at an execution limit.
         return 0 if error.code == 0 else 1
     try:
+        if args.command == "list":
+            return list_runs(args)
         if args.command != "run":
             return inspect_run(args, launcher)
         spec = make_spec(args)

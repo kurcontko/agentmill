@@ -12,7 +12,7 @@ the public contract and docs/runner-reference.md for detailed interfaces.
 - `agentmill/checks.py`: fresh candidate check environments and bounded feedback.
 - `agentmill/records.py`: versioned events and atomic terminal outcome.
 - `agentmill/adapters/`: native command construction and final-result parsing only.
-- `agentmill/cli.py`: run, show and diff.
+- `agentmill/cli.py`: run, list, show and diff.
 - `mill`: checkout launcher (installed CLI is `agentmill`), image build, optional mission init.
 - `basic_loop.py`: isolated Python launcher for the evolved checked loop.
 

@@ -163,6 +163,7 @@ directory. Example:
 JSON mode writes only AgentMill JSONL events to stdout. Diagnostics go to stderr;
 native output stays in session files. Events carry `schema_version`, `run_id`,
 `seq`, and a UTC timestamp. The vocabulary is `run.started`, `session.started`,
+`session.progress` (about once a minute: `elapsed_seconds` and `native_events`),
 `session.finished`, `candidate.captured`, `check.finished`, and `run.finished`.
 Session/check events identify the session; baseline checks use session 0.
 `outcome.json` is authoritative, even if the consumer missed the final event.

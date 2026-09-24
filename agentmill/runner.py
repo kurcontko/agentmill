@@ -25,6 +25,14 @@ SESSION_FAILURES = frozenset({
     "invalid_agent_reply"})
 
 
+def count_lines(path):
+    try:
+        with Path(path).open("rb") as stream:
+            return sum(1 for _ in stream)
+    except OSError:
+        return 0
+
+
 def run_session(spec, executor, workspace, records, outcome, command, directory, inputs):
     """Stop the worker before capture; preservation must not replace its failure.
 
@@ -40,7 +48,10 @@ def run_session(spec, executor, workspace, records, outcome, command, directory,
                                         directory, "version", 30)
             executor.require(version, "agent_executable")
             outcome.environment["agent_version"] = version.stdout.read_text().strip()
-            output = container.session(command, directory)
+            def progress(elapsed):
+                records.emit("session.progress", session=outcome.sessions, elapsed_seconds=round(elapsed),
+                             native_events=count_lines(directory / "native.log"))
+            output = container.session(command, directory, progress)
             # Validate before teardown so cleanup cannot replace a native failure.
             executor.require(output, "session")
             reply, telemetry = get_adapter(spec.agent).parse_result(output)

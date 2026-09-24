@@ -62,12 +62,16 @@ Phase defaults are 5 minutes for setup/checks and 15 minutes for a native sessio
 
 The final summary gives the agent's claim or blocking question, stop reason,
 latest captured candidate, check status, and actual artifact/log locations.
-Use the run ID printed by your run:
+Use the run ID printed by your run, or `latest`:
 
 ```bash
-./mill show r_0123456789abcdef
+./mill list
+./mill show latest
 ./mill diff r_0123456789abcdef
 ```
+
+Runs are never deleted automatically. Each keeps its workspace and snapshot
+history; remove a run's directory to reclaim the space.
 
 Storage defaults to `${XDG_STATE_HOME:-$HOME/.local/state}/agentmill/runs/`.
 `--runs-dir DIR` selects another location outside the source checkout; the printed

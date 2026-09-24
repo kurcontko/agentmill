@@ -198,7 +198,8 @@ with patch('agentmill.runner.Workspace.prepare', wait_for_cancel):
             human_event(record)
         text = stderr.getvalue()
         self.assertEqual(stdout.getvalue(), '')
-        for expected in ('Fixed the retry bug.', 'passed', str(patch_path), str(bundle), str(directory)):
+        # The bundle path appears shell-quoted in the review command exercised below.
+        for expected in ('Fixed the retry bug.', 'passed', str(patch_path), str(directory)):
             self.assertIn(expected, text)
         atomic_json(directory/'outcome.json', outcome.to_dict())
         commands = {}
@@ -293,6 +294,39 @@ with patch('agentmill.runner.Workspace.prepare', wait_for_cancel):
         with contextlib.redirect_stderr(stderr):
             self.assertEqual(main(['diff', run_id, '--runs-dir', str(self.root)]), 1)
         self.assertIn('no exported patch', stderr.getvalue())
+
+    def test_list_and_latest_find_runs_by_recorded_start(self):
+        older, newer = 'r_' + '1'*16, 'r_' + '2'*16
+        for run_id, started in ((newer, '2026-09-25T10:00:00+00:00'), (older, '2026-09-24T10:00:00+00:00')):
+            directory = self.root / run_id
+            directory.mkdir()
+            (directory/'events.jsonl').write_text(json.dumps(
+                {'event': 'run.started', 'timestamp': started, 'source': '/repo'}) + '\n')
+        atomic_json(self.root/newer/'outcome.json', RunOutcome(newer, status='incomplete',
+                                                                stop_reason='session_limit').to_dict())
+        (self.root/'not-a-run').mkdir()
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(main(['list', '--runs-dir', str(self.root), '--json']), 0)
+        rows = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual([row['run_id'] for row in rows], [newer, older])
+        self.assertEqual((rows[0]['status'], rows[1]['status']), ('incomplete', 'unknown'))
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout):
+            self.assertEqual(main(['show', 'latest', '--runs-dir', str(self.root), '--json']), 0)
+        self.assertEqual(json.loads(stdout.getvalue())['run_id'], newer)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(main(['show', 'latest', '--runs-dir', str(self.root / 'empty')]), 1)
+        self.assertIn('no runs', stderr.getvalue())
+
+    def test_progress_and_session_endings_are_human_readable(self):
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            human_event({'event': 'session.progress', 'session': 1, 'elapsed_seconds': 125, 'native_events': 42})
+            human_event({'event': 'session.finished', 'agent_status': None, 'stop_reason': 'session_timeout'})
+        self.assertIn('2m05s elapsed, 42 native events', stderr.getvalue())
+        self.assertIn('Session ended: session_timeout', stderr.getvalue())
 
     def test_human_events_do_not_write_stdout(self):
         events=[dict(event='run.started',run_id='fixture',source='source',revision='HEAD',workspace='workspace',

@@ -53,6 +53,8 @@ def runtime_hint(detail):
 
 
 class Executor:
+    progress_interval = 60
+
     def __init__(self, spec, directory, *, errors=None):
         self.spec = spec
         self.directory = Path(directory)
@@ -109,7 +111,8 @@ class Executor:
         except ProcessLookupError:
             pass
 
-    def command(self, argv, stdout, stderr, timeout, *, stdin=None, env=None, maintenance=False, cwd=None):
+    def command(self, argv, stdout, stderr, timeout, *, stdin=None, env=None, maintenance=False, cwd=None,
+                progress=None):
         start = time.monotonic()
         reason = None
         process = None
@@ -127,10 +130,18 @@ class Executor:
                 expired = "run_duration_limit" if not maintenance and self.deadline <= phase_deadline else "timeout"
                 process = subprocess.Popen(argv, stdin=input_stream or subprocess.DEVNULL,
                                            stdout=out, stderr=err, env=env, cwd=cwd, start_new_session=True)
+                next_progress = start + self.progress_interval
                 while process.poll() is None:
                     reason = self._stop_reason(deadline, maintenance=maintenance, expired=expired)
                     if reason:
                         break
+                    if progress and time.monotonic() >= next_progress:
+                        next_progress += self.progress_interval
+                        try:
+                            progress(time.monotonic() - start)
+                        except (OSError, ValueError):
+                            # A failed progress record must never affect the supervised process.
+                            progress = None
                     time.sleep(0.025)
             finally:
                 if process:
@@ -273,7 +284,7 @@ class Container:
         self.executor = executor
         self.name = name
 
-    def execute(self, script, directory, label, timeout, *, credentials=False):
+    def execute(self, script, directory, label, timeout, *, credentials=False, progress=None):
         directory = Path(directory)
         argv = ["docker", "exec"]
         if credentials:
@@ -282,7 +293,7 @@ class Container:
                     argv += ["--env", name]
         argv += [self.name, "bash", "-ec", script]
         return self.executor.command(argv, directory / f"{label}.log",
-                                     directory / f"{label}.stderr.log", timeout)
+                                     directory / f"{label}.stderr.log", timeout, progress=progress)
 
     def setup(self, directory):
         script = ("mkdir -p \"$HOME\" /scratch; export -p > /tmp/agentmill-setup.env;\n" + self.executor.spec.setup +
@@ -290,7 +301,7 @@ class Container:
         result = self.execute(script, directory, "setup", self.executor.spec.setup_timeout)
         self.executor.require(result, "setup")
 
-    def session(self, command, directory):
+    def session(self, command, directory, progress=None):
         spec = self.executor.spec
         prefix = 'source /tmp/agentmill-setup.env; mkdir -p "$CODEX_HOME"; '
         if spec.agent == "codex" and spec.agent_config:
@@ -299,7 +310,8 @@ class Container:
         if spec.auth_file:
             prefix += 'cp /native/auth.json "$CODEX_HOME/auth.json"; '
         prefix += "exec " + shlex.join(command.argv) + " < " + shlex.quote(command.stdin)
-        result = self.execute(prefix, directory, "native", spec.session_timeout, credentials=True)
+        result = self.execute(prefix, directory, "native", spec.session_timeout, credentials=True,
+                              progress=progress)
         native = Path(directory) / "native.jsonl"
         result.stdout.rename(native)
         result.stdout = native
