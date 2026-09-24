@@ -3,3 +3,4 @@ ignored:
   - DL3015  # --no-install-recommends — we need full packages
   - DL3016  # pin npm versions — we want latest CLI tools
   - DL3059  # consecutive RUN — intentional for layer caching
+  - DL3066  # non-numeric USER — AgentMill always runs containers with an explicit --user UID:GID
