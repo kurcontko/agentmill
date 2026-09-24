@@ -145,7 +145,9 @@ class Executor:
                     input_stream.close()
         if self.cancelled and not maintenance:
             reason = "cancelled"
-        if reason and not maintenance:
+        # Run-ending interruptions start finalization; a phase timeout leaves that
+        # decision to its caller, which may continue with the remaining run budget.
+        if reason in ("cancelled", "run_duration_limit") and not maintenance:
             self.finalize()
         return ProcessOutput(process.returncode, stdout, stderr, time.monotonic() - start, reason)
 

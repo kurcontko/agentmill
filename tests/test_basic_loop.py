@@ -479,6 +479,16 @@ class BasicLoopTests(unittest.TestCase):
             self.assertNotEqual(outcome.latest_candidate_sha, outcome.base_revision)
             self.assert_child_stopped()
 
+    def test_both_adapters_continue_after_a_session_timeout(self):
+        self.set_mode('hang_once')
+        for backend in ('codex', 'claude'):
+            with self.subTest(backend=backend):
+                outcome = self.launch(backend, session_timeout=0.5)
+                self.assertEqual((outcome.status, outcome.sessions), ('checked_complete', 2), outcome.to_dict())
+                self.assertIn('(session_timeout)', ' '.join(outcome.errors))
+                self.assertIn('(session_timeout)', (self.run_dir / 'sessions/0002/prompt.txt').read_text())
+                self.assert_child_stopped()
+
     def test_total_duration_bounds_setup(self):
         outcome = self.launch(setup='sleep 10', setup_timeout=20, max_duration=1.5)
         self.assertEqual((outcome.status, outcome.stop_reason), ('incomplete', 'run_duration_limit'))

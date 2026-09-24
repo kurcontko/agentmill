@@ -16,10 +16,11 @@ from .workspace import Workspace
 
 
 RUN_ERRORS = (RunStopped, OSError, ValueError, KeyError)
-# A native session that ended without a valid reply. Its captured work can seed
-# one more session; a second consecutive failure (for example, bad credentials) stops.
-NATIVE_FAILURES = frozenset({
-    "session_failed", "invalid_native_output", "invalid_native_terminal",
+# A session that ended without a valid reply, including one that reached its own
+# time limit. Its captured work can seed one more session; a second consecutive
+# failure (for example, bad credentials or a hung CLI) stops the run.
+SESSION_FAILURES = frozenset({
+    "session_failed", "session_timeout", "invalid_native_output", "invalid_native_terminal",
     "output_after_native_terminal", "native_turn_failed", "multiple_native_turns",
     "invalid_agent_reply"})
 
@@ -27,7 +28,7 @@ NATIVE_FAILURES = frozenset({
 def run_session(spec, executor, workspace, records, outcome, command, directory, inputs):
     """Stop the worker before capture; preservation must not replace its failure.
 
-    Returns (reply, candidate, native_failure). A native failure is returned rather
+    Returns (reply, candidate, session_failure). A session failure is returned rather
     than raised only after its work was captured and recorded.
     """
     output = reply = primary = None
@@ -55,8 +56,8 @@ def run_session(spec, executor, workspace, records, outcome, command, directory,
                      agent_status=(outcome.agent_reply or {}).get("status"))
     except RUN_ERRORS as error:
         primary = preserve_failure(primary, error, outcome.errors, f"session record failed: {error}")
-    native = isinstance(primary, RunStopped) and primary.reason in NATIVE_FAILURES
-    if (primary and not native) or (reply and reply.status == "blocked"):
+    retryable = isinstance(primary, RunStopped) and primary.reason in SESSION_FAILURES
+    if (primary and not retryable) or (reply and reply.status == "blocked"):
         executor.finalize()
     try:
         if not executor.worker_stopped:
@@ -86,7 +87,7 @@ def run_session(spec, executor, workspace, records, outcome, command, directory,
             captured = True
         except RUN_ERRORS as error:
             primary = preserve_failure(primary, error, outcome.errors, f"candidate record failed: {error}")
-    if primary and not (native and captured):
+    if primary and not (retryable and captured):
         raise primary
     return reply, candidate, primary
 
@@ -197,14 +198,14 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
             command = adapter.build_command(SessionRequest(spec.model, spec.profile, bool(spec.agent_config)))
             atomic_json(directory / "command.json", asdict(command))
             records.emit("session.started", session=session, max_sessions=spec.max_sessions, logs=str(directory))
-            reply, candidate, native_failure = run_session(
+            reply, candidate, session_failure = run_session(
                 spec, executor, workspace, records, outcome, command, directory, inputs)
             if cancellation := executor.cancellation:
                 raise cancellation
-            if native_failure:
+            if session_failure:
                 if retried or session == spec.max_sessions:
-                    raise native_failure
-                retried = native_failure
+                    raise session_failure
+                retried = session_failure
                 outcome.errors.append(f"session {session} ended without a valid reply "
                                       f"({retried.reason}); its captured work seeds the next session")
                 executor.guard()

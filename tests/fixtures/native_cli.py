@@ -54,7 +54,7 @@ if mode == 'git_tamper':
 if mode == 'commit':
     subprocess.run(['git','add','value','new.txt'], check=True)
     subprocess.run(['git','commit','-qm','native commit'], check=True)
-if mode == 'hang':
+if mode == 'hang' or (mode == 'hang_once' and iteration == 1):
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     child = subprocess.Popen([sys.executable,'-c',
         'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(120)'])

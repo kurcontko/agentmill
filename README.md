@@ -102,10 +102,11 @@ changed candidate is unchecked, and its question is preserved. An unchanged
 candidate retains its historical check evidence; no new checks run for blocked
 work.
 
-A native session that exits with an error or ends without a valid reply still has
-its work captured. If sessions remain, that work is checked when it changed and
-seeds the next session, which is told the previous one failed. A second
-consecutive failure, or one in the final session, stops the run with that failure.
+A native session that exits with an error, ends without a valid reply, or reaches
+`--session-timeout` still has its work captured. If sessions remain, that work is
+checked when it changed and seeds the next session, which is told why the previous
+one ended. A second consecutive failure, or one in the final session, stops the run
+with that failure (exit 2 for a timeout, otherwise 1).
 A failed session can never complete a run. Missing executables, Docker or image
 problems, and setup/check infrastructure faults stop the run immediately.
 Check exits 126/127 mean unavailable commands; other nonzero exits are repair
