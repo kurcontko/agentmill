@@ -6,9 +6,11 @@ from ..contracts import AgentReply, Command, REPLY_SCHEMA, RunStopped
 
 class Claude:
     def build_command(self, request):
+        # Repository-declared MCP servers could start but never be used under these
+        # allowed tools; skip them rather than launch unexpected services.
         argv = ["claude", "-p", "--output-format", "stream-json", "--verbose",
                 "--json-schema", json.dumps(REPLY_SCHEMA), "--permission-mode", "dontAsk",
-                "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep"]
+                "--allowedTools", "Bash,Read,Edit,Write,Glob,Grep", "--strict-mcp-config"]
         if request.model:
             argv += ["--model", request.model]
         if request.agent_config:

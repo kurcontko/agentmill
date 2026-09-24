@@ -69,7 +69,12 @@ those files.
 **Docker is the execution isolation boundary.** Codex explicitly uses
 `--sandbox danger-full-access` and noninteractive approval policy inside that
 container: nested Codex namespace sandboxing is incompatible with the default
-Docker restrictions tested here. Claude uses `dontAsk` with coding-tool approvals.
+Docker restrictions tested here. Claude uses `dontAsk` with coding-tool approvals
+and `--strict-mcp-config`, so MCP servers declared by the repository are not
+started. The repository's own `.claude/` settings, hooks and `CLAUDE.md` still
+apply inside the worker, with the same container privileges as the agent's
+shell tool. Codex runs with a fresh `CODEX_HOME`; only an explicitly selected
+`--agent-config` or `--auth-file` is copied into it.
 No Docker socket is mounted into either worker or check containers.
 
 ## Captures and artifacts

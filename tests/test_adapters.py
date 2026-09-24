@@ -111,6 +111,8 @@ class AdapterTests(unittest.TestCase):
         self.assertIn('chosen-model',codex.argv)
         claude = get_adapter('claude').build_command(SessionRequest('chosen-model',None,True))
         self.assertIn('dontAsk',claude.argv)
+        self.assertIn('--strict-mcp-config',claude.argv)
+        self.assertNotIn('--mcp-config',claude.argv)
         self.assertIn('/native/config',claude.argv)
         for command in (codex,claude):
             self.assertEqual(command.stdin,'/inputs/prompt.txt')
