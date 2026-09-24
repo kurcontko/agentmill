@@ -3,6 +3,7 @@
 from dataclasses import asdict
 import json
 from pathlib import Path
+import shutil
 import signal
 import threading
 
@@ -145,6 +146,8 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
         path = getattr(spec, field)
         if path and not Path(path).is_file():
             raise ValueError(f"{field} must be a regular file")
+    if spec.check_dir and not Path(spec.check_dir).is_dir():
+        raise ValueError("check_dir must be a directory")
     records = Records(runs_dir, on_event)
     outcome = RunOutcome(records.run_id)
     outcome.artifacts = {"run_directory": str(records.directory),
@@ -167,6 +170,9 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
                      input_policy="Only the selected committed revision; source working files are not included.")
         # Fail on a missing image or unreachable Docker before cloning the source.
         outcome.environment = executor.inspect_image()
+        if spec.check_dir:
+            # Snapshot held-out checks once; only check containers mount this copy.
+            shutil.copytree(spec.check_dir, records.directory / "verifier", symlinks=True)
         workspace = Workspace(executor, records.directory)
         workspace.prepare(spec.source, spec.revision)
         atomic_json(records.directory / "spec.json", {**spec.to_dict(), "revision": workspace.base})

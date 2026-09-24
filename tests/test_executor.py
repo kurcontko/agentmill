@@ -188,6 +188,18 @@ class ExecutorTests(unittest.TestCase):
                 self.executor.require(ProcessOutput(1,self.root/'out',self.root/'err',0,reason),phase)
             self.assertEqual(caught.exception.exit_code,expected)
 
+    def test_held_out_checks_mount_only_into_check_containers(self):
+        spec = RunSpec(str(self.workspace), 'task', ('sh /checks/run.sh',), check_dir=str(self.root))
+        executor = Executor(spec, self.root)
+        with patch.object(executor, 'control', self.control), patch.object(executor, 'command', self.process):
+            with executor.container(self.workspace, inputs=self.inputs, worker=True):
+                pass
+            with executor.container(self.workspace):
+                pass
+        worker, check = [c for c in self.calls if c[1] == 'create']
+        self.assertFalse(any('/checks' in x for x in worker))
+        self.assertIn(f'type=bind,src={self.root / "verifier"},dst=/checks,readonly', check)
+
     def failing_control(self, stderr, returncode=1, stop_reason=None):
         def command(argv, stdout, stderr_path, timeout, **kwargs):
             stdout.parent.mkdir(parents=True, exist_ok=True)

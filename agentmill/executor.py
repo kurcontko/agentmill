@@ -221,6 +221,9 @@ class Executor:
                 *self.mount(workspace, "/workspace")]
         if inputs:
             argv += self.mount(inputs, "/inputs", True)
+        if not worker and self.spec.check_dir:
+            # Held-out checks: the run's snapshot, read-only, never in a worker container.
+            argv += self.mount(self.directory / "verifier", "/checks", True)
         if worker:
             for field, target in (("agent_config", "/native/config"), ("auth_file", "/native/auth.json")):
                 path = getattr(self.spec, field)

@@ -43,6 +43,8 @@ def parser():
     launch.add_argument("--credential-env", action="append", help="native environment variable NAME, never its value")
     launch.add_argument("--setup")
     launch.add_argument("--check", action="append", dest="checks")
+    launch.add_argument("--check-dir", help="held-out check files, mounted read-only at /checks "
+                        "in check containers only; the worker never receives them")
     launch.add_argument("--max-sessions", "--iterations", type=int, dest="max_sessions")
     launch.add_argument("--max-duration", type=duration)
     for phase in ("setup", "session", "check"):
@@ -150,7 +152,7 @@ def make_spec(args):
     values.setdefault("checks", [])
     if Path(values["source"]).expanduser().exists():
         values["source"] = str(Path(values["source"]).expanduser().resolve())
-    for name in ("agent_config", "auth_file"):
+    for name in ("agent_config", "auth_file", "check_dir"):
         if values.get(name):
             if not isinstance(values[name], str):
                 raise ValueError(f"{name} must be a file path string")

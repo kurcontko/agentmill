@@ -53,6 +53,7 @@ class RunSpec:
     credential_env: tuple[str, ...] | None = None
     agent_config: str | None = None
     auth_file: str | None = None
+    check_dir: str | None = None
 
     def __post_init__(self):
         for name in ("source", "task", "revision", "setup", "image"):
@@ -72,7 +73,7 @@ class RunSpec:
             value = getattr(self, name)
             if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be a positive finite duration in seconds")
-        for name in ("model", "profile", "agent_config", "auth_file"):
+        for name in ("model", "profile", "agent_config", "auth_file", "check_dir"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value or "\0" in value):
                 raise ValueError(f"{name} must be a nonempty string or null")

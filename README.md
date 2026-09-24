@@ -41,6 +41,17 @@ into the run directory. A local `MILL.md` is an optional fallback;
 `./mill init [repo]` creates it. At least one `--check` is required; repeat the flag for multiple
 commands. Setup defaults to `true`.
 
+Checks normally run the repository's own tests, which the agent can edit. To keep
+some checks out of the agent's reach, pass `--check-dir DIR`: AgentMill snapshots
+that directory at launch and mounts it read-only at `/checks` in check containers
+only. Workers never receive it, though they see the check commands and truncated
+check output.
+
+```bash
+./mill run /path/to/repo --agent claude --task-file task.md \
+  --check "uv run pytest -q" --check "uv run pytest -q /checks/acceptance"
+```
+
 Defaults are **three native sessions and 30 minutes total**. One session means
 one CLI invocation, not one model turn. `--max-sessions 1` lets a caller own any
 subsequent attempt. Use `--max-duration`, `--setup-timeout`, `--session-timeout`,
@@ -142,7 +153,10 @@ setup/check commands must not change tracked candidate files; ignored build
 products are allowed.
 
 Repository-owned tests may be edited by the agent. Passing them is useful
-evidence, not independent proof of every requirement. Containers have network
+evidence, not independent proof of every requirement. `--check-dir` keeps the
+agent from editing those checks, but candidate code still runs beside them in the
+check container and can read or interfere with them: protected checks raise
+confidence; they do not prove correctness. Containers have network
 access. Filename exclusions are not a secret scanner; logs and retained work
 may contain sensitive data. Time/session limits are not universal billing,
 CPU, memory, or disk quotas. Read the [isolation and authentication reference](docs/runner-reference.md).

@@ -423,6 +423,17 @@ class BasicLoopTests(unittest.TestCase):
                 self.launch(source=str(source))
         self.assertFalse((self.root / 'runs').exists())
 
+    def test_check_dir_is_snapshotted_for_checks_before_the_source_is_prepared(self):
+        self.set_mode('done')
+        held_out = self.root / 'held-out'
+        held_out.mkdir()
+        (held_out / 'check.sh').write_text('test "$(cat value)" = fixed\n')
+        outcome = self.launch(check_dir=str(held_out))
+        self.assertEqual(outcome.status, 'checked_complete', outcome.to_dict())
+        self.assertEqual((self.run_dir / 'verifier/check.sh').read_text(), 'test "$(cat value)" = fixed\n')
+        self.assertFalse((self.run_dir / 'workspace/check.sh').exists())
+        with self.assertRaisesRegex(ValueError, 'check_dir must be a directory'):
+            self.launch(check_dir=str(held_out / 'check.sh'))
 
     def test_checks_have_no_host_credentials_and_setup_runs_per_candidate(self):
         self.set_mode('done')

@@ -60,6 +60,10 @@ checkout, read-only session inputs, temporary scratch space, and selected native
 configuration/authentication. The supervisor's snapshot repository, outcome, and
 logs are not mounted. Checks use different containers with no native auth/config
 mounts or forwarded agent credentials. Custom images must not bake in credentials.
+With `--check-dir`, check containers also receive the launch-time snapshot of that
+directory (`verifier/` in the run directory) read-only at `/checks`; worker
+containers never do. Candidate code runs in the same check container and can read
+those files.
 
 **Docker is the execution isolation boundary.** Codex explicitly uses
 `--sandbox danger-full-access` and noninteractive approval policy inside that
@@ -81,6 +85,7 @@ r_<id>/
   outcome.json              # atomic, final once written
   workspace/                # retained working files, including unfinished work
   snapshots.git/            # supervisor-owned candidate history
+  verifier/                 # --check-dir snapshot, mounted only into checks
   baseline/                 # setup and baseline check evidence
   checks/                   # retained scratch checkouts
   sessions/0001/
