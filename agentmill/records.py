@@ -55,8 +55,10 @@ class Records:
         atomic_json(path, outcome.to_dict())
         self.emit("run.finished", status=outcome.status, stop_reason=outcome.stop_reason,
                   exit_code=outcome.exit_code, outcome=str(path),
+                  mode=outcome.mode, base_revision=outcome.base_revision,
                   latest_candidate_sha=outcome.latest_candidate_sha,
                   last_passing_candidate_sha=outcome.last_passing_candidate_sha,
+                  best_candidate_sha=outcome.best_candidate_sha, ledger=outcome.ledger,
                   candidate_check_status=outcome.candidate_check_status,
                   sessions=outcome.sessions, agent_reply=outcome.agent_reply,
                   artifacts=outcome.artifacts, errors=outcome.errors)

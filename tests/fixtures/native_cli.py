@@ -29,7 +29,7 @@ elif Path('expect-auth').exists():
         name = Path('expect-auth-name').read_text()
     assert os.environ.get(name) == Path('expect-auth').read_text()
 mode = Path('mode').read_text().strip()
-if mode not in ('blocked_unchanged', 'continue_unchanged'):
+if mode not in ('blocked_unchanged', 'continue_unchanged', 'done_unchanged'):
     count = Path('iteration')
     iteration = int(count.read_text()) + 1 if count.exists() else 1
     count.write_text(str(iteration))
@@ -43,6 +43,19 @@ if mode not in ('blocked_unchanged', 'continue_unchanged'):
         Path('value').write_text('fixed\n' if iteration == 2 else 'partial\n')
     elif mode == 'regress':
         Path('value').write_text('fixed\n' if iteration == 1 else 'broken\n')
+    elif mode == 'ledger':
+        # Pass check a, then trade it for b (a regression), then pass both.
+        assert 'Acceptance checks' in prompt
+        if iteration == 2:
+            assert '[passed] a:' in prompt
+        if iteration == 3:
+            assert 'Regressed in the latest candidate' in prompt and ': a.' in prompt
+        if iteration == 2:
+            Path('a').unlink()
+        else:
+            Path('a').write_text('ok\n')
+        if iteration >= 2:
+            Path('b').write_text('ok\n')
     else:
         Path('value').write_text('fixed\n')
 if mode == 'git_tamper':
@@ -69,7 +82,10 @@ if mode == 'deep_json':
 if mode == 'malformed':
     print('done')
     raise SystemExit(0)
-status = 'continue' if mode in ('continue', 'continue_unchanged', 'regress') else 'blocked' if mode in ('blocked', 'blocked_unchanged') else 'done'
+if mode == 'done_unchanged' and 'Session 1/' not in prompt:
+    # The session after a rejected no-op claim is told why it was rejected.
+    assert 'identical to the base revision' in prompt
+status = 'continue' if mode in ('continue', 'continue_unchanged', 'regress') or (mode == 'ledger' and iteration < 3) else 'blocked' if mode in ('blocked', 'blocked_unchanged') else 'done'
 reply = dict(status=status, summary='Changed value.', next_step=None,
              question='Need the API contract.' if status == 'blocked' else None)
 if mode == 'bad_schema':

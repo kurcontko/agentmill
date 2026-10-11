@@ -1,5 +1,6 @@
-"""One bounded repair loop. Native flags stay in adapters."""
+"""One bounded repair loop, and a verify-only run. Native flags stay in adapters."""
 
+from contextlib import contextmanager
 from dataclasses import asdict
 import json
 from pathlib import Path
@@ -11,6 +12,7 @@ from .adapters import get_adapter
 from .checks import check_candidate, feedback
 from .contracts import REPLY_SCHEMA, RunOutcome, RunSpec, RunStopped, SessionRequest, preserve_failure
 from .executor import Executor
+from .ledger import Ledger
 from .records import Records, atomic_json, runs_root
 from .workspace import Workspace
 
@@ -111,7 +113,8 @@ def finish_run(executor, workspace, records, outcome, failure):
     if workspace and workspace.base:
         try:
             executor.guard(maintenance=True)
-            outcome.artifacts.update(workspace.export(outcome.last_passing_candidate_sha))
+            outcome.artifacts.update(workspace.export(outcome.last_passing_candidate_sha,
+                                                      best=outcome.best_candidate_sha))
         except RUN_ERRORS as error:
             failure = preserve_failure(failure, RunStopped("artifact_export_failed"), outcome.errors,
                                        f"artifact export failed: {error}")
@@ -119,9 +122,25 @@ def finish_run(executor, workspace, records, outcome, failure):
     records.finish(outcome)
 
 
-def session_prompt(spec, outcome, baseline, previous, failure=None):
+def record_checks(spec, executor, workspace, records, outcome, ledger, revision, session=0):
+    """Check one candidate and enter the complete result set in the ledger."""
+    passed, results = check_candidate(spec, executor, workspace, records, outcome, revision, session)
+    grew = ledger.record(session, revision, results)
+    outcome.best_candidate_sha = ledger.best
+    outcome.ledger = ledger.summary()
+    return passed, results, grew
+
+
+UNCHANGED_CLAIM = ("That reply claimed done, but the candidate is identical to the base revision, which "
+                   "already passed every check. An unchanged candidate cannot complete this run: make the "
+                   "change the task asks for, or reply blocked if you believe none is needed.")
+
+
+def session_prompt(spec, outcome, ledger, baseline, previous, failure=None, unchanged_claim=False):
     if outcome.agent_reply:
         handoff = json.dumps(outcome.agent_reply)
+        if unchanged_claim:
+            handoff += "\n" + UNCHANGED_CLAIM
     elif failure:
         handoff = (f"The previous session ended without a valid reply ({failure.reason}). "
                    "Its file changes were kept in this workspace.")
@@ -133,14 +152,14 @@ def session_prompt(spec, outcome, baseline, previous, failure=None):
         "Return the required JSON reply: status done only when the task is complete, continue when "
         "more work remains, or blocked when outside input is required. Include a concise summary, "
         "next_step, and question (null when absent). Your claim is checked independently.\n\n"
-        f"Task:\n{spec.task}\n\nChecks:\n" + "\n".join(spec.checks) +
-        f"\n\nBaseline checks: {baseline}. A failing baseline can be repaired.\n"
+        f"Task:\n{spec.task}\n\nAcceptance checks (all must pass on the captured candidate; "
+        f"status is the latest candidate's):\n{ledger.render()}\n\nBaseline checks: {baseline}. A failing baseline can be repaired.\n"
         f"Session {outcome.sessions}/{spec.max_sessions}.\nPrevious reply:\n{handoff}\n\n"
         f"Latest check evidence (logs may be truncated):\n{feedback(previous)}\n"
     )
 
 
-def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
+def check_inputs(spec, runs_dir):
     source_path = Path(spec.source).expanduser()
     storage = Path(runs_dir) if runs_dir else runs_root()
     if source_path.is_dir():
@@ -160,90 +179,149 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
             raise ValueError(f"{field} must be a regular file")
     if spec.check_dir and not Path(spec.check_dir).is_dir():
         raise ValueError("check_dir must be a directory")
+
+
+@contextmanager
+def signals_cancel(executor):
+    previous_handlers = {}
+    if threading.current_thread() is threading.main_thread():
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous_handlers[sig] = signal.signal(sig, executor.cancel)
+    try:
+        yield
+    finally:
+        for sig, handler in previous_handlers.items():
+            signal.signal(sig, handler)
+
+
+def verify(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
+    """Check one committed revision in fresh containers. No agent runs."""
+    check_inputs(spec, runs_dir)
+    records = Records(runs_dir, on_event)
+    outcome = RunOutcome(records.run_id, mode="verify")
+    outcome.artifacts = {"run_directory": str(records.directory)}
+    executor = Executor(spec, records.directory, errors=outcome.errors)
+    ledger = Ledger(spec.checks, records.directory / "ledger.json")
+    failure = RunStopped("startup_failed")
+    with signals_cancel(executor):
+        try:
+            atomic_json(records.directory / "spec.json", spec.to_dict())
+            records.emit("verify.started", source=spec.source, revision=spec.revision,
+                         checks=[check.id for check in spec.checks],
+                         input_policy="Only the selected committed revision; source working files are not included.")
+            outcome.environment = executor.inspect_image()
+            if spec.check_dir:
+                shutil.copytree(spec.check_dir, records.directory / "verifier", symlinks=True)
+            workspace = Workspace(executor, records.directory)
+            outcome.base_revision = outcome.latest_candidate_sha = workspace.prepare(spec.source, spec.revision)
+            atomic_json(records.directory / "input.json", {"source": spec.source, "base_revision": workspace.base})
+            records.emit("candidate.captured", session=0, candidate_sha=workspace.base)
+            passed, _, _ = record_checks(spec, executor, workspace, records, outcome, ledger, workspace.base)
+            executor.guard()
+            failure = None if passed else RunStopped("checks_failed", 2)
+        except RUN_ERRORS as error:
+            failure = error
+        finally:
+            executor.finalize()
+            outcome.finish(failure, cancellation=executor.cancellation, success="checks_passed")
+            records.finish(outcome)
+    return outcome
+
+
+def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
+    check_inputs(spec, runs_dir)
     records = Records(runs_dir, on_event)
     outcome = RunOutcome(records.run_id)
     outcome.artifacts = {"run_directory": str(records.directory),
                          "workspace": str(records.directory / "workspace")}
     executor = Executor(spec, records.directory, errors=outcome.errors)
-    previous_handlers = {}
-    if threading.current_thread() is threading.main_thread():
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            previous_handlers[sig] = signal.signal(sig, executor.cancel)
+    ledger = Ledger(spec.checks, records.directory / "ledger.json")
     workspace = None
     failure = RunStopped("startup_failed")
-    try:
-        atomic_json(records.directory / "spec.json", spec.to_dict())
-        (records.directory / "task.txt").write_text(spec.task, encoding="utf-8")
-        records.emit("run.started", source=spec.source, revision=spec.revision,
-                     workspace=outcome.artifacts["workspace"], agent=spec.agent,
-                     max_sessions=spec.max_sessions, max_duration=spec.max_duration,
-                     setup_timeout=spec.setup_timeout, session_timeout=spec.session_timeout,
-                     check_timeout=spec.check_timeout,
-                     input_policy="Only the selected committed revision; source working files are not included.")
-        # Fail on a missing image or unreachable Docker before cloning the source.
-        outcome.environment = executor.inspect_image()
-        if spec.check_dir:
-            # Snapshot held-out checks once; only check containers mount this copy.
-            shutil.copytree(spec.check_dir, records.directory / "verifier", symlinks=True)
-        workspace = Workspace(executor, records.directory)
-        workspace.prepare(spec.source, spec.revision)
-        atomic_json(records.directory / "spec.json", {**spec.to_dict(), "revision": workspace.base})
-        # Record the resolved input once; never resolve a branch again during this run.
-        atomic_json(records.directory / "input.json", {"source": spec.source, "base_revision": workspace.base})
-        records.emit("candidate.captured", session=0, candidate_sha=workspace.base)
-        passed, previous = check_candidate(spec, executor, workspace, records, outcome, workspace.base)
-        baseline = "passed" if passed else "failed"
-        adapter = get_adapter(spec.agent)
-        retried = None
-        for session in range(1, spec.max_sessions + 1):
-            executor.guard()
-            outcome.sessions = session
-            directory = records.directory / "sessions" / f"{session:04d}"
-            inputs = directory / "inputs"
-            inputs.mkdir(parents=True)
-            prompt = session_prompt(spec, outcome, baseline, previous, retried)
-            outcome.agent_reply = None
-            (directory / "prompt.txt").write_text(prompt, encoding="utf-8")
-            (inputs / "prompt.txt").write_text(prompt, encoding="utf-8")
-            atomic_json(inputs / "reply.schema.json", REPLY_SCHEMA)
-            command = adapter.build_command(SessionRequest(spec.model, spec.profile, bool(spec.agent_config)))
-            atomic_json(directory / "command.json", asdict(command))
-            records.emit("session.started", session=session, max_sessions=spec.max_sessions, logs=str(directory))
-            reply, candidate, session_failure = run_session(
-                spec, executor, workspace, records, outcome, command, directory, inputs)
-            if cancellation := executor.cancellation:
-                raise cancellation
-            if session_failure:
-                if retried or session == spec.max_sessions:
-                    raise session_failure
-                retried = session_failure
-                outcome.errors.append(f"session {session} ended without a valid reply "
-                                      f"({retried.reason}); its captured work seeds the next session")
-                executor.guard()
-                # Check changed work for feedback and last-passing evidence; it cannot complete the run.
-                if not previous or previous[0]["candidate_sha"] != candidate:
-                    passed, previous = check_candidate(spec, executor, workspace, records, outcome,
-                                                       candidate, session)
-                continue
-            retried = None
-            if reply.status == "blocked":
-                raise RunStopped("agent_blocked", 3)
-            executor.guard()
-            passed, previous = check_candidate(spec, executor, workspace, records, outcome, candidate, session)
-            # Success is decided within the run budget; required exports may use
-            # the single finalization allowance after that decision.
-            executor.guard()
-            if reply.status == "done" and passed:
-                failure = None
-                break
-        else:
-            raise RunStopped("session_limit", 2)
-    except RUN_ERRORS as error:
-        failure = error
-    finally:
+    with signals_cancel(executor):
         try:
-            finish_run(executor, workspace, records, outcome, failure)
+            atomic_json(records.directory / "spec.json", spec.to_dict())
+            (records.directory / "task.txt").write_text(spec.task, encoding="utf-8")
+            records.emit("run.started", source=spec.source, revision=spec.revision,
+                         workspace=outcome.artifacts["workspace"], agent=spec.agent,
+                         max_sessions=spec.max_sessions, max_duration=spec.max_duration,
+                         setup_timeout=spec.setup_timeout, session_timeout=spec.session_timeout,
+                         check_timeout=spec.check_timeout,
+                         input_policy="Only the selected committed revision; source working files are not included.")
+            # Fail on a missing image or unreachable Docker before cloning the source.
+            outcome.environment = executor.inspect_image()
+            if spec.check_dir:
+                # Snapshot held-out checks once; only check containers mount this copy.
+                shutil.copytree(spec.check_dir, records.directory / "verifier", symlinks=True)
+            workspace = Workspace(executor, records.directory)
+            workspace.prepare(spec.source, spec.revision)
+            atomic_json(records.directory / "spec.json", {**spec.to_dict(), "revision": workspace.base})
+            # Record the resolved input once; never resolve a branch again during this run.
+            atomic_json(records.directory / "input.json", {"source": spec.source, "base_revision": workspace.base})
+            records.emit("candidate.captured", session=0, candidate_sha=workspace.base)
+            passed, previous, _ = record_checks(spec, executor, workspace, records, outcome, ledger, workspace.base)
+            baseline = "passed" if passed else "failed"
+            if passed:
+                outcome.errors.append("every check already passes at the base revision, so the checks cannot "
+                                      "show that the task was done; add a check that fails before the change")
+            adapter = get_adapter(spec.agent)
+            retried = None
+            stalled = 0
+            unchanged_claim = False
+            for session in range(1, spec.max_sessions + 1):
+                executor.guard()
+                outcome.sessions = session
+                directory = records.directory / "sessions" / f"{session:04d}"
+                inputs = directory / "inputs"
+                inputs.mkdir(parents=True)
+                prompt = session_prompt(spec, outcome, ledger, baseline, previous, retried, unchanged_claim)
+                outcome.agent_reply = None
+                (directory / "prompt.txt").write_text(prompt, encoding="utf-8")
+                (inputs / "prompt.txt").write_text(prompt, encoding="utf-8")
+                atomic_json(inputs / "reply.schema.json", REPLY_SCHEMA)
+                command = adapter.build_command(SessionRequest(spec.model, spec.profile, bool(spec.agent_config)))
+                atomic_json(directory / "command.json", asdict(command))
+                records.emit("session.started", session=session, max_sessions=spec.max_sessions, logs=str(directory))
+                reply, candidate, session_failure = run_session(
+                    spec, executor, workspace, records, outcome, command, directory, inputs)
+                if cancellation := executor.cancellation:
+                    raise cancellation
+                grew = unchanged_claim = False
+                if session_failure:
+                    if retried or session == spec.max_sessions:
+                        raise session_failure
+                    retried = session_failure
+                    outcome.errors.append(f"session {session} ended without a valid reply "
+                                          f"({retried.reason}); its captured work seeds the next session")
+                    executor.guard()
+                    # Check changed work for feedback and last-passing evidence; it cannot complete the run.
+                    if not previous or previous[0]["candidate_sha"] != candidate:
+                        passed, previous, grew = record_checks(spec, executor, workspace, records, outcome,
+                                                               ledger, candidate, session)
+                else:
+                    retried = None
+                    if reply.status == "blocked":
+                        raise RunStopped("agent_blocked", 3)
+                    executor.guard()
+                    passed, previous, grew = record_checks(spec, executor, workspace, records, outcome,
+                                                           ledger, candidate, session)
+                    # Success is decided within the run budget; required exports may use
+                    # the single finalization allowance after that decision.
+                    executor.guard()
+                    # Checks that already passed at the base cannot certify an unchanged candidate.
+                    unchanged_claim = (reply.status == "done" and passed
+                                       and workspace.same_tree(candidate, workspace.base))
+                    if reply.status == "done" and passed and not unchanged_claim:
+                        failure = None
+                        break
+                stalled = 0 if grew else stalled + 1
+                if spec.stall_sessions and stalled >= spec.stall_sessions and session < spec.max_sessions:
+                    outcome.errors.append(f"no new check passed in {stalled} consecutive sessions")
+                    raise RunStopped("stalled", 2)
+            else:
+                raise RunStopped("unchanged_candidate" if unchanged_claim else "session_limit", 2)
+        except RUN_ERRORS as error:
+            failure = error
         finally:
-            for sig, handler in previous_handlers.items():
-                signal.signal(sig, handler)
+            finish_run(executor, workspace, records, outcome, failure)
     return outcome

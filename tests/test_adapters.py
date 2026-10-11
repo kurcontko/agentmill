@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from agentmill.adapters import get_adapter
-from agentmill.contracts import AgentReply, ProcessOutput, RunSpec, RunStopped, SessionRequest
+from agentmill.contracts import AgentReply, Check, ProcessOutput, RunSpec, RunStopped, SessionRequest
 
 REPLY = {'status':'done','summary':'Finished','next_step':None,'question':None}
 
@@ -129,7 +129,16 @@ class AdapterTests(unittest.TestCase):
                 RunSpec(**{**base,**values})
         spec = RunSpec(**{**base,'credential_env':['TOKEN','TOKEN']})
         self.assertEqual(spec.credential_env,('TOKEN',))
-        self.assertEqual(spec.checks,('true',))
+        self.assertEqual(spec.checks,(Check('check-1','true'),))
+        named = RunSpec(**{**base,'checks':['true',{'id':'login','run':'pytest','describe':'logs in'}]})
+        self.assertEqual([c.id for c in named.checks],['check-1','login'])
+        for checks in ([{'run':'true','extra':1}], [{'id':'a b','run':'true'}], [{'id':'x'}],
+                       [{'id':'same','run':'a'},{'id':'same','run':'b'}]):
+            with self.subTest(checks=checks), self.assertRaises(ValueError):
+                RunSpec(**{**base,'checks':checks})
+        for stall in (0, True, 1.5):
+            with self.subTest(stall=stall), self.assertRaises(ValueError):
+                RunSpec(**{**base,'stall_sessions':stall})
 
 
 if __name__=='__main__':

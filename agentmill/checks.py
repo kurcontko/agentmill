@@ -21,10 +21,11 @@ def check_candidate(spec, executor, workspace, records, outcome, revision, sessi
             container.setup(directory)
             if not workspace.unchanged(revision, checkout):
                 raise RunStopped("check_setup_changed_candidate")
-            for number, command in enumerate(spec.checks, 1):
-                output = container.check(command, directory, number)
+            for number, item in enumerate(spec.checks, 1):
+                output = container.check(item.run, directory, number)
                 result = {
-                    "candidate_sha": revision, "session": session, "command": command,
+                    "candidate_sha": revision, "session": session, "check_id": item.id,
+                    "command": item.run,
                     "status": "error" if output.stop_reason or output.returncode in (126, 127)
                     else ("passed" if output.returncode == 0 else "failed"),
                     "returncode": output.returncode, "stop_reason": output.stop_reason,
@@ -70,7 +71,7 @@ def feedback(results, limit=12000):
     """Keep complete logs on disk, but bound the next prompt's check evidence."""
     parts = []
     for result in results:
-        parts.append(f"Command: {result['command']}\nStatus: {result['status']} (exit {result['returncode']})")
+        parts.append(f"Check: {result.get('check_id', '')}\nCommand: {result['command']}\nStatus: {result['status']} (exit {result['returncode']})")
         for key in ("stdout", "stderr"):
             path = Path(result[key])
             if path.exists():

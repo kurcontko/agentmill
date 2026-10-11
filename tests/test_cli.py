@@ -14,8 +14,8 @@ import time
 import unittest
 from unittest.mock import patch
 
-from agentmill.cli import duration, human_event, main, make_spec, parser
-from agentmill.contracts import RunOutcome
+from agentmill.cli import duration, human_event, human_result, main, make_spec, parser
+from agentmill.contracts import Check, RunOutcome
 from agentmill.records import atomic_json
 
 
@@ -35,8 +35,46 @@ class CliTests(unittest.TestCase):
                                    '--check','true','--max-duration','2m'])
         value = make_spec(args)
         self.assertEqual((value.task,value.agent,value.checks,value.max_sessions,value.max_duration),
-                         ('from file','codex',('true',),5,120))
+                         ('from file','codex',(Check('check-1','true'),),5,120))
         self.assertEqual(duration('1h'),3600)
+
+    def test_toml_job_file_names_checks_and_reads_durations(self):
+        job = self.root / 'job.toml'
+        job.write_text(f'source = "{self.root}"\ntask = "Build auth."\nmax_duration = "8h"\n'
+                       'max_sessions = 40\nstall_sessions = 3\n'
+                       '[[checks]]\nid = "login"\nrun = "pytest tests/test_login.py"\ndescribe = "logs in"\n'
+                       '[[checks]]\nrun = "pytest -q"\n')
+        value = make_spec(parser().parse_args(['run', '--spec', str(job)]))
+        self.assertEqual(value.checks, (Check('login', 'pytest tests/test_login.py', 'logs in'),
+                                        Check('check-2', 'pytest -q')))
+        self.assertEqual((value.max_duration, value.max_sessions, value.stall_sessions), (28800, 40, 3))
+        value = make_spec(parser().parse_args(['run', '--spec', str(job), '--stall-sessions', '5']))
+        self.assertEqual(value.stall_sessions, 5)
+        for text in ('max_duration = "soon"\n', 'task = \n'):
+            job.write_text(text)
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                make_spec(parser().parse_args(['run', '--spec', str(job)]))
+
+    def test_summaries_show_the_ledger_best_patch_and_verify_results(self):
+        directory = self.root / ('r_' + 'e' * 16)
+        directory.mkdir()
+        best = directory / 'best.patch'
+        best.write_text('best')
+        ledger = {'total': 2, 'best_candidate_sha': 'b' * 40, 'best_passed': ['a'],
+                  'latest': {'a': 'failed', 'b': 'passed'}, 'regressed': ['a'], 'first_passed_session': {}}
+        value = dict(RunOutcome(directory.name, status='incomplete', stop_reason='stalled', exit_code=2,
+                                latest_candidate_sha='c' * 40, best_candidate_sha='b' * 40, ledger=ledger,
+                                artifacts={'best_patch': str(best)}).to_dict())
+        text = human_result(value, directory)
+        self.assertIn('Checks: 1/2 pass on the last checked candidate (not passing: a); '
+                      'best candidate bbbbbbbbbbbb passes 1/2; regressed: a', text)
+        self.assertIn(f'Best patch (latest candidate lost a check): {best}', text)
+        value.update(mode='verify', base_revision='d' * 40, candidate_check_status='failed',
+                     ledger={**ledger, 'best_candidate_sha': 'd' * 40, 'regressed': []})
+        text = human_result(value, directory)
+        self.assertIn('Revision: dddddddddddd (checks failed)', text)
+        self.assertIn('Checks: 1/2 pass (not passing: a)', text)
+        self.assertNotIn('patch', text.lower())
 
     def test_optional_mission_and_explicit_native_files(self):
         (self.root / 'MILL.md').write_text('local optional task')
