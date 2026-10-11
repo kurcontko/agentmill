@@ -157,14 +157,33 @@ its command, and says that its result reaches the next session.
 The best candidate is the latest one whose passing set includes every check the
 previous best passed. The baseline is the first best. A candidate that passes a
 check the best one failed, but loses another, is a regression rather than
-progress. `outcome.json` reports `best_candidate_sha` and a `ledger` summary
-(`total`, `best_passed`, `latest`, `regressed`, `first_passed_session`). When the
+progress.
+
+A check in a job file may add `progress`, a pattern with one group that captures a
+number in the check's standard output; the last match counts and higher is better:
+
+```toml
+[[checks]]
+id = "speed"
+run = "python bench.py"            # prints "speedup: 3154.2x", fails below 5000
+progress = 'speedup: ([\d.]+)x'
+```
+
+The ledger records the number for each candidate (`values` in each history entry
+and in the summary, `best_values` for the best candidate), and the prompt shows the
+latest and the highest seen. When two candidates pass the same checks, the newer
+one becomes the best only if none of the best candidate's numbers fell or went
+missing. Use it for a check that stays red while its result improves: a benchmark
+threshold, or `'(\d+) passed'` for one check that runs a whole suite.
+ `outcome.json` reports `best_candidate_sha` and a `ledger` summary
+(`total`, `best_passed`, `latest`, `regressed`, `first_passed_session`, `values`,
+`best_values`). When the
 best and latest candidates differ, export adds `best.patch` and the
 `agentmill-best` ref.
 
 `--stall-sessions N` (or `stall_sessions` in a job file) stops the run with
 `stalled` (exit 2) after N consecutive sessions in which the best passing set did
-not grow. A session that fails without a valid reply counts as one of them. The
+not grow and no `progress` number rose above its highest value so far. A session that fails without a valid reply counts as one of them. The
 final session ends with `session_limit` instead. Stall detection is off by default.
 
 A candidate whose tree is identical to the base revision cannot complete a run,

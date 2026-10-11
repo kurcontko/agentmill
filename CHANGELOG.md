@@ -35,7 +35,10 @@ First public release: one checked, bounded run of `codex exec` or `claude -p`.
   regressed.
 - The prompt omits the command of a held-out check, which the worker cannot run.
 - `--stall-sessions N` stops a run (`stalled`, exit 2) after N sessions with no
-  newly passing check.
+  newly passing check and no rise in a check's `progress` number.
+- A check may name a number in its output with `progress`. The ledger records it,
+  the prompt shows it, and it breaks ties between candidates that pass the same
+  checks.
 - A `done` claim on a candidate identical to the base cannot complete a run
   (`unchanged_candidate`, exit 2); runs note when every check passes at baseline.
 - `agentmill verify` runs the checks on one committed revision without an agent.

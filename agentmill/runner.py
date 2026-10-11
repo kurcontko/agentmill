@@ -316,7 +316,7 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
                         break
                 stalled = 0 if grew else stalled + 1
                 if spec.stall_sessions and stalled >= spec.stall_sessions and session < spec.max_sessions:
-                    outcome.errors.append(f"no new check passed in {stalled} consecutive sessions")
+                    outcome.errors.append(f"no new check passed and no measured number rose in {stalled} consecutive sessions")
                     raise RunStopped("stalled", 2)
             else:
                 raise RunStopped("unchanged_candidate" if unchanged_claim else "session_limit", 2)

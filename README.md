@@ -114,7 +114,7 @@ has the exact rules.
 - `--max-sessions`, `--max-duration`, `--setup-timeout`, `--session-timeout`,
   `--check-timeout`. Durations accept seconds or `s`, `m`, `h`.
 - `--stall-sessions N` stops the run after N consecutive sessions in which no new
-  check passes (off by default).
+  check passes and no check's `progress` number rises (off by default).
 - `--json` streams AgentMill events as JSONL; `--spec job.toml` (or JSON) takes all
   fields from a file.
 
@@ -143,6 +143,7 @@ run = "uv run pytest -q /checks/test_logout.py"   # held out with --check-dir
 [[checks]]
 id = "suite"
 run = "uv run pytest -q"
+progress = '(\d+) passed'   # optional: a rising number counts as progress while the check fails
 ```
 
 ```bash
