@@ -40,10 +40,35 @@ def preserve_failure(primary, error, diagnostics, message=None):
 
 
 @dataclass(frozen=True)
+class Check:
+    """One acceptance check. Its ID names the item in the run's ledger."""
+    id: str
+    run: str
+    describe: str | None = None
+
+    @classmethod
+    def coerce(cls, value, number):
+        if isinstance(value, cls):
+            return value
+        if isinstance(value, str):
+            value = {"run": value}
+        if not isinstance(value, dict) or not set(value) <= {"id", "run", "describe"}:
+            raise ValueError("each check is a command string or a table with id, run and describe")
+        check = cls(value.get("id", f"check-{number}"), value.get("run"), value.get("describe"))
+        if not isinstance(check.run, str) or not check.run.strip() or "\0" in check.run:
+            raise ValueError("checks must be nonempty command strings")
+        if not isinstance(check.id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", check.id):
+            raise ValueError("check id must be 1-64 letters, digits, '.', '_' or '-'")
+        if check.describe is not None and (not isinstance(check.describe, str) or "\0" in check.describe):
+            raise ValueError("check describe must be a string")
+        return check
+
+
+@dataclass(frozen=True)
 class RunSpec:
     source: str
     task: str
-    checks: tuple[str, ...]
+    checks: tuple[Check, ...]
     revision: str = "HEAD"
     agent: str = "codex"
     model: str | None = None
@@ -59,6 +84,7 @@ class RunSpec:
     agent_config: str | None = None
     auth_file: str | None = None
     check_dir: str | None = None
+    stall_sessions: int | None = None
 
     def __post_init__(self):
         for name in ("source", "task", "revision", "setup", "image"):
@@ -69,11 +95,14 @@ class RunSpec:
             raise ValueError("agent must be codex or claude")
         if not isinstance(self.checks, (list, tuple)) or not self.checks:
             raise ValueError("at least one check is required")
-        if any(not isinstance(c, str) or not c.strip() or "\0" in c for c in self.checks):
-            raise ValueError("checks must be nonempty command strings")
-        object.__setattr__(self, "checks", tuple(self.checks))
+        checks = tuple(Check.coerce(check, number) for number, check in enumerate(self.checks, 1))
+        if len({check.id for check in checks}) != len(checks):
+            raise ValueError("check ids must be unique")
+        object.__setattr__(self, "checks", checks)
         if type(self.max_sessions) is not int or self.max_sessions < 1:
             raise ValueError("max_sessions must be a positive integer")
+        if self.stall_sessions is not None and (type(self.stall_sessions) is not int or self.stall_sessions < 1):
+            raise ValueError("stall_sessions must be a positive integer or null")
         for name in ("max_duration", "setup_timeout", "session_timeout", "check_timeout"):
             value = getattr(self, name)
             if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
@@ -156,19 +185,22 @@ class RunOutcome:
     base_revision: str | None = None
     latest_candidate_sha: str | None = None
     last_passing_candidate_sha: str | None = None
+    best_candidate_sha: str | None = None
     candidate_check_status: str = "unchecked"
+    ledger: dict = field(default_factory=dict)
     agent_reply: dict | None = None
     sessions: int = 0
     checks: list[dict] = field(default_factory=list)
     artifacts: dict = field(default_factory=dict)
     environment: dict = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    mode: str = "run"
     schema_version: int = 1
 
-    def finish(self, failure=None, *, cancellation=None):
+    def finish(self, failure=None, *, cancellation=None, success="checked_complete"):
         """Construct the terminal result once, after required preservation work."""
         if failure is None:
-            reason, code = "checked_complete", 0
+            reason, code = success, 0
         elif isinstance(failure, RunStopped):
             reason, code = failure.reason, failure.exit_code
         else:

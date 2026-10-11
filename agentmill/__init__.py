@@ -2,7 +2,7 @@
 
 __version__ = "0.1.0"
 
-from .contracts import RunOutcome, RunSpec
-from .runner import run
+from .contracts import Check, RunOutcome, RunSpec
+from .runner import run, verify
 
-__all__ = ["RunSpec", "RunOutcome", "run"]
+__all__ = ["Check", "RunSpec", "RunOutcome", "run", "verify"]

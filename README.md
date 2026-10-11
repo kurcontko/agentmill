@@ -39,6 +39,10 @@ Diff: agentmill diff r_3ad7c03c9b33412d
   incomplete, blocked and failed. The latest and last-passing versions are both
   kept, and crashed or timed-out sessions keep their captured work.
 - **Held-out checks.** `--check-dir` gives checks files the agent never receives.
+- **Long jobs keep their best result.** Each check is an item in a ledger the
+  agent cannot edit. AgentMill keeps the candidate that passes the most checks
+  without losing one, tells the agent what regressed, and can stop a run that has
+  stalled.
 
 Loops that re-run an agent until it prints a completion promise trust the agent
 and run on your host. Sandboxes isolate an agent but don't decide whether the task
@@ -79,14 +83,15 @@ takes the same flags.
    (default 30m). After each session: stop the container, capture the changes, run
    the checks on that snapshot in a fresh container, and feed the results into the
    next session.
-4. Stop on `done` with all checks passing, a `blocked` reply, a limit, or a
-   failure, then export `result.patch` and `result.bundle`.
+4. Stop on `done` with all checks passing, a `blocked` reply, a limit, a stall,
+   or a failure, then export `result.patch` and `result.bundle` (plus `best.patch`
+   when the latest candidate lost a check that an earlier one passed).
 
 | Exit | Meaning |
 | --- | --- |
 | 0 | Checked completion |
 | 1 | Execution, Docker/image, setup/check infrastructure, protocol, capture, or artifact failure |
-| 2 | Incomplete at a session count, session timeout, or total time limit |
+| 2 | Incomplete: a session, time or stall limit, or an unchanged candidate claimed done |
 | 3 | Blocked; the agent needs outside input (its question is in the summary) |
 | 130 / 143 | Cancelled by SIGINT / SIGTERM |
 
@@ -108,8 +113,61 @@ has the exact rules.
   `/checks` in check containers only.
 - `--max-sessions`, `--max-duration`, `--setup-timeout`, `--session-timeout`,
   `--check-timeout`. Durations accept seconds or `s`, `m`, `h`.
-- `--json` streams AgentMill events as JSONL; `--spec run.json` takes all fields
-  from a file.
+- `--stall-sessions N` stops the run after N consecutive sessions in which no new
+  check passes (off by default).
+- `--json` streams AgentMill events as JSONL; `--spec job.toml` (or JSON) takes all
+  fields from a file.
+
+## Long-running jobs
+
+Describe what "done" means as named checks in a job file, and give the run a
+larger budget:
+
+```toml
+# job.toml
+task = "Add session auth to the API. See MILL.md for the design."
+setup = "uv sync --frozen"
+max_sessions = 40
+max_duration = "8h"
+stall_sessions = 3
+
+[[checks]]
+id = "login"
+run = "uv run pytest tests/acceptance/test_login.py"
+describe = "POST /login returns a session token"
+
+[[checks]]
+id = "logout"
+run = "uv run pytest -q /checks/test_logout.py"   # held out with --check-dir
+
+[[checks]]
+id = "suite"
+run = "uv run pytest -q"
+```
+
+```bash
+agentmill run . --agent claude --spec job.toml --check-dir ./acceptance
+```
+
+Every session sees the status of each check and what regressed. `ledger.json` in
+the run records which checks each candidate passed. The best candidate passes the
+most checks without losing any that the previous best passed. If a later session
+breaks it, `agentmill diff latest --best` prints its patch. Checks that already
+pass before the agent starts cannot show that the task was done: add at least one
+that fails first. An unchanged candidate never completes a run.
+
+## Verify a revision
+
+`agentmill verify` runs checks on one committed revision, the same way a run
+checks a candidate, with no agent:
+
+```bash
+agentmill verify . --revision my-branch --spec job.toml --check-dir ./acceptance
+agentmill verify /path/to/result.bundle --revision agentmill-best --check "uv run pytest -q"
+```
+
+It exits 0 when every check passes and 2 when any fails, and reports each check's
+result. Use it on work from another agent, a human, or an earlier run.
 
 `agentmill run --help` lists everything. Authentication options, native
 configuration files, the JSON event vocabulary, retained records and the

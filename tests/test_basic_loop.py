@@ -140,7 +140,7 @@ class BasicLoopTests(unittest.TestCase):
                 self.assertEqual((imported / 'value').read_text(), 'fixed\n')
                 self.assertEqual((imported / 'new.txt').read_text(), 'new file\n')
                 self.assertEqual((imported / 'binary.dat').read_bytes(), b'\x00\xff\x01')
-                subprocess.run(['bash', '-ec', self.spec.checks[0]], cwd=imported, check=True)
+                subprocess.run(['bash', '-ec', self.spec.checks[0].run], cwd=imported, check=True)
                 for excluded in ('.env', 'ignored.tmp', 'staged', 'untracked'):
                     self.assertFalse((imported / excluded).exists())
                 subprocess.run(['git', '-C', str(imported), 'checkout', '-q', outcome.base_revision], check=True)
@@ -248,8 +248,8 @@ class BasicLoopTests(unittest.TestCase):
     def test_cancellation_during_export_keeps_evidence_and_signal_exit(self):
         self.set_mode('done')
         export = Workspace.export
-        def cancel_after_export(workspace, passing):
-            artifacts = export(workspace, passing)
+        def cancel_after_export(workspace, passing, **kwargs):
+            artifacts = export(workspace, passing, **kwargs)
             workspace.executor.cancel(signal.SIGTERM)
             return artifacts
         with patch.object(Workspace, 'export', cancel_after_export):
@@ -298,9 +298,9 @@ class BasicLoopTests(unittest.TestCase):
     def test_success_decided_in_budget_can_export_during_finalization(self):
         self.set_mode('done')
         export = Workspace.export
-        def after_deadline(workspace, passing):
+        def after_deadline(workspace, passing, **kwargs):
             workspace.executor.deadline = 0
-            return export(workspace, passing)
+            return export(workspace, passing, **kwargs)
         with patch.object(Workspace, 'export', after_deadline):
             outcome = self.launch()
         self.assertEqual(outcome.status, 'checked_complete')
@@ -560,6 +560,111 @@ class BasicLoopTests(unittest.TestCase):
         records.finish(outcome)
         with self.assertRaises(RuntimeError):
             records.finish(outcome)
+
+    LEDGER_CHECKS = ({'id': 'a', 'run': 'test -f a'}, {'id': 'b', 'run': 'test -f b', 'describe': 'b exists'})
+
+    def test_both_adapters_keep_the_best_candidate_through_a_regression(self):
+        self.set_mode('ledger')
+        for backend in ('codex', 'claude'):
+            with self.subTest(backend=backend):
+                outcome = self.launch(backend, checks=self.LEDGER_CHECKS, max_sessions=2, stall_sessions=1)
+                self.assertEqual((outcome.stop_reason, outcome.exit_code), ('session_limit', 2))
+                ledger = json.loads((self.run_dir / 'ledger.json').read_text())
+                self.assertEqual([h['passed'] for h in ledger['history']], [[], ['a'], ['b']])
+                self.assertEqual(ledger['history'][-1]['regressed'], ['a'])
+                self.assertEqual(outcome.ledger['best_passed'], ['a'])
+                self.assertEqual(outcome.ledger['latest'], {'a': 'failed', 'b': 'passed'})
+                self.assertEqual(outcome.best_candidate_sha, ledger['history'][1]['candidate_sha'])
+                self.assertNotEqual(outcome.best_candidate_sha, outcome.latest_candidate_sha)
+                self.assertIn('diff --git a/a b/a', Path(outcome.artifacts['best_patch']).read_text())
+                self.assertNotIn('diff --git a/a b/a', Path(outcome.artifacts['patch']).read_text())
+                imported = self.root / f'best-{backend}'
+                subprocess.run(['git', 'clone', '-q', '-b', 'agentmill-best', outcome.artifacts['bundle'],
+                                str(imported)], check=True)
+                self.assertTrue((imported / 'a').is_file())
+                self.assertEqual([c['check_id'] for c in outcome.checks], ['a', 'b'] * 3)
+
+                outcome = self.launch(backend, checks=self.LEDGER_CHECKS, max_sessions=3)
+                self.assertEqual(outcome.status, 'checked_complete')
+                self.assertEqual(outcome.best_candidate_sha, outcome.latest_candidate_sha)
+                self.assertEqual(outcome.ledger['first_passed_session'], {'a': 1, 'b': 2})
+                self.assertNotIn('best_patch', outcome.artifacts)
+
+    def test_stalled_sessions_stop_before_the_session_limit(self):
+        self.set_mode('ledger')
+        outcome = self.launch(checks=self.LEDGER_CHECKS, max_sessions=3, stall_sessions=1)
+        self.assertEqual((outcome.stop_reason, outcome.exit_code, outcome.sessions), ('stalled', 2, 2))
+        self.assertEqual(outcome.ledger['best_passed'], ['a'])
+        self.assertTrue(Path(outcome.artifacts['best_patch']).is_file())
+        self.set_mode('continue_unchanged')
+        outcome = self.launch(checks=('false',), max_sessions=4, stall_sessions=2)
+        self.assertEqual((outcome.stop_reason, outcome.exit_code, outcome.sessions), ('stalled', 2, 2))
+        self.assertIn('no new check passed in 2 consecutive sessions', outcome.errors)
+
+    def test_both_adapters_reject_an_unchanged_done_claim_when_the_baseline_passes(self):
+        self.set_mode('done_unchanged')
+        for backend in ('codex', 'claude'):
+            with self.subTest(backend=backend):
+                outcome = self.launch(backend, checks=('true',))
+                self.assertEqual((outcome.stop_reason, outcome.exit_code, outcome.sessions),
+                                 ('unchanged_candidate', 2, 2))
+                self.assertEqual(outcome.latest_candidate_sha, outcome.base_revision)
+                self.assertIn('every check already passes at the base revision', ' '.join(outcome.errors))
+                self.assertIn('identical to the base revision',
+                              (self.run_dir / 'sessions/0002/prompt.txt').read_text())
+
+    def test_verify_checks_one_revision_without_an_agent(self):
+        from agentmill import verify
+        checks = ({'id': 'value', 'run': 'test "$(cat value)" = fixed'}, {'id': 'mode', 'run': 'test -f mode'})
+        spec = replace(self.spec, checks=checks)
+        events = []
+        outcome = verify(spec, events.append, runs_dir=self.root / 'runs')
+        run_dir = Path(outcome.artifacts['run_directory'])
+        self.assertEqual((outcome.status, outcome.stop_reason, outcome.exit_code, outcome.mode),
+                         ('incomplete', 'checks_failed', 2, 'verify'))
+        self.assertEqual(outcome.ledger['latest'], {'value': 'failed', 'mode': 'passed'})
+        self.assertEqual((outcome.sessions, outcome.base_revision), (0, self.base))
+        self.assertFalse((run_dir / 'sessions').exists())
+        self.assertEqual([e['event'] for e in events][0], 'verify.started')
+        self.assertEqual(json.loads((run_dir / 'outcome.json').read_text()), outcome.to_dict())
+
+        (self.repo / 'value').write_text('fixed\n')
+        self.git('commit', '-qam', 'fix value')
+        outcome = verify(spec, runs_dir=self.root / 'runs')
+        self.assertEqual((outcome.status, outcome.stop_reason, outcome.exit_code),
+                         ('checked_complete', 'checks_passed', 0))
+        self.assertEqual(outcome.last_passing_candidate_sha, self.git('rev-parse', 'HEAD'))
+        outcome = verify(replace(spec, revision=self.base), runs_dir=self.root / 'runs')
+        self.assertEqual(outcome.exit_code, 2)
+
+    def test_verify_command_uses_only_check_fields_from_a_job_file(self):
+        import contextlib
+        import io
+        from agentmill.cli import main
+        (self.repo / 'value').write_text('fixed\n')
+        self.git('commit', '-qam', 'fix value')
+        job = self.root / 'job.toml'
+        job.write_text('task = "not used"\nagent = "claude"\nmax_sessions = 9\ncheck_timeout = "1m"\n'
+                       '[[checks]]\nid = "value"\nrun = \'test "$(cat value)" = fixed\'\n')
+        stdout = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(io.StringIO()):
+            code = main(['verify', str(self.repo), '--spec', str(job), '--runs-dir', str(self.root / 'runs'),
+                         '--json'])
+        self.assertEqual(code, 0)
+        events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        self.assertEqual(events[0]['checks'], ['value'])
+        self.assertEqual(events[-1]['stop_reason'], 'checks_passed')
+        spec = json.loads((Path(events[-1]['outcome']).parent / 'spec.json').read_text())
+        self.assertEqual((spec['agent'], spec['max_sessions'], spec['check_timeout']), ('codex', 3, 60))
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            code = main(['verify', str(self.repo), '--check', 'true', '--check', 'false',
+                         '--runs-dir', str(self.root / 'runs')])
+        self.assertEqual(code, 2)
+        text = stderr.getvalue()
+        self.assertIn('Result: incomplete (checks_failed)', text)
+        self.assertIn('Checks: 1/2 pass (not passing: check-2)', text)
+        self.assertNotIn('patch', text.lower())
 
 
 if __name__ == '__main__':

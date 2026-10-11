@@ -28,6 +28,16 @@ First public release: one checked, bounded run of `codex exec` or `claude -p`.
 - Runtime image with Node 24, Claude Code 2.1.281 and Codex 0.156.1, published as
   `ghcr.io/kurcontko/agentmill:<version>`.
 - Threat model in `SECURITY.md`.
+- Named checks and TOML job files (`--spec job.toml`, durations like `"8h"`).
+  `ledger.json` records which checks each candidate passed. The best candidate
+  (most checks passed without losing one) is kept as `agentmill-best` and
+  `best.patch` when the latest candidate regresses; sessions are told what
+  regressed.
+- `--stall-sessions N` stops a run (`stalled`, exit 2) after N sessions with no
+  newly passing check.
+- A `done` claim on a candidate identical to the base cannot complete a run
+  (`unchanged_candidate`, exit 2); runs note when every check passes at baseline.
+- `agentmill verify` runs the checks on one committed revision without an agent.
 
 ### Changed
 

@@ -91,6 +91,7 @@ r_<id>/
   task.txt
   events.jsonl
   outcome.json              # atomic, final once written
+  ledger.json               # per-check results for each checked candidate
   workspace/                # retained working files, including unfinished work
   snapshots.git/            # supervisor-owned candidate history
   verifier/                 # --check-dir snapshot, mounted only into checks
@@ -109,6 +110,7 @@ r_<id>/
   operations/               # Git and Docker diagnostics
   artifacts/
     result.patch
+    best.patch              # only when the latest candidate lost a check
     result.bundle
 ```
 
@@ -126,7 +128,7 @@ failed, it does not contain uncaptured workspace changes; the outcome reports
 that failure. Partial exports are not advertised as completed artifacts.
 The self-contained bundle includes
 `agentmill-base`, `agentmill-candidate`, and, when available, `agentmill-passing`
-refs; its `HEAD` identifies the latest candidate, so it can be the source of a new
+and `agentmill-best` refs; its `HEAD` identifies the latest candidate, so it can be the source of a new
 run. It carries reachable history rather than requiring an external base commit.
 Bundle creation shares the single 30-second finalization allowance with cleanup
 and capture. Large repositories can exceed it; required export failure is reported
@@ -139,11 +141,53 @@ user or ADE actions. For example, inspect a result in another directory:
 git clone -b agentmill-candidate /path/to/result.bundle /tmp/review-result
 ```
 
+## Acceptance ledger
+
+Each check has an ID: `check-1`, `check-2`, ... for `--check` commands, or the `id`
+given in a job file. After every complete check set, the supervisor records each
+check's status (`passed`, `failed`, `error`, or `not_run`) for that candidate in
+`ledger.json`, beside the run's other supervisor-owned records. The worker never
+receives the file. Its prompt shows a rendered copy: each check's latest status,
+how many checks the best candidate passes, and which checks regressed.
+
+The best candidate is the latest one whose passing set includes every check the
+previous best passed. The baseline is the first best. A candidate that passes a
+check the best one failed, but loses another, is a regression rather than
+progress. `outcome.json` reports `best_candidate_sha` and a `ledger` summary
+(`total`, `best_passed`, `latest`, `regressed`, `first_passed_session`). When the
+best and latest candidates differ, export adds `best.patch` and the
+`agentmill-best` ref.
+
+`--stall-sessions N` (or `stall_sessions` in a job file) stops the run with
+`stalled` (exit 2) after N consecutive sessions in which the best passing set did
+not grow. A session that fails without a valid reply counts as one of them. The
+final session ends with `session_limit` instead. Stall detection is off by default.
+
+A candidate whose tree is identical to the base revision cannot complete a run,
+even when its reply is `done` and every check passes: those checks already passed
+before the agent started. The next session is told why. If the final session makes
+the same claim, the run stops with `unchanged_candidate` (exit 2). When every check
+passes at baseline, the outcome also notes that the checks cannot show the task
+was done.
+
+## Verifying a revision
+
+`agentmill verify [source] --revision REV --check CMD ...` prepares the committed
+revision exactly like a run's input and checks it once, in fresh check
+containers with no agent credentials and with `--check-dir` if given. No worker
+container starts. It writes a normal run directory with `mode: "verify"` in the
+outcome. Exit 0 (`checks_passed`) means every check passed. Exit 2
+(`checks_failed`) means at least one check failed; the ledger names which. Exit 1
+means verification could not complete. `--spec` reads only `source`, `revision`,
+`checks`, `check_dir`, `setup`, `image` and the duration fields from a job file.
+To verify a run's result, pass its `result.bundle` with `--revision
+agentmill-candidate` or `agentmill-best`.
+
 ## Completion, failures and deadlines
 
 `checked_complete` requires a successful native terminal envelope, a validated
 `done` claim, and every configured check passing on the latest captured
-candidate. Required cleanup, capture, and export must also succeed. An earlier
+candidate, which must differ from the base revision's tree. Required cleanup, capture, and export must also succeed. An earlier
 passing revision never establishes completion of newer work.
 
 A failing baseline can be repaired. Ordinary failing checks become feedback for
@@ -223,8 +267,10 @@ products are allowed.
 ./mill run --spec run.json --json
 ```
 
-`--spec` accepts exactly the `RunSpec` fields; explicit CLI flags override it.
-JSON durations are numbers of seconds. Paths are relative to the calling working
+`--spec` accepts exactly the `RunSpec` fields, as TOML (a `.toml` file) or JSON;
+explicit CLI flags override it. Durations are numbers of seconds or strings such
+as `"45m"` and `"8h"`. Each check is a command string or a table with `run` and
+optional `id` and `describe`. Paths are relative to the calling working
 directory. Example:
 
 ```json
@@ -242,10 +288,11 @@ directory. Example:
 
 JSON mode writes only AgentMill JSONL events to stdout. Diagnostics go to stderr;
 native output stays in session files. Events carry `schema_version`, `run_id`,
-`seq`, and a UTC timestamp. The vocabulary is `run.started`, `session.started`,
+`seq`, and a UTC timestamp. The vocabulary is `run.started` (or `verify.started`), `session.started`,
 `session.progress` (about once a minute: `elapsed_seconds` and `native_events`),
 `session.finished`, `candidate.captured`, `check.finished`, and `run.finished`.
 Session/check events identify the session; baseline checks use session 0.
+`check.finished` also carries the check's `check_id`.
 `outcome.json` is authoritative, even if the consumer missed the final event.
 It identifies the latest captured and last passing revisions independently.
 `candidate_check_status` describes the latest check attempt on the captured

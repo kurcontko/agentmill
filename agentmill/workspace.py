@@ -130,7 +130,11 @@ class Workspace:
                            worktree=path, index=index)
         return not changes.strip()
 
-    def export(self, passing):
+    def same_tree(self, first, second):
+        trees = self.git("rev-parse", first + "^{tree}", second + "^{tree}").decode().split()
+        return trees[0] == trees[1]
+
+    def export(self, passing, *, best=None):
         artifacts = self.directory / "artifacts"
         artifacts.mkdir(exist_ok=True)
         patch = artifacts / "result.patch"
@@ -142,6 +146,15 @@ class Workspace:
         if passing:
             self.git("update-ref", "refs/heads/agentmill-passing", passing, maintenance=True)
             refs.append("refs/heads/agentmill-passing")
+        exported = {"patch": str(patch)}
+        if best and best != self.latest:
+            # The latest candidate lost a check the best one passed; keep both.
+            best_patch = artifacts / "best.patch"
+            best_patch.write_bytes(self.git("diff", "--binary", "--full-index", "--no-ext-diff", "--no-textconv",
+                                            self.base, best, "--", maintenance=True))
+            self.git("update-ref", "refs/heads/agentmill-best", best, maintenance=True)
+            refs.append("refs/heads/agentmill-best")
+            exported["best_patch"] = str(best_patch)
         bundle = artifacts / "result.bundle"
         self.git("bundle", "create", bundle, *refs, maintenance=True)
-        return {"patch": str(patch), "bundle": str(bundle)}
+        return {**exported, "bundle": str(bundle)}
