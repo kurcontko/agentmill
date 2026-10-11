@@ -201,7 +201,7 @@ def verify(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
     outcome = RunOutcome(records.run_id, mode="verify")
     outcome.artifacts = {"run_directory": str(records.directory)}
     executor = Executor(spec, records.directory, errors=outcome.errors)
-    ledger = Ledger(spec.checks, records.directory / "ledger.json")
+    ledger = Ledger(spec.checks, records.directory / "ledger.json", bool(spec.check_dir))
     failure = RunStopped("startup_failed")
     with signals_cancel(executor):
         try:
@@ -235,7 +235,7 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
     outcome.artifacts = {"run_directory": str(records.directory),
                          "workspace": str(records.directory / "workspace")}
     executor = Executor(spec, records.directory, errors=outcome.errors)
-    ledger = Ledger(spec.checks, records.directory / "ledger.json")
+    ledger = Ledger(spec.checks, records.directory / "ledger.json", bool(spec.check_dir))
     workspace = None
     failure = RunStopped("startup_failed")
     with signals_cancel(executor):
@@ -316,7 +316,7 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
                         break
                 stalled = 0 if grew else stalled + 1
                 if spec.stall_sessions and stalled >= spec.stall_sessions and session < spec.max_sessions:
-                    outcome.errors.append(f"no new check passed in {stalled} consecutive sessions")
+                    outcome.errors.append(f"no new check passed and no measured number rose in {stalled} consecutive sessions")
                     raise RunStopped("stalled", 2)
             else:
                 raise RunStopped("unchanged_candidate" if unchanged_claim else "session_limit", 2)

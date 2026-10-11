@@ -19,7 +19,8 @@ from unittest.mock import patch
 
 from agentmill import RunSpec, run
 from agentmill.executor import Executor
-from agentmill.contracts import RunStopped
+from agentmill.contracts import Check, RunStopped
+from agentmill.ledger import Ledger
 from agentmill.records import Records, atomic_json
 from agentmill.workspace import Workspace
 
@@ -437,6 +438,18 @@ class BasicLoopTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'check_dir must be a directory'):
             self.launch(check_dir=str(held_out / 'check.sh'))
 
+    def test_prompt_hides_the_command_of_a_held_out_check_only(self):
+        checks = (Check('unit', 'pytest -q tests'), Check('acceptance', 'pytest -q /checks/test_accept.py'))
+        shown = Ledger(checks, self.root / 'ledger.json', held_out=True).render()
+        self.assertIn('- [unchecked] unit: pytest -q tests', shown)
+        self.assertIn('- [unchecked] acceptance: held out; runs after your session', shown)
+        self.assertNotIn('test_accept.py', shown)
+        self.assertIn('do not reply blocked', shown)
+        # Without a check directory, /checks is an ordinary path the worker may have.
+        plain = Ledger(checks, self.root / 'ledger.json').render()
+        self.assertIn('pytest -q /checks/test_accept.py', plain)
+        self.assertNotIn('Held-out', plain)
+
     def test_checks_have_no_host_credentials_and_setup_runs_per_candidate(self):
         self.set_mode('done')
         with patch.dict(os.environ, {'CODEX_API_KEY': 'fixture-only', 'ANTHROPIC_API_KEY': 'fixture-only'}):
@@ -599,7 +612,56 @@ class BasicLoopTests(unittest.TestCase):
         self.set_mode('continue_unchanged')
         outcome = self.launch(checks=('false',), max_sessions=4, stall_sessions=2)
         self.assertEqual((outcome.stop_reason, outcome.exit_code, outcome.sessions), ('stalled', 2, 2))
-        self.assertIn('no new check passed in 2 consecutive sessions', outcome.errors)
+        self.assertIn('no new check passed and no measured number rose in 2 consecutive sessions', outcome.errors)
+
+    def test_a_rising_measured_number_is_progress_for_the_stall_rule(self):
+        self.set_mode('continue_unchanged')
+        counter = self.root / 'counter'
+        # Fails every time, but reports one more than the time before.
+        rising = (f'n=$(cat "{counter}" 2>/dev/null || echo 0); echo $((n + 1)) > "{counter}"; '
+                  'echo "speedup: $n.5x"; false')
+        outcome = self.launch(checks=({'id': 'speed', 'run': rising, 'progress': r'speedup: ([\d.]+)x'},),
+                              max_sessions=4, stall_sessions=2)
+        self.assertEqual((outcome.stop_reason, outcome.sessions), ('session_limit', 4))
+        self.assertEqual(outcome.ledger['values'], {'speed': 4.5})
+        self.assertEqual(outcome.ledger['best_values'], {'speed': 4.5})
+        self.assertEqual(outcome.best_candidate_sha, outcome.latest_candidate_sha)
+        self.assertIn('(measured 3.5, best so far 3.5)', (self.run_dir / 'sessions/0004/prompt.txt').read_text())
+        outcome = self.launch(checks=({'id': 'speed', 'run': 'echo "speedup: 7x"; false',
+                                       'progress': r'speedup: ([\d.]+)x'},), max_sessions=4, stall_sessions=2)
+        self.assertEqual((outcome.stop_reason, outcome.sessions), ('stalled', 2))
+
+    def test_best_candidate_keeps_the_higher_measured_number_on_a_tie(self):
+        checks = (Check('unit', 'true'), Check('speed', 'bench', None, r'speedup: ([\d.]+)x'))
+        ledger = Ledger(checks, self.root / 'ledger.json')
+
+        def record(session, speedup):
+            output = self.root / f'speed-{session}.log'
+            output.write_text(f'warmup speedup: 1x\nspeedup: {speedup}x\n')
+            return ledger.record(session, f'candidate-{session}', [
+                {'status': 'passed', 'stdout': str(self.root / 'absent.log')},
+                {'status': 'failed', 'stdout': str(output)}])
+
+        self.assertEqual([record(n, value) for n, value in enumerate((10, 1500, 3100, 3000, 3050, 3200))],
+                         [True, True, True, False, False, True])
+        self.assertEqual((ledger.best, ledger.best_values), ('candidate-5', {'speed': 3200.0}))
+        self.assertFalse(record(6, 2900))
+        self.assertEqual((ledger.best, ledger.values), ('candidate-5', {'speed': 2900.0}))
+        self.assertIn('- [failed] speed: bench (measured 2900, best so far 3200)', ledger.render())
+        self.assertEqual(json.loads((self.root / 'ledger.json').read_text())['history'][-1]['values'],
+                         {'speed': 2900.0})
+        # Output without the number is not a rise, and does not displace a measured best on a tie.
+        self.assertFalse(ledger.record(7, 'candidate-7', [
+            {'status': 'passed', 'stdout': str(self.root / 'absent.log')},
+            {'status': 'failed', 'stdout': str(self.root / 'absent.log')}]))
+        self.assertEqual((ledger.best, ledger.best_values), ('candidate-5', {'speed': 3200.0}))
+
+    def test_check_progress_must_be_a_pattern_with_one_group(self):
+        for pattern in ('speedup', r'(\d+) of (\d+)', '(', 7):
+            with self.subTest(pattern=pattern), self.assertRaisesRegex(ValueError, 'exactly one group'):
+                replace(self.spec, checks=({'run': 'true', 'progress': pattern},))
+        spec = replace(self.spec, checks=({'run': 'true', 'progress': r'(\d+) passed'},))
+        self.assertEqual(spec.to_dict()['checks'][0]['progress'], r'(\d+) passed')
 
     def test_both_adapters_reject_an_unchanged_done_claim_when_the_baseline_passes(self):
         self.set_mode('done_unchanged')

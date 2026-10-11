@@ -45,6 +45,8 @@ class Check:
     id: str
     run: str
     describe: str | None = None
+    # A pattern whose one group captures a number in the check's stdout; higher is better.
+    progress: str | None = None
 
     @classmethod
     def coerce(cls, value, number):
@@ -52,15 +54,23 @@ class Check:
             return value
         if isinstance(value, str):
             value = {"run": value}
-        if not isinstance(value, dict) or not set(value) <= {"id", "run", "describe"}:
-            raise ValueError("each check is a command string or a table with id, run and describe")
-        check = cls(value.get("id", f"check-{number}"), value.get("run"), value.get("describe"))
+        if not isinstance(value, dict) or not set(value) <= {"id", "run", "describe", "progress"}:
+            raise ValueError("each check is a command string or a table with id, run, describe and progress")
+        check = cls(value.get("id", f"check-{number}"), value.get("run"), value.get("describe"),
+                    value.get("progress"))
         if not isinstance(check.run, str) or not check.run.strip() or "\0" in check.run:
             raise ValueError("checks must be nonempty command strings")
         if not isinstance(check.id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", check.id):
             raise ValueError("check id must be 1-64 letters, digits, '.', '_' or '-'")
         if check.describe is not None and (not isinstance(check.describe, str) or "\0" in check.describe):
             raise ValueError("check describe must be a string")
+        if check.progress is not None:
+            try:
+                groups = re.compile(check.progress).groups if isinstance(check.progress, str) else 0
+            except re.error:
+                groups = 0
+            if groups != 1:
+                raise ValueError("check progress must be a pattern with exactly one group")
         return check
 
 
