@@ -150,6 +150,10 @@ check's status (`passed`, `failed`, `error`, or `not_run`) for that candidate in
 receives the file. Its prompt shows a rendered copy: each check's latest status,
 how many checks the best candidate passes, and which checks regressed.
 
+With `--check-dir`, a check whose command reads `/checks` is held out: the worker
+cannot run it. The prompt shows such a check's ID, status and description, but not
+its command, and says that its result reaches the next session.
+
 The best candidate is the latest one whose passing set includes every check the
 previous best passed. The baseline is the first best. A candidate that passes a
 check the best one failed, but loses another, is a regression rather than

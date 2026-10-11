@@ -9,8 +9,10 @@ from .records import atomic_json
 
 
 class Ledger:
-    def __init__(self, checks, path):
+    def __init__(self, checks, path, held_out=False):
         self.checks = checks
+        # With a check directory, a check that reads /checks cannot be run by the worker.
+        self.hidden = frozenset(check.id for check in checks if held_out and "/checks" in check.run)
         self.path = path
         self.best = None
         self.best_passed = frozenset()
@@ -53,12 +55,17 @@ class Ledger:
         lines = []
         for check in self.checks:
             status = self.latest.get(check.id, "unchecked")
-            text = f"- [{status}] {check.id}: {check.run}"
+            # Showing a command the worker cannot run invites it to try, fail and reply blocked.
+            command = "held out; runs after your session" if check.id in self.hidden else check.run
+            text = f"- [{status}] {check.id}: {command}"
             if check.describe:
                 text += f" -- {check.describe}"
             lines.append(text)
         if self.best is not None:
             lines.append(f"Best candidate so far passes {len(self.best_passed)}/{len(self.checks)} checks.")
+        if self.hidden:
+            lines.append("Held-out checks use files you cannot see. Do not try to run them, and do not reply "
+                         "blocked because they are unavailable; their results reach the next session.")
         if self.regressed:
             lines.append("Regressed in the latest candidate (passed before, fail now): "
                          + ", ".join(self.regressed) + ". Restore them before new work.")

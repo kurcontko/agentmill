@@ -33,6 +33,7 @@ First public release: one checked, bounded run of `codex exec` or `claude -p`.
   (most checks passed without losing one) is kept as `agentmill-best` and
   `best.patch` when the latest candidate regresses; sessions are told what
   regressed.
+- The prompt omits the command of a held-out check, which the worker cannot run.
 - `--stall-sessions N` stops a run (`stalled`, exit 2) after N sessions with no
   newly passing check.
 - A `done` claim on a candidate identical to the base cannot complete a run

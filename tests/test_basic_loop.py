@@ -19,7 +19,8 @@ from unittest.mock import patch
 
 from agentmill import RunSpec, run
 from agentmill.executor import Executor
-from agentmill.contracts import RunStopped
+from agentmill.contracts import Check, RunStopped
+from agentmill.ledger import Ledger
 from agentmill.records import Records, atomic_json
 from agentmill.workspace import Workspace
 
@@ -436,6 +437,18 @@ class BasicLoopTests(unittest.TestCase):
         self.assertFalse((self.run_dir / 'workspace/check.sh').exists())
         with self.assertRaisesRegex(ValueError, 'check_dir must be a directory'):
             self.launch(check_dir=str(held_out / 'check.sh'))
+
+    def test_prompt_hides_the_command_of_a_held_out_check_only(self):
+        checks = (Check('unit', 'pytest -q tests'), Check('acceptance', 'pytest -q /checks/test_accept.py'))
+        shown = Ledger(checks, self.root / 'ledger.json', held_out=True).render()
+        self.assertIn('- [unchecked] unit: pytest -q tests', shown)
+        self.assertIn('- [unchecked] acceptance: held out; runs after your session', shown)
+        self.assertNotIn('test_accept.py', shown)
+        self.assertIn('do not reply blocked', shown)
+        # Without a check directory, /checks is an ordinary path the worker may have.
+        plain = Ledger(checks, self.root / 'ledger.json').render()
+        self.assertIn('pytest -q /checks/test_accept.py', plain)
+        self.assertNotIn('Held-out', plain)
 
     def test_checks_have_no_host_credentials_and_setup_runs_per_candidate(self):
         self.set_mode('done')

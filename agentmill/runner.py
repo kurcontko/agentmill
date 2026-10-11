@@ -201,7 +201,7 @@ def verify(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
     outcome = RunOutcome(records.run_id, mode="verify")
     outcome.artifacts = {"run_directory": str(records.directory)}
     executor = Executor(spec, records.directory, errors=outcome.errors)
-    ledger = Ledger(spec.checks, records.directory / "ledger.json")
+    ledger = Ledger(spec.checks, records.directory / "ledger.json", bool(spec.check_dir))
     failure = RunStopped("startup_failed")
     with signals_cancel(executor):
         try:
@@ -235,7 +235,7 @@ def run(spec: RunSpec, on_event=None, *, runs_dir=None) -> RunOutcome:
     outcome.artifacts = {"run_directory": str(records.directory),
                          "workspace": str(records.directory / "workspace")}
     executor = Executor(spec, records.directory, errors=outcome.errors)
-    ledger = Ledger(spec.checks, records.directory / "ledger.json")
+    ledger = Ledger(spec.checks, records.directory / "ledger.json", bool(spec.check_dir))
     workspace = None
     failure = RunStopped("startup_failed")
     with signals_cancel(executor):
